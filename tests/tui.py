@@ -136,11 +136,17 @@ check("cancelled tool has a result", "tool" in roles and any("interrupted" in (x
 send("\x03")
 read_until("again to quit", 2)
 send("\x03")
-try:
-    _, status = os.waitpid(pid, 0)
-    check("double ctrl-c exits 0", os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, status)
-except ChildProcessError:
-    check("double ctrl-c exits", False)
+status = None
+for _ in range(100):
+    p, st = os.waitpid(pid, os.WNOHANG)
+    if p:
+        status = st
+        break
+    time.sleep(0.05)
+if status is None:
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+check("double ctrl-c exits 0", status is not None and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, status)
 while True:
     try:
         r, _, _ = select.select([fd], [], [], 0.2)

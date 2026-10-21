@@ -126,7 +126,8 @@ const Editor = struct {
 
     fn byte(self: *Editor) ?u8 {
         if (self.in_i == self.in_n) {
-            _ = http.wait(sys.stdin, -1) catch {};
+            // A Ctrl-C pressed just as a turn ended arrives as SIGINT: treat it as the key.
+            _ = http.wait(sys.stdin, -1) catch return 3;
             const n = sys.read(sys.stdin, self.in) catch 0;
             if (n == 0) return null;
             self.in_n = n;

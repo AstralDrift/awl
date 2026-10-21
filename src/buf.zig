@@ -17,6 +17,8 @@ pub const Buf = struct {
         const rc = linux.mmap(null, self.cap, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .NORESERVE = true }, -1, 0);
         if (linux.errno(rc) != .SUCCESS) @panic("mmap");
         self.base = @ptrFromInt(rc);
+        // With THP "always" the first touch of a large region would fault in a whole 2 MB page.
+        _ = linux.madvise(self.base.?, self.cap, linux.MADV.NOHUGEPAGE);
     }
 
     pub fn items(self: *const Buf) []u8 {

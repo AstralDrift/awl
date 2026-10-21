@@ -115,11 +115,16 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
     if (prompt) |p| {
         agent.user(p);
-        return switch (agent.run()) {
+        const rc: u8 = switch (agent.run()) {
             .done => 0,
             .cancelled => 130,
             else => 1,
         };
+        if (sys.getenv("AWL_RSS") != null) { // budget probe: peak RSS of this process
+            var b: [48]u8 = undefined;
+            sys.writeAll(sys.stderr, std.fmt.bufPrint(&b, "peak_rss_kb {d}\n", .{sys.peakRssKb()}) catch "") catch {};
+        }
+        return rc;
     }
     return tui.repl();
 }
