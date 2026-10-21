@@ -10,6 +10,7 @@ pub const Url = struct {
     ip: [4]u8 = .{ 127, 0, 0, 1 },
     port: u16 = 80,
     host: []const u8 = "127.0.0.1",
+    prefix: []const u8 = "", // path before /v1, e.g. "/run/7" behind a proxy
 };
 
 pub const Error = error{ BadUrl, Connect, Http, Closed, Cancel } || sys.Error;
@@ -17,8 +18,13 @@ pub const Error = error{ BadUrl, Connect, Http, Closed, Cancel } || sys.Error;
 pub fn parseUrl(s0: []const u8) Error!Url {
     var s = s0;
     if (std.mem.startsWith(u8, s, "http://")) s = s[7..] else if (std.mem.indexOf(u8, s, "://") != null) return error.BadUrl;
-    if (std.mem.indexOfScalar(u8, s, '/')) |i| s = s[0..i];
-    var u = Url{ .host = s };
+    var prefix: []const u8 = "";
+    if (std.mem.indexOfScalar(u8, s, '/')) |i| {
+        prefix = std.mem.trimEnd(u8, s[i..], "/");
+        if (std.mem.endsWith(u8, prefix, "/v1")) prefix = prefix[0 .. prefix.len - 3];
+        s = s[0..i];
+    }
+    var u = Url{ .host = s, .prefix = prefix };
     var host = s;
     if (std.mem.lastIndexOfScalar(u8, s, ':')) |i| {
         u.port = std.fmt.parseInt(u16, s[i + 1 ..], 10) catch return error.BadUrl;
@@ -69,7 +75,7 @@ pub fn send(fd: sys.fd_t, u: Url, method: []const u8, path: []const u8, key: ?[]
     var hb: [1024]u8 = undefined;
     var auth_b: [600]u8 = undefined;
     const auth = if (key) |k| std.fmt.bufPrint(&auth_b, "Authorization: Bearer {s}\r\n", .{k}) catch "" else "";
-    const head = std.fmt.bufPrint(&hb, "{s} {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: awl\r\nAccept: text/event-stream\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n{s}\r\n", .{ method, path, u.host, total, auth }) catch return error.Http;
+    const head = std.fmt.bufPrint(&hb, "{s} {s}{s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: awl\r\nAccept: text/event-stream\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n{s}\r\n", .{ method, u.prefix, path, u.host, total, auth }) catch return error.Http;
     try sys.writeAll(fd, head);
     for (body) |b| try sys.writeAll(fd, b);
 }
@@ -200,5 +206,7 @@ test "parseUrl" {
     try std.testing.expectEqual(@as(u16, 12434), u.port);
     try std.testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &u.ip);
     try std.testing.expectEqualStrings("127.0.0.1:12434", u.host);
+    try std.testing.expectEqualStrings("", u.prefix);
+    try std.testing.expectEqualStrings("/run/7", (try parseUrl("http://localhost:9/run/7/v1/")).prefix);
     try std.testing.expectError(error.BadUrl, parseUrl("https://x"));
 }

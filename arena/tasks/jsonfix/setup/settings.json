@@ -1,0 +1,7 @@
+{
+  "name": "awl",
+  "retries": 3,
+  "hosts": ["a.local", "b.local",],
+  "debug": false,
+  "timeout_ms": 2500,
+}

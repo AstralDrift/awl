@@ -1,0 +1,1 @@
+sum.c prints the wrong totals. It should print 31 and 8. Fix sum() in sum.c. Build with: cc -o sum sum.c

@@ -1,0 +1,1 @@
+count.sh should print 5 but fails on file names with spaces. Fix count.sh.

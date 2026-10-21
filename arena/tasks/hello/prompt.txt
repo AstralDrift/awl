@@ -1,0 +1,1 @@
+Write hello.c that prints "hello, omarchy" and a newline. Compile it with cc, run it, and save its output to out.txt.
