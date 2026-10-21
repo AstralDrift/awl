@@ -9,7 +9,14 @@ per request goes to OUT/<id>.jsonl: bytes sent, prompt/completion/cached
 tokens, tool calls in the reply, model time and HTTP status.
 
 Usage: proxy.py --upstream http://127.0.0.1:12434 --out DIR [--port 0]
+       proxy.py --upstream https://openrouter.ai/api --key-file F --model M --ctx N [--provider P]
 Prints the bound port on stdout.
+
+Hosted upstreams (--key-file or OPENROUTER_API_KEY): the proxy speaks HTTPS, swaps in
+the real key, answers /v1/models itself (just --model, max_model_len = --ctx), drops
+reasoning_effort/reasoning/include_reasoning so every harness gets the model's default
+(--keep-reasoning-params to keep them), pins --provider, and retries 429/502/503
+before any byte reaches the harness, so rate limits never count against one harness.
 """
 import http.client
 import json
@@ -20,11 +27,25 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-opt = {"--upstream": "http://127.0.0.1:12434", "--out": "arena/results/proxy", "--port": "0"}
+opt = {"--upstream": "http://127.0.0.1:12434", "--out": "arena/results/proxy", "--port": "0",
+       "--key-file": "", "--model": "", "--ctx": "0", "--provider": ""}
+FLAGS = {"--keep-reasoning-params"}
 a = sys.argv[1:]
-for i in range(0, len(a), 2):
-    opt[a[i]] = a[i + 1]
+i = 0
+while i < len(a):
+    if a[i] in FLAGS:
+        opt[a[i]] = "1"
+        i += 1
+    else:
+        opt[a[i]] = a[i + 1]
+        i += 2
 UP = urlsplit(opt["--upstream"])
+PREFIX = UP.path.rstrip("/")  # e.g. /api for https://openrouter.ai/api
+KEY = os.environ.get("OPENROUTER_API_KEY", "")
+if opt["--key-file"]:
+    KEY = open(os.path.expanduser(opt["--key-file"])).read().strip()
+HOSTED = bool(KEY)
+RETRY = {429, 502, 503}
 OUT = opt["--out"]
 os.makedirs(OUT, exist_ok=True)
 lock = threading.Lock()
@@ -36,6 +57,7 @@ class Meter:
     def __init__(self):
         self.line = b""
         self.prompt = self.completion = self.cached = 0
+        self.cost = 0.0
         self.tool_ids = set()
         self.tool_idx = set()
         self.raw = b""
@@ -49,6 +71,8 @@ class Meter:
         self.completion = u.get("completion_tokens", u.get("output_tokens", self.completion)) or self.completion
         d = u.get("prompt_tokens_details") or u.get("input_tokens_details") or {}
         self.cached = d.get("cached_tokens", self.cached) or self.cached
+        if isinstance(u.get("cost"), (int, float)):
+            self.cost = u["cost"]
 
     def event(self, obj):
         self.usage(obj.get("usage"))
@@ -102,30 +126,69 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         self.forward()
 
+    def models(self):
+        body = json.dumps({"object": "list", "data": [{"id": opt["--model"], "object": "model",
+                                                       "max_model_len": int(opt["--ctx"])}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def rewrite(self, req):
+        if req.get("stream"):
+            req.setdefault("stream_options", {})["include_usage"] = True
+        if HOSTED:
+            if opt["--model"]:
+                req["model"] = opt["--model"]
+            if not opt.get("--keep-reasoning-params"):
+                for k in ("reasoning_effort", "reasoning", "include_reasoning"):
+                    req.pop(k, None)
+            if opt["--provider"]:
+                req["provider"] = {"order": [opt["--provider"]], "allow_fallbacks": False}
+        return req
+
     def forward(self):
         run, path = "none", self.path
         parts = self.path.split("/")
         if len(parts) > 3 and parts[1] == "run":
             run, path = parts[2], "/" + "/".join(parts[3:])
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if HOSTED and path.rstrip("/").endswith("/models"):
+            return self.models()
         if path.endswith("/chat/completions") and body:
             try:
-                req = json.loads(body)
-                if req.get("stream"):
-                    req.setdefault("stream_options", {})["include_usage"] = True
-                    body = json.dumps(req).encode()
+                body = json.dumps(self.rewrite(json.loads(body))).encode()
             except ValueError:
                 pass
         hdrs = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length", "connection", "accept-encoding")}
         hdrs["Content-Length"] = str(len(body))
+        if HOSTED:
+            hdrs = {k: v for k, v in hdrs.items() if k.lower() not in ("authorization", "x-api-key", "api-key")}
+            hdrs["Authorization"] = "Bearer " + KEY
+            hdrs["HTTP-Referer"] = "https://github.com/AstralDrift/awl"
+            hdrs["X-Title"] = "awl arena"
         t0 = time.time()
         meter = Meter()
         status = 0
+        retries = 0
         try:
-            up = http.client.HTTPConnection(UP.hostname, UP.port or 80, timeout=900)
-            up.request(self.command, path, body=body if self.command == "POST" else None, headers=hdrs)
-            r = up.getresponse()
-            status = r.status
+            while True:
+                if UP.scheme == "https":
+                    up = http.client.HTTPSConnection(UP.hostname, UP.port or 443, timeout=900)
+                else:
+                    up = http.client.HTTPConnection(UP.hostname, UP.port or 80, timeout=900)
+                up.request(self.command, PREFIX + path, body=body if self.command == "POST" else None, headers=hdrs)
+                r = up.getresponse()
+                status = r.status
+                if status in RETRY and HOSTED and retries < 6:
+                    wait = min(60.0, float(r.getheader("Retry-After") or 0) or 2.0 * 2 ** retries)
+                    r.read()
+                    up.close()
+                    retries += 1
+                    time.sleep(wait)
+                    continue
+                break
             self.send_response(r.status)
             for k, v in r.getheaders():
                 if k.lower() not in ("transfer-encoding", "content-length", "connection"):
@@ -148,7 +211,7 @@ class H(BaseHTTPRequestHandler):
             return
         rec = {"t0": t0, "model_s": round(time.time() - t0, 3), "path": path, "status": status,
                "bytes_sent": len(body), "prompt_tokens": meter.prompt, "completion_tokens": meter.completion,
-               "cached_tokens": meter.cached, "tool_calls": meter.finish(),
+               "cached_tokens": meter.cached, "tool_calls": meter.finish(), "cost": meter.cost, "retries": retries,
                "reasoning_chars": sum(map(len, meter.think)), "content_chars": meter.content_chars}
         with lock:
             with open(os.path.join(OUT, f"{run}.jsonl"), "a") as f:

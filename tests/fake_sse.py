@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Deterministic OpenAI-compatible SSE server for tests (stdlib only).
 
-Usage: fake_sse.py SCRIPT.json [--port N] [--log FILE] [--split N] [--mode chunked|length|close]
+Usage: fake_sse.py SCRIPT.json [--port N] [--log FILE] [--split N] [--mode chunked|length|close] [--comments 1]
 SCRIPT is a list of turns, served in order (the last one repeats):
   {"reasoning": "...", "content": "...", "tool_calls": [{"name": "read", "arguments": {...}}],
    "status": 200, "delay": 0.0, "hang": false}
 Prints the bound port on stdout, then serves until killed.
-Each request body is appended to --log as one JSON line.
+Each request body is appended to --log as one JSON line, plus "_path" and "_auth" (the
+Authorization header). --comments 1 interleaves OpenRouter-style ": OPENROUTER PROCESSING" lines.
 """
 import json
 import socket
@@ -16,7 +17,7 @@ import time
 
 args = sys.argv[1:]
 script = json.load(open(args[0]))
-opt = {"--port": "0", "--log": "", "--split": "0", "--mode": "chunked", "--ctx": "0"}
+opt = {"--port": "0", "--log": "", "--split": "0", "--mode": "chunked", "--ctx": "0", "--comments": "0"}
 for i in range(1, len(args), 2):
     opt[args[i]] = args[i + 1]
 split = int(opt["--split"])
@@ -44,7 +45,8 @@ def events(turn, model):
             out.append(ev({"tool_calls": [{"index": idx, "function": {"arguments": a[i:i + 7]}}]}))
     out.append(ev({}, "tool_calls" if turn.get("tool_calls") else "stop"))
     out.append({"id": "x", "choices": [], "usage": turn.get("usage") or {"prompt_tokens": 100 + served, "completion_tokens": 10}})
-    body = b"".join(b"data: " + json.dumps(e).encode() + b"\n\n" for e in out)
+    sep = b": OPENROUTER PROCESSING\n\n" if int(opt["--comments"]) else b""
+    body = sep + b"".join(b"data: " + json.dumps(e).encode() + b"\n\n" + sep for e in out)
     return body + b"data: [DONE]\n\n"
 
 
@@ -73,7 +75,7 @@ def handle(conn):
         n = int(hdrs.get("content-length", "0"))
         while len(rest) < n:
             rest += conn.recv(65536)
-        if path == "/v1/models":
+        if path.endswith("/v1/models"):
             m = {"id": "fake-model"}
             if int(opt["--ctx"]):
                 m["max_model_len"] = int(opt["--ctx"])
@@ -86,7 +88,7 @@ def handle(conn):
             served += 1
             if opt["--log"]:
                 with open(opt["--log"], "a") as f:
-                    f.write(json.dumps(req) + "\n")
+                    f.write(json.dumps(dict(req, _path=path, _auth=hdrs.get("authorization", ""))) + "\n")
         if turn.get("delay"):
             time.sleep(turn["delay"])
         status = turn.get("status", 200)

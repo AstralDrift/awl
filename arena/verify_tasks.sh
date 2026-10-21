@@ -4,11 +4,13 @@
 cd "$(dirname "$0")/tasks"
 T=$(pwd)
 rc=0
-mkdir -p "$T/../results"  # inside the repo so mise tools (zig) resolve
+# Sandboxes live outside the repo (like arena runs); zig comes from the repo's mise pin.
+Z=$(cd "$T/../.." && mise where zig 2>/dev/null) && export PATH="$Z:$PATH"
+mkdir -p /tmp/awl-arena
 [ $# -gt 0 ] || set -- */
 for t in "$@"; do
   t=${t%/}
-  w=$(mktemp -d -p "$T/../results" verify.XXXX)
+  w=$(mktemp -d -p /tmp/awl-arena verify.XXXX)
   cp -r "$t/setup/." "$w/"
   export SETUP="$T/$t/setup" TASK="$T/$t"
   [ -f "$t/setup.sh" ] && (cd "$w" && sh "$TASK/setup.sh" >/dev/null 2>&1)

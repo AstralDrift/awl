@@ -32,6 +32,7 @@ METRICS = [
     ("first_prompt_bytes", "1st req B", "{:.0f}", True),
     ("peak_main_kb", "main MB", "{:.1f}", True),
     ("peak_tree_kb", "tree MB", "{:.1f}", True),
+    ("cost", "cost $", "{:.4f}", True),
 ]
 
 
@@ -39,7 +40,7 @@ def summarize(rs):
     out = {}
     ok = [r for r in rs if r["success"]] or rs
     for k, *_ in METRICS:
-        vals = [float(r[k]) for r in (rs if k == "success" else ok)]
+        vals = [float(r.get(k, 0) or 0) for r in (rs if k == "success" else ok)]
         out[k] = sum(vals) / len(vals) if k == "success" else statistics.median(vals)
     return out
 
@@ -47,7 +48,11 @@ def summarize(rs):
 harnesses = list(dict.fromkeys(r["harness"] for r in rows))
 summary = {h: summarize([r for r in rows if r["harness"] == h]) for h in harnesses}
 tier = meta.get("tier", "t2")
-bpath = os.path.join(ROOT, "baseline.json" if tier in ("t1", "t2") else f"baseline-{tier}.json")
+hosted = meta.get("upstream", "").startswith("https")
+if hosted:  # one baseline per hosted model, never mixed with the local Qwen numbers
+    bpath = os.path.join(ROOT, f"baseline-{tier}-{meta.get('model', '?').split('/')[-1]}.json")
+else:
+    bpath = os.path.join(ROOT, "baseline.json" if tier in ("t1", "t2") else f"baseline-{tier}.json")
 base = json.load(open(bpath)) if os.path.exists(bpath) else {}
 
 print(f"\n{meta.get('tier', '?')} on {meta.get('model', '?')} — {os.path.basename(path)} (medians; pass = rate)")
@@ -83,6 +88,8 @@ for t in tasks:
         rs = [r for r in rows if r["task"] == t and r["harness"] == h]
         cells.append(f"{sum(r['success'] for r in rs)}/{len(rs)}")
     print(f"{t:12}" + "".join(f"{c:>8}" for c in cells))
+if any(r.get("cost") for r in rows):
+    print(f"\ntotal cost ${sum(r.get('cost', 0) or 0 for r in rows):.3f}, rate-limit retries {sum(r.get('retries', 0) for r in rows)}")
 fails = [r for r in rows if not r["success"]]
 if fails:
     print("\nfailures")

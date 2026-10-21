@@ -7,5 +7,5 @@ mkdir -p "$ag"
   printf '[model.omarchy-local]\nmodel = %s\nbase_url = %s\ncontext_window = %s\nenv_key = "XAI_API_KEY"\n' \
     "$(jq -n --arg v "$MODEL" '$v')" "$(jq -n --arg v "$BASE/v1" '$v')" "$CTX"
 } >"$ag/config.toml"
-XAI_API_KEY=$KEY GROK_HOME=$ag exec grok --model omarchy-local --always-approve --disable-web-search --max-turns 40 \
+XAI_API_KEY=$KEY GROK_HOME=$ag exec grok --model omarchy-local --always-approve --disable-web-search --max-turns 200 \
   --cwd "$WD" -p "$PROMPT"

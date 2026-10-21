@@ -5,6 +5,12 @@
   arena/run.py t1 [--h "awl pi omp grok"] [--repeat 1]
   arena/run.py t2 [--h ...] [--repeat 2] [--timeout 300] [--tasks a,b]
   arena/run.py t3 [...]                 # real coding/build tasks, 600 s timeout
+  arena/run.py t3 --upstream openrouter [--model deepseek/deepseek-v4.1-flash] [--provider P] [--budget 1.50]
+
+--upstream openrouter reads the key from ~/.local/state/awl-arena/openrouter.key (or
+OPENROUTER_API_KEY). --budget (USD, default 1.50 there) stops starting new runs once the
+proxy-recorded OpenRouter cost reaches it. Task workdirs live in /tmp/awl-arena/<ts>/, outside the
+repo and home, so no harness picks up an unrelated AGENTS.md.
 
 A task is tasks/<name>/{prompt.txt, setup/, check.sh, solve.sh} plus an optional setup.sh
 (run in the fresh workdir) and hidden tests next to check.sh ($TASK points at the task dir).
@@ -22,6 +28,9 @@ import time
 import urllib.request
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+SANDBOX = "/tmp/awl-arena"
+OR_KEY = os.path.expanduser("~/.local/state/awl-arena/openrouter.key")
+OR_MODEL = "deepseek/deepseek-v4.1-flash"
 REPO = os.path.dirname(ROOT)
 PAGE = os.sysconf("SC_PAGE_SIZE")
 
@@ -53,6 +62,16 @@ def first_model(upstream):
             return json.load(r)["data"][0]["id"]
     except Exception as e:  # noqa: BLE001 - any failure means "no model"
         sys.exit(f"ARENA: model server unreachable at {upstream} ({e}). Start a model in Omarchy Local AI first.")
+
+
+def check_openrouter_model(model):
+    try:
+        with urllib.request.urlopen("https://openrouter.ai/api/v1/models", timeout=20) as r:
+            ids = {m["id"] for m in json.load(r)["data"]}
+    except Exception as e:  # noqa: BLE001
+        sys.exit(f"ARENA: cannot reach OpenRouter ({e})")
+    if model not in ids:
+        sys.exit(f"ARENA: OpenRouter has no model {model}")
 
 
 def version(h):
@@ -92,20 +111,42 @@ def tree_rss(root):
     return total, main
 
 
-def run_one(h, task, rep, base, model, timeout, outdir):
+def tool_env():
+    """PATH with the repo's mise zig first, so tasks build outside the repo."""
+    env = dict(os.environ)
+    try:
+        z = subprocess.run(["mise", "where", "zig"], cwd=REPO, capture_output=True, text=True, timeout=20).stdout.strip()
+        if z:
+            env["PATH"] = z + os.pathsep + env["PATH"]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    env.setdefault("ARENA_CTX", "180224")
+    return env
+
+
+def spent(outdir):
+    total = 0.0
+    pdir = os.path.join(outdir, "proxy")
+    for f in os.listdir(pdir) if os.path.isdir(pdir) else []:
+        if f.endswith(".jsonl"):
+            total += sum(json.loads(l).get("cost", 0) or 0 for l in open(os.path.join(pdir, f)))
+    return total
+
+
+def run_one(h, task, rep, base, model, timeout, outdir, wd_root, env0):
     rid = f"{h}-{task}-{rep}"
-    wd = os.path.join(outdir, "runs", rid)
+    wd = os.path.join(wd_root, rid)
     shutil.rmtree(wd, ignore_errors=True)
     tdir = os.path.join(ROOT, "tasks", task)
     shutil.copytree(os.path.join(tdir, "setup"), wd)
-    env = dict(os.environ, SETUP=os.path.join(tdir, "setup"), TASK=tdir)
+    env = dict(env0, SETUP=os.path.join(tdir, "setup"), TASK=tdir)
     if os.path.exists(os.path.join(tdir, "setup.sh")):
         subprocess.run(["sh", os.path.join(tdir, "setup.sh")], cwd=wd, env=env, check=True, capture_output=True)
     prompt = os.path.join(ROOT, "tasks", task, "prompt.txt")
     log = open(os.path.join(outdir, "logs", rid + ".log"), "w")
     t0 = time.time()
     p = subprocess.Popen([os.path.join(ROOT, "adapters", h + ".sh"), wd, prompt, f"{base}/run/{rid}", model],
-                         stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+                         stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True, env=env)
     peak_tree = peak_main = 0
     timed_out = False
     while p.poll() is None:
@@ -151,6 +192,7 @@ def run_one(h, task, rep, base, model, timeout, outdir):
         "bytes_sent": sum(r["bytes_sent"] for r in reqs),
         "first_prompt_bytes": reqs[0]["bytes_sent"] if reqs else 0,
         "peak_tree_kb": peak_tree, "peak_main_kb": peak_main,
+        "cost": round(sum(r.get("cost", 0) or 0 for r in reqs), 5), "retries": sum(r.get("retries", 0) for r in reqs),
     }
 
 
@@ -167,34 +209,61 @@ def main():
     timeout = int(arg("--timeout", "600" if tier == "t3" else "300"))
     tasks = arg("--tasks", "").split(",") if "--tasks" in sys.argv else tier_tasks(tier)
     upstream = arg("--upstream", "http://127.0.0.1:12434")
-    model = arg("--model", None) or first_model(upstream)
+    env0 = tool_env()
+    pargs = []
+    provider = arg("--provider", "")
+    if upstream == "openrouter":
+        key = OR_KEY if os.path.exists(OR_KEY) else ""
+        if not key and not os.environ.get("OPENROUTER_API_KEY"):
+            sys.exit(f"ARENA: no OpenRouter key. Save it to {OR_KEY} (chmod 600) or export OPENROUTER_API_KEY.")
+        upstream = "https://openrouter.ai/api"
+        model = arg("--model", OR_MODEL)
+        check_openrouter_model(model)
+        pargs = ["--model", model, "--ctx", env0["ARENA_CTX"]] + (["--key-file", key] if key else [])
+        pargs += ["--provider", provider] if provider else []
+        budget = float(arg("--budget", "1.50"))
+    else:
+        model = arg("--model", None) or first_model(upstream)
+        budget = float(arg("--budget", "0"))
 
     ts = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
     outdir = os.path.join(ROOT, "results", ts)
     os.makedirs(os.path.join(outdir, "logs"))
+    wd_root = os.path.join(SANDBOX, ts)
     proxy = subprocess.Popen([sys.executable, os.path.join(ROOT, "proxy.py"), "--upstream", upstream,
-                              "--out", os.path.join(outdir, "proxy")], stdout=subprocess.PIPE)
+                              "--out", os.path.join(outdir, "proxy")] + pargs, stdout=subprocess.PIPE)
     base = f"http://127.0.0.1:{proxy.stdout.readline().decode().strip()}"
     results = os.path.join(ROOT, "results", ts + ".jsonl")
-    meta = {"meta": True, "tier": tier, "model": model, "ts": ts, "versions": {h: version(h) for h in harnesses}}
+    meta = {"meta": True, "tier": tier, "model": model, "ts": ts, "upstream": upstream, "provider": provider,
+            "ctx": int(env0["ARENA_CTX"]), "budget": budget, "versions": {h: version(h) for h in harnesses}}
     with open(results, "w") as f:
         f.write(json.dumps(meta) + "\n")
     print(f"arena {tier}: {len(tasks)} tasks x {len(harnesses)} harnesses x {repeat} on {model}")
     for k, v in meta["versions"].items():
         print(f"  {k}: {v}")
+    stopped = False
     try:
         for rep in range(repeat):
             for task in tasks:
                 for h in harnesses:
-                    r = run_one(h, task, rep, base, model, timeout, outdir)
+                    if budget and spent(outdir) >= budget:
+                        stopped = True
+                        break
+                    r = run_one(h, task, rep, base, model, timeout, outdir, wd_root, env0)
                     with open(results, "a") as f:
                         f.write(json.dumps(r) + "\n")
                     print(f"  {'PASS' if r['success'] else 'fail'}  {h:5} {task:12} {r['wall_s']:6.1f}s  "
                           f"turns {r['turns']:2}  prompt {r['prompt_tokens']:7}  tree {r['peak_tree_kb'] / 1024:6.1f} MB"
                           + (f"  ({r['why']})" if r["why"] else ""),
                           flush=True)
+                if stopped:
+                    break
+            if stopped:
+                break
     finally:
         proxy.kill()
+    if budget:
+        print(f"spent ${spent(outdir):.3f} of ${budget:.2f} budget" + ("  (STOPPED: budget reached)" if stopped else ""))
     subprocess.run([sys.executable, os.path.join(ROOT, "report.py"), results])
 
 

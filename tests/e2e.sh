@@ -34,6 +34,11 @@ for m in "chunked 0" "chunked 1" "chunked 7" "length 3" "close 2"; do
   stop
 done
 
+serve "$W/hi.json" --comments 1 --split 3
+out=$(cd "$W" && "$AWL" -p hi 2>&1)
+[ "$out" = "héllo ✓ there" ] && ok "stream with SSE comment lines" || bad "stream with SSE comment lines" "$out"
+stop
+
 # 2. tool loop: read -> edit + grep -> done
 mkdir -p "$W/proj"
 echo "hello world" >"$W/proj/hello.txt"
