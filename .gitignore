@@ -1,0 +1,6 @@
+zig-out/
+.zig-cache/
+arena/results/
+arena/recordings/*.raw
+*.key
+sessions/
