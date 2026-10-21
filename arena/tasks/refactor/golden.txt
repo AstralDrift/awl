@@ -1,0 +1,120 @@
+2 x widget @ $19.99 = $39.98
+120 x bolt @ $0.25 = $30.00
+Total: $69.98
+Total: $69.98
+Shipping: $4.99
+Due now: $74.97
+Add $10.00 more for free shipping
+widget       $39.98
+bolt         $30.00
+Discount (10.0%) -$7.00
+Paid $62.98
+We refunded $12,345.67 to your card
+Refund $37.50 of $50.00
+Hi Ana, thanks for your order of $12,345.67.
+Bo, your cart ($20.24) is waiting. Don't forget the widget for $19.99!
+lamp is now $29.99 (was $39.99, save $10.00)
+Revenue: $99.99
+Refunds: -$30.00
+Refund rate: 30.0%
+Average sale: $33.33
+id,amount
+1,120.00
+2,-30.00
+3,9.99
+A1: 3 units, value $13.50
+B2: 40 units, value $480.00
+A1 low (reorder at $45.00)
+120 @ $3.33 less 15% = $339.66
+3 @ $3.33 = $9.99
+2 x widget @ €19.99 = €39.98
+120 x bolt @ €0.25 = €30.00
+Total: €69.98
+Total: €69.98
+Shipping: €4.99
+Due now: €74.97
+Add €10.00 more for free shipping
+widget       €39.98
+bolt         €30.00
+Discount (10.0%) -€7.00
+Paid €62.98
+We refunded €12,345.67 to your card
+Refund €37.50 of €50.00
+Hi Ana, thanks for your order of €12,345.67.
+Bo, your cart (€20.24) is waiting. Don't forget the widget for €19.99!
+lamp is now €29.99 (was €39.99, save €10.00)
+Revenue: €99.99
+Refunds: -€30.00
+Refund rate: 30.0%
+Average sale: €33.33
+id,amount
+1,120.00
+2,-30.00
+3,9.99
+A1: 3 units, value €13.50
+B2: 40 units, value €480.00
+A1 low (reorder at €45.00)
+120 @ €3.33 less 15% = €339.66
+3 @ €3.33 = €9.99
+2 x widget @ ¥1,999 = ¥3,998
+120 x bolt @ ¥25 = ¥3,000
+Total: ¥6,998
+Total: ¥6,998
+Shipping: ¥499
+Due now: ¥7,497
+Add ¥1,000 more for free shipping
+widget       ¥3,998
+bolt         ¥3,000
+Discount (10.0%) -¥700
+Paid ¥6,298
+We refunded ¥1,234,567 to your card
+Refund ¥3,750 of ¥5,000
+Hi Ana, thanks for your order of ¥1,234,567.
+Bo, your cart (¥2,024) is waiting. Don't forget the widget for ¥1,999!
+lamp is now ¥2,999 (was ¥3,999, save ¥1,000)
+Revenue: ¥9,999
+Refunds: -¥3,000
+Refund rate: 30.0%
+Average sale: ¥3,333
+id,amount
+1,120.00
+2,-30.00
+3,9.99
+A1: 3 units, value ¥1,350
+B2: 40 units, value ¥48,000
+A1 low (reorder at ¥4,500)
+120 @ ¥333 less 15% = ¥33,966
+3 @ ¥333 = ¥999
+2 x widget @ CHF 19.99 = CHF 39.98
+120 x bolt @ CHF 0.25 = CHF 30.00
+Total: CHF 69.98
+Total: CHF 69.98
+Shipping: CHF 4.99
+Due now: CHF 74.97
+Add CHF 10.00 more for free shipping
+widget       CHF 39.98
+bolt         CHF 30.00
+Discount (10.0%) -CHF 7.00
+Paid CHF 62.98
+We refunded CHF 12,345.67 to your card
+Refund CHF 37.50 of CHF 50.00
+Hi Ana, thanks for your order of CHF 12,345.67.
+Bo, your cart (CHF 20.24) is waiting. Don't forget the widget for CHF 19.99!
+lamp is now CHF 29.99 (was CHF 39.99, save CHF 10.00)
+Revenue: CHF 99.99
+Refunds: -CHF 30.00
+Refund rate: 30.0%
+Average sale: CHF 33.33
+id,amount
+1,120.00
+2,-30.00
+3,9.99
+A1: 3 units, value CHF 13.50
+B2: 40 units, value CHF 480.00
+A1 low (reorder at CHF 45.00)
+120 @ CHF 3.33 less 15% = CHF 339.66
+3 @ CHF 3.33 = CHF 9.99
+COFFEE..........      3.50
+REFUND..........  CR 12.05
+GUM.............      0.05
+€1,234.56 -$0.05 ¥7

@@ -4,3 +4,4 @@ arena/results/
 arena/recordings/*.raw
 *.key
 sessions/
+__pycache__/

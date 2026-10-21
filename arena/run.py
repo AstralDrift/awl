@@ -4,6 +4,10 @@
   arena/run.py t0                       # awl only, no GPU: budgets + e2e (seconds)
   arena/run.py t1 [--h "awl pi omp grok"] [--repeat 1]
   arena/run.py t2 [--h ...] [--repeat 2] [--timeout 300] [--tasks a,b]
+  arena/run.py t3 [...]                 # real coding/build tasks, 600 s timeout
+
+A task is tasks/<name>/{prompt.txt, setup/, check.sh, solve.sh} plus an optional setup.sh
+(run in the fresh workdir) and hidden tests next to check.sh ($TASK points at the task dir).
 
 Every harness talks to the model through proxy.py. Results go to
 arena/results/<ts>.jsonl (one row per harness x task x repeat), then report.py prints the table.
@@ -92,7 +96,11 @@ def run_one(h, task, rep, base, model, timeout, outdir):
     rid = f"{h}-{task}-{rep}"
     wd = os.path.join(outdir, "runs", rid)
     shutil.rmtree(wd, ignore_errors=True)
-    shutil.copytree(os.path.join(ROOT, "tasks", task, "setup"), wd)
+    tdir = os.path.join(ROOT, "tasks", task)
+    shutil.copytree(os.path.join(tdir, "setup"), wd)
+    env = dict(os.environ, SETUP=os.path.join(tdir, "setup"), TASK=tdir)
+    if os.path.exists(os.path.join(tdir, "setup.sh")):
+        subprocess.run(["sh", os.path.join(tdir, "setup.sh")], cwd=wd, env=env, check=True, capture_output=True)
     prompt = os.path.join(ROOT, "tasks", task, "prompt.txt")
     log = open(os.path.join(outdir, "logs", rid + ".log"), "w")
     t0 = time.time()
@@ -119,16 +127,22 @@ def run_one(h, task, rep, base, model, timeout, outdir):
         os.killpg(p.pid, signal.SIGKILL)  # stray children
     except ProcessLookupError:
         pass
-    env = dict(os.environ, SETUP=os.path.join(ROOT, "tasks", task, "setup"))
-    ok = not timed_out and subprocess.run(["sh", os.path.join(ROOT, "tasks", task, "check.sh")], cwd=wd, env=env,
-                                          capture_output=True, timeout=30).returncode == 0
+    ok, why = False, "timeout"
+    if not timed_out:
+        try:
+            c = subprocess.run(["sh", os.path.join(tdir, "check.sh")], cwd=wd, env=env, capture_output=True,
+                               text=True, errors="replace", timeout=120)
+            ok = c.returncode == 0
+            why = "" if ok else ((c.stdout + c.stderr).strip().splitlines() or ["check failed"])[-1][:200]
+        except subprocess.TimeoutExpired:
+            why = "check timed out"
     reqs = []
     pf = os.path.join(outdir, "proxy", rid + ".jsonl")
     if os.path.exists(pf):
         reqs = [json.loads(l) for l in open(pf)]
     model_s = sum(r["model_s"] for r in reqs)
     return {
-        "harness": h, "task": task, "rep": rep, "success": ok, "timed_out": timed_out, "exit": p.returncode,
+        "harness": h, "task": task, "rep": rep, "success": ok, "why": why, "timed_out": timed_out, "exit": p.returncode,
         "wall_s": round(wall, 2), "model_s": round(model_s, 2), "harness_s": round(wall - model_s, 2),
         "turns": len(reqs), "tool_calls": sum(r["tool_calls"] for r in reqs),
         "prompt_tokens": sum(r["prompt_tokens"] for r in reqs),
@@ -141,7 +155,7 @@ def run_one(h, task, rep, base, model, timeout, outdir):
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ("t0", "t1", "t2"):
+    if len(sys.argv) < 2 or sys.argv[1] not in ("t0", "t1", "t2", "t3"):
         sys.exit(__doc__)
     tier = sys.argv[1]
     if tier == "t0":
@@ -150,7 +164,7 @@ def main():
         sys.exit(rc)
     harnesses = arg("--h", "awl pi omp grok").split()
     repeat = int(arg("--repeat", "1" if tier == "t1" else "2"))
-    timeout = int(arg("--timeout", "300"))
+    timeout = int(arg("--timeout", "600" if tier == "t3" else "300"))
     tasks = arg("--tasks", "").split(",") if "--tasks" in sys.argv else tier_tasks(tier)
     upstream = arg("--upstream", "http://127.0.0.1:12434")
     model = arg("--model", None) or first_model(upstream)
@@ -175,8 +189,9 @@ def main():
                     r = run_one(h, task, rep, base, model, timeout, outdir)
                     with open(results, "a") as f:
                         f.write(json.dumps(r) + "\n")
-                    print(f"  {'PASS' if r['success'] else 'fail'}  {h:5} {task:11} {r['wall_s']:6.1f}s  "
-                          f"turns {r['turns']:2}  prompt {r['prompt_tokens']:7}  tree {r['peak_tree_kb'] / 1024:6.1f} MB",
+                    print(f"  {'PASS' if r['success'] else 'fail'}  {h:5} {task:12} {r['wall_s']:6.1f}s  "
+                          f"turns {r['turns']:2}  prompt {r['prompt_tokens']:7}  tree {r['peak_tree_kb'] / 1024:6.1f} MB"
+                          + (f"  ({r['why']})" if r["why"] else ""),
                           flush=True)
     finally:
         proxy.kill()

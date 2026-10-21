@@ -1,0 +1,1 @@
+Implement the LRU cache described in SPEC.md (lru.c is still a stub). `make test` should pass, but the spec is the real contract.

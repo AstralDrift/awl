@@ -1,0 +1,1 @@
+Rename `formatPrice` in lib/format.js to `formatMoney` and make the currency the first argument: `formatMoney(currency, amount)`. Update every caller and the tests. Don't leave a compatibility alias for the old name.

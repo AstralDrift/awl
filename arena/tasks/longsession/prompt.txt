@@ -1,0 +1,8 @@
+I want to be able to pin notes. Please do all of this:
+
+1. Notes get a `pinned` flag (default false).
+2. Bump the data schema to version 3 with a migration that adds `pinned: false` to existing notes. Old v0/v1/v2 files must still load.
+3. Save and load `pinned` in the JSON store.
+4. New commands `pin ID` and `unpin ID` (print "pinned ID" / "unpinned ID"; "no note ID" and exit 1 if missing). `list` shows pinned notes first, marked with a `*` right after the id (e.g. "  4* title"); unpinned lines keep their current format. Within each group keep id order.
+5. Tests for the above (the existing tests that check the version number will need updating).
+6. A CHANGELOG entry under Unreleased.

@@ -1,0 +1,1 @@
+Customers in Germany are complaining that their invoices are wrong: the cents are gone and the totals don't add up (an order that should total 102.34 EUR shows 102 EUR). US invoices look fine. Find the root cause and fix it. Example: python3 -m billing.cli invoice examples/order_de.json

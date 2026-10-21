@@ -1,0 +1,1 @@
+Our test suite is flaky on CI: it fails on most runs there but I can get it to pass locally by rerunning. Make it deterministic. Don't delete or skip tests. Run with: python3 -m unittest discover -s tests

@@ -3,7 +3,8 @@
 
   arena/report.py [results.jsonl] [--accept]
 
---accept stores this run's per-harness medians as arena/baseline.json.
+--accept stores this run's per-harness medians as arena/baseline.json (t1/t2) or baseline-<tier>.json.
+Medians use passing runs only (a timeout would otherwise dominate); pass is over all runs.
 Deltas against the baseline are shown; a metric more than 10% worse is flagged.
 """
 import glob
@@ -36,15 +37,17 @@ METRICS = [
 
 def summarize(rs):
     out = {}
+    ok = [r for r in rs if r["success"]] or rs
     for k, *_ in METRICS:
-        vals = [float(r[k]) for r in rs]
+        vals = [float(r[k]) for r in (rs if k == "success" else ok)]
         out[k] = sum(vals) / len(vals) if k == "success" else statistics.median(vals)
     return out
 
 
 harnesses = list(dict.fromkeys(r["harness"] for r in rows))
 summary = {h: summarize([r for r in rows if r["harness"] == h]) for h in harnesses}
-bpath = os.path.join(ROOT, "baseline.json")
+tier = meta.get("tier", "t2")
+bpath = os.path.join(ROOT, "baseline.json" if tier in ("t1", "t2") else f"baseline-{tier}.json")
 base = json.load(open(bpath)) if os.path.exists(bpath) else {}
 
 print(f"\n{meta.get('tier', '?')} on {meta.get('model', '?')} — {os.path.basename(path)} (medians; pass = rate)")
@@ -80,6 +83,11 @@ for t in tasks:
         rs = [r for r in rows if r["task"] == t and r["harness"] == h]
         cells.append(f"{sum(r['success'] for r in rs)}/{len(rs)}")
     print(f"{t:12}" + "".join(f"{c:>8}" for c in cells))
+fails = [r for r in rows if not r["success"]]
+if fails:
+    print("\nfailures")
+    for r in fails:
+        print(f"  {r['harness']:5} {r['task']:12} rep {r['rep']}  {r.get('why') or ('timeout' if r['timed_out'] else '?')}")
 print("\nmain MB = harness process only; tree MB = harness + its children (tools, workers). ! = >10% worse than baseline.")
 
 if "--accept" in sys.argv:

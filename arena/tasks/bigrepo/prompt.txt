@@ -1,0 +1,1 @@
+test_accents in tests/test_handles.py is failing. Fix the underlying bug (not the test).

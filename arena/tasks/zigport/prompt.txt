@@ -1,0 +1,1 @@
+This little Zig library was written for an older Zig and no longer builds with the zig on this machine (0.16). Port it so `zig build test` passes. Keep the public API (`topWords`, `Entry`, `freeEntries`) the same.

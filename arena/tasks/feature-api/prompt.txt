@@ -1,0 +1,1 @@
+Add a way to delete items: DELETE /items/:id. 204 with no body when it worked, and the usual 404 error when the item doesn't exist. Update the README table and add tests.

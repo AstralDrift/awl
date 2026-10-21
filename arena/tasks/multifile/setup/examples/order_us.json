@@ -1,0 +1,1 @@
+{"customer": "Acme Inc", "region": "US", "currency": "USD", "items": [{"sku": "widget", "qty": 2}, {"sku": "gizmo", "qty": 1, "discount": 10}]}

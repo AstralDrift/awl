@@ -1,0 +1,6 @@
+{
+  "name": "items-api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": { "start": "node src/server.js", "test": "node --test test/" }
+}

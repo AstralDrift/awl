@@ -1,0 +1,1 @@
+Add a JSON output format to `todo list`: a JSON array of objects with the same fields as the csv output, using real JSON types (integer id, boolean done, null when there is no due date). It should work with the --pending/--done filters, show up in --help, and the README should mention it. Add a test for it.
