@@ -1,0 +1,46 @@
+{
+ "awl": {
+  "success": 0.95,
+  "wall_s": 50.14,
+  "harness_s": 0.24,
+  "turns": 10.0,
+  "prompt_tokens": 77208.0,
+  "completion_tokens": 6015.0,
+  "first_prompt_bytes": 3814.0,
+  "peak_main_kb": 328.0,
+  "peak_tree_kb": 46464.0
+ },
+ "pi": {
+  "success": 0.95,
+  "wall_s": 23.13,
+  "harness_s": 0.59,
+  "turns": 10.0,
+  "prompt_tokens": 59002.0,
+  "completion_tokens": 2757.0,
+  "first_prompt_bytes": 13145.0,
+  "peak_main_kb": 152736.0,
+  "peak_tree_kb": 179192.0
+ },
+ "omp": {
+  "success": 0.95,
+  "wall_s": 46.69,
+  "harness_s": 0.8,
+  "turns": 10.0,
+  "prompt_tokens": 149633.0,
+  "completion_tokens": 5363.0,
+  "first_prompt_bytes": 31305.0,
+  "peak_main_kb": 346400.0,
+  "peak_tree_kb": 353564.0
+ },
+ "grok": {
+  "success": 0.85,
+  "wall_s": 45.31,
+  "harness_s": 0.73,
+  "turns": 10.0,
+  "prompt_tokens": 184186.0,
+  "completion_tokens": 5111.0,
+  "first_prompt_bytes": 54407.0,
+  "peak_main_kb": 200180.0,
+  "peak_tree_kb": 222888.0
+ }
+}

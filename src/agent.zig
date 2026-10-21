@@ -11,7 +11,7 @@ const bufm = @import("buf.zig");
 const Buf = bufm.Buf;
 
 pub var cfg: llm.Cfg = undefined;
-pub var max_steps: usize = 50;
+pub var max_steps: usize = 200;
 var head = Buf.init(1 << 20); // {"model":…,"tools":[…],"messages":[{system}
 var msgs = Buf.init(1 << 30); // ,{msg},{msg}…
 var turn = llm.Turn{};

@@ -82,7 +82,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     agent.cfg = .{ .url = http.parseUrl(sys.getenv("AWL_URL") orelse "http://127.0.0.1:12434") catch die("AWL_URL must look like http://127.0.0.1:12434", .{}) };
     var key_b: [512]u8 = undefined;
     agent.cfg.key = sys.getenv("AWL_KEY") orelse gatewayKey(&key_b);
-    if (sys.getenv("AWL_MAX_STEPS")) |s| agent.max_steps = std.fmt.parseInt(usize, s, 10) catch 50;
+    if (sys.getenv("AWL_MAX_STEPS")) |s| agent.max_steps = std.fmt.parseInt(usize, s, 10) catch 200;
 
     if (idle) { // budget probe: full startup minus the network
         agent.cfg.model = "idle";

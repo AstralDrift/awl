@@ -39,6 +39,8 @@ class Meter:
         self.tool_ids = set()
         self.tool_idx = set()
         self.raw = b""
+        self.think = []  # reasoning text
+        self.content_chars = 0
 
     def usage(self, u):
         if not isinstance(u, dict):
@@ -55,7 +57,13 @@ class Meter:
         if obj.get("type") == "response.output_item.added" and (obj.get("item") or {}).get("type") == "function_call":
             self.tool_ids.add(obj["item"].get("call_id") or obj["item"].get("id"))
         for ch in obj.get("choices") or []:
-            for tc in (ch.get("delta") or ch.get("message") or {}).get("tool_calls") or []:
+            d = ch.get("delta") or ch.get("message") or {}
+            r = d.get("reasoning_content") or d.get("reasoning")
+            if isinstance(r, str):
+                self.think.append(r)
+            if isinstance(d.get("content"), str):
+                self.content_chars += len(d["content"])
+            for tc in d.get("tool_calls") or []:
                 self.tool_idx.add(tc.get("index", len(self.tool_idx)))
 
     def feed(self, data):
@@ -140,9 +148,16 @@ class H(BaseHTTPRequestHandler):
             return
         rec = {"t0": t0, "model_s": round(time.time() - t0, 3), "path": path, "status": status,
                "bytes_sent": len(body), "prompt_tokens": meter.prompt, "completion_tokens": meter.completion,
-               "cached_tokens": meter.cached, "tool_calls": meter.finish()}
-        with lock, open(os.path.join(OUT, f"{run}.jsonl"), "a") as f:
-            f.write(json.dumps(rec) + "\n")
+               "cached_tokens": meter.cached, "tool_calls": meter.finish(),
+               "reasoning_chars": sum(map(len, meter.think)), "content_chars": meter.content_chars}
+        with lock:
+            with open(os.path.join(OUT, f"{run}.jsonl"), "a") as f:
+                f.write(json.dumps(rec) + "\n")
+            # debugging aids: the newest request (whole history) and every turn's reasoning
+            with open(os.path.join(OUT, f"{run}.last.json"), "wb") as f:
+                f.write(body)
+            with open(os.path.join(OUT, f"{run}.think.txt"), "a") as f:
+                f.write(f"=== turn ({meter.completion} tok)\n" + "".join(meter.think) + "\n")
 
 
 srv = ThreadingHTTPServer(("127.0.0.1", int(opt["--port"])), H)
