@@ -88,6 +88,7 @@ pub fn termCols() u16 {
 
 /// Environment, set once from main.
 pub var envp: []const [*:0]const u8 = &.{};
+pub var envp_raw: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{};
 pub fn getenv(name: []const u8) ?[]const u8 {
     for (envp) |e| {
         const s = std.mem.span(e);
@@ -128,4 +129,25 @@ fn procStatus(key: []const u8) u64 {
     var it = std.mem.tokenizeAny(u8, s[i + key.len ..], " \t");
     const num = it.next() orelse return 0;
     return std.fmt.parseInt(u64, num, 10) catch 0;
+}
+
+/// SIGINT and SIGPIPE are blocked; SIGINT is read from this fd instead.
+pub var sigfd: fd_t = -1;
+pub fn setupSignals() void {
+    var set = linux.sigemptyset();
+    linux.sigaddset(&set, .INT);
+    linux.sigaddset(&set, .PIPE);
+    _ = linux.sigprocmask(linux.SIG.BLOCK, &set, null);
+    var only_int = linux.sigemptyset();
+    linux.sigaddset(&only_int, .INT);
+    sigfd = @intCast(check(linux.signalfd(-1, &only_int, linux.SFD.NONBLOCK | linux.SFD.CLOEXEC)) catch return);
+}
+pub fn drainSignals() void {
+    var info: [4]linux.signalfd_siginfo = undefined;
+    while (linux.errno(linux.read(sigfd, @ptrCast(&info), @sizeOf(@TypeOf(info)))) == .SUCCESS) {}
+}
+/// Unblock everything; called in a forked child before execve.
+pub fn unblockAll() void {
+    const empty = linux.sigemptyset();
+    _ = linux.sigprocmask(linux.SIG.SETMASK, &empty, null);
 }

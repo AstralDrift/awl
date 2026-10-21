@@ -47,6 +47,12 @@ pub const Buf = struct {
         self.add(std.fmt.bufPrint(&tmp, fmt, args) catch tmp[0..0]);
     }
 
+    pub fn free(self: *Buf) void {
+        if (self.base) |b| _ = linux.munmap(b, self.cap);
+        self.base = null;
+        self.len = 0;
+    }
+
     pub fn full(self: *const Buf) bool {
         return self.len == self.cap;
     }

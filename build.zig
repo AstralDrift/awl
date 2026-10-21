@@ -27,4 +27,8 @@ pub fn build(b: *std.Build) void {
     const check = b.addSystemCommand(&.{ "sh", "tests/check.sh" });
     check.addArtifactArg(exe);
     b.step("check", "Assert size / RSS / startup budgets").dependOn(&check.step);
+
+    const e2e = b.addSystemCommand(&.{ "bash", "tests/e2e.sh" });
+    e2e.addArtifactArg(exe);
+    b.step("e2e", "End-to-end tests against tests/fake_sse.py").dependOn(&e2e.step);
 }
