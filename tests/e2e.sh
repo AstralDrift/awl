@@ -114,5 +114,8 @@ m=json.loads(open('$LOG').readline())['messages']
 assert len(m) > 3 and m[-1]['content']=='again', [x['role'] for x in m]" && [ "$out" = "resumed ok" ] && ok "resume -c" || bad "resume -c" "$out"
 stop
 
+# 8. interactive TUI through a pty
+python3 "$HERE/tui.py" "$AWL" >"$W/tui.out" 2>&1 && ok "tui ($(grep -c '^ok' "$W/tui.out") checks)" || bad "tui" "$(grep FAIL "$W/tui.out")"
+
 echo "e2e: $pass passed, $fail failed"
 [ $fail -eq 0 ]
