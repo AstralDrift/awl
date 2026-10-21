@@ -99,3 +99,28 @@ I commit after each green phase (the commit message carries the measured size, R
 
 ## Later
 Compaction, a bash permission gate, an Omarchy theme-set hook, an Omarchy Local AI agent entry (`local-ai/agents/awl`), a `/model` switch, and MCP.
+
+---
+
+## v1.x: iterating toward the best bare-bones harness (2026-10-21)
+
+The v1 build order is done. From here the arena decides. The model is "Arch Linux for agents":
+a minimal base that gets real work done and is easy to build on.
+
+**North star:** on arena T2 with Qwen3.8-27B, awl's pass rate is at least the best of
+pi / omp / grok, with the fewest prompt tokens and the smallest footprint.
+
+**Footprint goals (soft, not caps):** binary < 256 KB, idle RSS < 1 MB, peak < 4 MB over
+50 turns, startup < 1 ms. A feature that wins tasks may spend some of this; one that does
+not, does not ship.
+
+**Loop:** hypothesis → change → `arena/run.py t0` (seconds) → T1 → T2 when promising →
+record the line in `arena/LOG.md` → keep or revert.
+
+**Backlog (ordered by expected impact; reorder from arena evidence):**
+1. Context limit awareness: read `max_model_len` from `/v1/models`, show ctx used/limit,
+   and elide old tool outputs before the window fills (no LLM summarisation).
+2. `bash` returns when the command exits even if a background job holds the pipe (done: pidfd).
+3. Replies start flush: drop leading blank lines from the model (done).
+4. Tool-error hints that steer a small model back on track (edit near-miss: show the closest line).
+5. Anything the T1/T2 failure logs point at.

@@ -19,7 +19,7 @@ pub fn detect() void {
 }
 
 const schema_core =
-    \\{"type":"function","function":{"name":"read","description":"Read a text file. Returns numbered lines. Use offset/limit (1-based line numbers) for large files.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}},
+    \\{"type":"function","function":{"name":"read","description":"Read a text file. Returns numbered lines. For large files, grep for what you need first, then read with offset/limit (1-based).","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}},
     \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file with the given content. Creates parent directories.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
     \\{"type":"function","function":{"name":"edit","description":"Replace one exact, unique occurrence of old_string with new_string in a file. Read the file first. Include enough context to make old_string unique.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}}},
     \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"}},"required":["command"]}}}
@@ -180,15 +180,16 @@ fn read(path: []const u8, offset: usize, limit: usize, out: *Buf) bool {
     const start = @max(offset, 1);
     const max = @min(limit, 2000);
     var last: usize = 0;
-    while (it.next()) |line| {
+    while (it.next()) |line0| {
         ln += 1;
-        if (it.index == null and line.len == 0) {
+        if (it.index == null and line0.len == 0) {
             ln -= 1;
             break;
         }
         if (ln < start) continue;
-        if (shown == max or out.len + line.len + 16 > out_cap) continue;
+        if (shown == max or out.len + line0.len + 16 > out_cap) continue;
         out.print("{d:>6}\t", .{ln});
+        const line = std.mem.trimEnd(u8, line0, "\r");
         if (line.len > 2000) {
             out.add(line[0..2000]);
             out.add("…");
@@ -245,6 +246,28 @@ fn edit(path: []const u8, old: []const u8, new: []const u8, out: *Buf) bool {
     }
     const m = mapFile(path) catch |e| return errMsg(out, "edit", path, e);
     defer m.deinit();
+    // CRLF files: models write \n; match and replace in the file's own line endings.
+    var old_b = Buf.init(old.len * 2 + 16);
+    var new_b = Buf.init(new.len * 2 + 16);
+    defer old_b.free();
+    defer new_b.free();
+    if (std.mem.indexOf(u8, m.bytes, old) == null and std.mem.indexOf(u8, m.bytes, "\r\n") != null) {
+        toCrlf(old, &old_b);
+        toCrlf(new, &new_b);
+        return editIn(path, m.bytes, old_b.items(), new_b.items(), out);
+    }
+    return editIn(path, m.bytes, old, new, out);
+}
+
+fn toCrlf(s: []const u8, out: *Buf) void {
+    for (s, 0..) |c, i| {
+        if (c == '\n' and (i == 0 or s[i - 1] != '\r')) out.byte('\r');
+        out.byte(c);
+    }
+}
+
+fn editIn(path: []const u8, bytes: []const u8, old: []const u8, new: []const u8, out: *Buf) bool {
+    const m = struct { bytes: []const u8 }{ .bytes = bytes };
     const i = std.mem.indexOf(u8, m.bytes, old) orelse {
         out.print("old_string not found in {s}. Read the file and copy the text exactly, including whitespace.", .{path});
         return false;
@@ -312,17 +335,39 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
     var timed_out = false;
     var cancelled = false;
     var chunk: [16384]u8 = undefined;
+    // pidfd: notice when the command itself exits, even if a background job still holds the pipe.
+    const pfd_rc = linux.pidfd_open(pid, 0);
+    const pfd: i32 = if (linux.errno(pfd_rc) == .SUCCESS) @intCast(pfd_rc) else -1;
+    defer if (pfd >= 0) sys.close(pfd);
+    var exited = false;
     while (true) {
         const now = sys.nowNs();
         if (now >= deadline) {
             timed_out = true;
             break;
         }
-        const ready = http.wait(p[0], @intCast(@min((deadline - now) / std.time.ns_per_ms + 1, std.math.maxInt(i32)))) catch {
-            cancelled = true;
+        var wait_ms: i32 = @intCast(@min((deadline - now) / std.time.ns_per_ms + 1, std.math.maxInt(i32)));
+        if (exited) wait_ms = 100; // after exit, drain what is already buffered, then stop
+        var fds = [3]linux.pollfd{
+            .{ .fd = p[0], .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = sys.sigfd, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = if (exited) -1 else pfd, .events = linux.POLL.IN, .revents = 0 },
+        };
+        const n_ready = sys.check(linux.poll(&fds, 3, wait_ms)) catch |e| {
+            if (e == error.Interrupted) continue;
             break;
         };
-        if (!ready) continue;
+        if (fds[1].revents != 0) {
+            sys.drainSignals();
+            cancelled = true;
+            break;
+        }
+        if (n_ready == 0) {
+            if (exited) break;
+            continue;
+        }
+        if (fds[2].revents != 0) exited = true;
+        if (fds[0].revents == 0) continue;
         const n = sys.read(p[0], &chunk) catch 0;
         if (n == 0) break;
         var c = chunk[0..n];
@@ -380,6 +425,22 @@ fn tmpdir(buf: []u8) []const u8 {
     return p;
 }
 
+test "edit and read on a CRLF file" {
+    var db: [64]u8 = undefined;
+    const d = tmpdir(&db);
+    var pb: [128]u8 = undefined;
+    const f = try std.fmt.bufPrint(&pb, "{s}/crlf.py", .{d});
+    var out = Buf.init(1 << 20);
+    try t.expect(write(f, &.{"def f():\r\n    return 1\r\n"}, &out));
+    out.reset();
+    try t.expect(edit(f, "def f():\n    return 1", "def f():\n    return 2", &out));
+    out.reset();
+    try t.expect(read(f, 1, 10, &out));
+    try t.expectEqualStrings("     1\tdef f():\n     2\t    return 2\n", out.items());
+    var fb: [64]u8 = undefined;
+    try t.expectEqualStrings("def f():\r\n    return 2\r\n", try sys.readFile(f, &fb));
+}
+
 test "write, read, edit" {
     var db: [64]u8 = undefined;
     const d = tmpdir(&db);
@@ -403,6 +464,15 @@ test "write, read, edit" {
     out.reset();
     try t.expect(!read("/nonexistent/x", 1, 10, &out));
     try t.expectEqualStrings("read /nonexistent/x: no such file or directory", out.items());
+}
+
+test "spawn returns when the command exits even if a background job holds the pipe" {
+    var out = Buf.init(1 << 20);
+    const t0 = sys.nowNs();
+    const a = [_:null]?[*:0]const u8{ "/bin/bash", "-c", "sleep 5 & echo started" };
+    try t.expect(try spawn(&a, 10_000, &out, .bash));
+    try t.expect(sys.nowNs() - t0 < 2 * std.time.ns_per_s);
+    try t.expectEqualStrings("started\n", out.items());
 }
 
 test "spawn: output, exit code, truncation, timeout kills grandchild" {

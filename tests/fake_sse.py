@@ -16,7 +16,7 @@ import time
 
 args = sys.argv[1:]
 script = json.load(open(args[0]))
-opt = {"--port": "0", "--log": "", "--split": "0", "--mode": "chunked"}
+opt = {"--port": "0", "--log": "", "--split": "0", "--mode": "chunked", "--ctx": "0"}
 for i in range(1, len(args), 2):
     opt[args[i]] = args[i + 1]
 split = int(opt["--split"])
@@ -43,7 +43,7 @@ def events(turn, model):
         for i in range(0, len(a), 7):
             out.append(ev({"tool_calls": [{"index": idx, "function": {"arguments": a[i:i + 7]}}]}))
     out.append(ev({}, "tool_calls" if turn.get("tool_calls") else "stop"))
-    out.append({"id": "x", "choices": [], "usage": {"prompt_tokens": 100 + served, "completion_tokens": 10}})
+    out.append({"id": "x", "choices": [], "usage": turn.get("usage") or {"prompt_tokens": 100 + served, "completion_tokens": 10}})
     body = b"".join(b"data: " + json.dumps(e).encode() + b"\n\n" for e in out)
     return body + b"data: [DONE]\n\n"
 
@@ -74,7 +74,10 @@ def handle(conn):
         while len(rest) < n:
             rest += conn.recv(65536)
         if path == "/v1/models":
-            body = json.dumps({"data": [{"id": "fake-model"}]}).encode()
+            m = {"id": "fake-model"}
+            if int(opt["--ctx"]):
+                m["max_model_len"] = int(opt["--ctx"])
+            body = json.dumps({"data": [m]}).encode()
             conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
             return
         req = json.loads(rest)

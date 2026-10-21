@@ -93,8 +93,10 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     }
 
     var model_b: [256]u8 = undefined;
-    agent.cfg.model = sys.getenv("AWL_MODEL") orelse llm.firstModel(agent.cfg, &model_b) catch
+    const info: ?llm.ModelInfo = llm.firstModel(agent.cfg, &model_b) catch null;
+    agent.cfg.model = sys.getenv("AWL_MODEL") orelse if (info) |m| m.id else
         die("no model at {s}. Start one with Omarchy Local AI, or set AWL_URL / AWL_MODEL.", .{agent.cfg.url.host});
+    if (info) |m| agent.ctx_limit = m.ctx;
     agent.init(cwd);
 
     var latest_b: [512]u8 = undefined;

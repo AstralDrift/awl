@@ -1,0 +1,46 @@
+{
+ "awl": {
+  "success": 1.0,
+  "wall_s": 5.91,
+  "harness_s": 0.06,
+  "turns": 5.0,
+  "prompt_tokens": 8838.0,
+  "completion_tokens": 665.0,
+  "first_prompt_bytes": 3455.0,
+  "peak_main_kb": 284.0,
+  "peak_tree_kb": 14176.0
+ },
+ "pi": {
+  "success": 1.0,
+  "wall_s": 5.47,
+  "harness_s": 0.34,
+  "turns": 4.0,
+  "prompt_tokens": 14692.0,
+  "completion_tokens": 547.0,
+  "first_prompt_bytes": 12804.0,
+  "peak_main_kb": 145832.0,
+  "peak_tree_kb": 148044.0
+ },
+ "omp": {
+  "success": 1.0,
+  "wall_s": 9.53,
+  "harness_s": 0.57,
+  "turns": 5.0,
+  "prompt_tokens": 43423.0,
+  "completion_tokens": 758.0,
+  "first_prompt_bytes": 30964.0,
+  "peak_main_kb": 353336.0,
+  "peak_tree_kb": 353336.0
+ },
+ "grok": {
+  "success": 1.0,
+  "wall_s": 19.07,
+  "harness_s": 0.47,
+  "turns": 5.0,
+  "prompt_tokens": 90092.0,
+  "completion_tokens": 1372.0,
+  "first_prompt_bytes": 54315.0,
+  "peak_main_kb": 394340.0,
+  "peak_tree_kb": 403444.0
+ }
+}

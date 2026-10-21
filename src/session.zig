@@ -43,8 +43,8 @@ pub fn append(json: []const u8) void {
     sys.writeAll(fd, "\n") catch {};
 }
 
-/// Load messages from `p` into `msgs` (each prefixed with a comma). Reopens it for append.
-pub fn load(p: []const u8, msgs: *Buf) !usize {
+/// Feed each message line of `p` to `onMsg`. Reopens the file for append.
+pub fn load(p: []const u8, comptime onMsg: fn ([]const u8) void) !usize {
     var mb = Buf.init(1 << 30);
     defer mb.free();
     const f = try sys.open(p, .{ .CLOEXEC = true }, 0);
@@ -59,8 +59,7 @@ pub fn load(p: []const u8, msgs: *Buf) !usize {
     var it = std.mem.splitScalar(u8, mb.items(), '\n');
     while (it.next()) |line| {
         if (line.len < 2 or std.mem.startsWith(u8, line, "{\"awl\"")) continue;
-        msgs.byte(',');
-        msgs.add(line);
+        onMsg(line);
         count += 1;
     }
     path = path_b[0..@min(p.len, path_b.len)];

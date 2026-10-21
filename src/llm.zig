@@ -156,8 +156,10 @@ fn event(data: []const u8, t: *Turn) Error!void {
     }
 }
 
-/// First model id from GET /v1/models, copied into `out`.
-pub fn firstModel(cfg: Cfg, out: []u8) Error![]const u8 {
+pub const ModelInfo = struct { id: []const u8, ctx: u64 };
+
+/// First model from GET /v1/models: id (copied into `out`) and context length if reported.
+pub fn firstModel(cfg: Cfg, out: []u8) Error!ModelInfo {
     const fd = try http.connect(cfg.url);
     var r = http.Response{ .fd = fd };
     defer r.deinit();
@@ -168,12 +170,13 @@ pub fn firstModel(cfg: Cfg, out: []u8) Error![]const u8 {
     while (try r.body()) |x| b.add(x);
     if (r.status != 200) return error.Status;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
-    const M = struct { data: []const struct { id: []const u8 } = &.{} };
+    const M = struct { data: []const struct { id: []const u8, max_model_len: ?u64 = null, context_length: ?u64 = null } = &.{} };
     const m = std.json.parseFromSliceLeaky(M, fba.allocator(), b.items(), .{ .ignore_unknown_fields = true }) catch return error.Server;
     if (m.data.len == 0) return error.Server;
-    const n = @min(out.len, m.data[0].id.len);
-    @memcpy(out[0..n], m.data[0].id[0..n]);
-    return out[0..n];
+    const d = m.data[0];
+    const n = @min(out.len, d.id.len);
+    @memcpy(out[0..n], d.id[0..n]);
+    return .{ .id = out[0..n], .ctx = d.max_model_len orelse d.context_length orelse 0 };
 }
 
 test "event accumulates content and split tool calls" {

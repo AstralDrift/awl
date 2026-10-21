@@ -17,7 +17,11 @@ var msgs = Buf.init(1 << 30); // ,{msg},{msg}…
 var turn = llm.Turn{};
 var out = Buf.init(tools.out_cap + 4096);
 pub var ctx_tokens: u64 = 0;
+pub var ctx_limit: u64 = 0; // from the server; 0 = unknown
 pub var n_msgs: usize = 0;
+// Start offset of each message in `msgs` (at its leading comma), for elision.
+const max_index = 16384;
+var offs: [max_index]usize = undefined;
 
 const base_prompt =
     \\You are awl, a coding agent in a terminal on Omarchy Linux. You complete software tasks in the working directory by calling tools.
@@ -67,8 +71,18 @@ fn addAgentsMd(cwd: []const u8) void {
 }
 
 pub fn resume_(path: []const u8) !usize {
-    n_msgs = try session.load(path, &msgs);
-    return n_msgs;
+    return try session.load(path, addLoaded);
+}
+
+fn addLoaded(line: []const u8) void {
+    add(line);
+}
+
+fn add(json: []const u8) void {
+    if (n_msgs < max_index) offs[n_msgs] = msgs.len;
+    msgs.byte(',');
+    msgs.add(json);
+    n_msgs += 1;
 }
 
 pub fn clear() void {
@@ -79,10 +93,54 @@ pub fn clear() void {
 
 /// Append one message (JSON object text in `scratch`) to the conversation and the session log.
 fn push(m: *Buf) void {
-    msgs.byte(',');
-    msgs.add(m.items());
+    add(m.items());
     session.append(m.items());
-    n_msgs += 1;
+}
+
+const tool_prefix = "{\"role\":\"tool\",\"tool_call_id\":";
+const elided = "[old tool output elided to save context; rerun the tool if you need it]";
+
+/// When the prompt passes 60% of the window, replace the oldest large tool
+/// outputs with a placeholder until the estimate drops under 40%. The last
+/// 8 messages are never touched. The session log keeps the full text.
+fn elide() void {
+    if (ctx_limit == 0 or n_msgs > max_index) return;
+    if (ctx_tokens * 10 < ctx_limit * 6) return;
+    const before = msgs.len;
+    const target = ctx_limit * 4 / 10;
+    var nb = Buf.init(msgs.cap);
+    const items = msgs.items();
+    var saved: usize = 0;
+    var count: usize = 0;
+    for (0..n_msgs) |i| {
+        const start = offs[i];
+        const end = if (i + 1 < n_msgs) offs[i + 1] else items.len;
+        const m = items[start + 1 .. end];
+        offs[i] = nb.len;
+        const est = ctx_tokens - ctx_tokens * saved / before;
+        if (i + 8 < n_msgs and est > target and m.len > 400 and std.mem.startsWith(u8, m, tool_prefix)) {
+            // the id is the JSON string right after the prefix (ids never contain quotes)
+            const rest = m[tool_prefix.len..];
+            if (rest.len > 1 and rest[0] == '"') if (std.mem.indexOfScalarPos(u8, rest, 1, '"')) |q| {
+                const before_len = nb.len;
+                nb.add("," ++ tool_prefix);
+                nb.add(rest[0 .. q + 1]);
+                nb.add(",\"content\":\"" ++ elided ++ "\"}");
+                saved += (end - start) -| (nb.len - before_len);
+                count += 1;
+                continue;
+            };
+        }
+        nb.add(items[start..end]);
+    }
+    if (count == 0) {
+        nb.free();
+        if (ctx_tokens * 10 > ctx_limit * 9) ui.note("context nearly full ({d}k of {d}k); /clear to start fresh", .{ ctx_tokens / 1000, ctx_limit / 1000 });
+        return;
+    }
+    msgs.free();
+    msgs = nb;
+    ui.note("elided {d} old tool outputs (~{d}k tokens) to stay inside the context window", .{ count, ctx_tokens * saved / before / 1000 });
 }
 
 pub fn user(text: []const u8) void {
@@ -118,8 +176,9 @@ pub fn run() Outcome {
         const secs = @as(f64, @floatFromInt(sys.nowNs() - t0)) / 1e9;
         ctx_tokens = turn.prompt_tokens + turn.completion_tokens;
         pushAssistant(step);
+        elide();
         if (turn.n == 0) {
-            ui.status(cfg.model, turn.completion_tokens, secs, ctx_tokens);
+            ui.status(cfg.model, turn.completion_tokens, secs, ctx_tokens, ctx_limit);
             if (turn.length_cut) ui.note("reply cut off at the max token limit", .{});
             return .done;
         }

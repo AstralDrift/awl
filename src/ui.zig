@@ -132,7 +132,13 @@ fn endThinking() void {
     print("{s}∴ thought {d:.1}s{s}\n", .{ muted(), secs, reset() });
 }
 
-pub fn content(s: []const u8) void {
+var started = false; // has this message printed any text yet
+
+pub fn content(s0: []const u8) void {
+    // Models often open with blank lines; drop them so replies start flush.
+    const s = if (started) s0 else std.mem.trimStart(u8, s0, " \t\r\n");
+    if (s.len == 0) return;
+    started = true;
     endThinking();
     if (oneshot) {
         if (!quiet) sys.writeAll(sys.stdout, s) catch {};
@@ -160,6 +166,7 @@ pub fn content(s: []const u8) void {
 
 /// End of an assistant message: close any open line and color.
 pub fn endMessage() void {
+    started = false;
     endThinking();
     if (fence) {
         fence = false;
@@ -209,11 +216,13 @@ fn cut(s: []const u8, w: usize) []const u8 {
     return s[0..n];
 }
 
-pub fn status(model: []const u8, tok: u64, secs: f64, ctx: u64) void {
+pub fn status(model: []const u8, tok: u64, secs: f64, ctx: u64, limit: u64) void {
     if (oneshot) return;
     endMessage();
     const tps = if (secs > 0) @as(f64, @floatFromInt(tok)) / secs else 0;
-    print("{s}── {s} · {d:.1} tok/s · ctx {d:.1}k · {d} KB{s}\n", .{ muted(), model, tps, @as(f64, @floatFromInt(ctx)) / 1000, sys.rssKb(), reset() });
+    var lb: [32]u8 = undefined;
+    const lim = if (limit > 0) (std.fmt.bufPrint(&lb, "/{d}k", .{limit / 1000}) catch "") else "";
+    print("{s}── {s} · {d:.1} tok/s · ctx {d:.1}k{s} · {d} KB{s}\n", .{ muted(), model, tps, @as(f64, @floatFromInt(ctx)) / 1000, lim, sys.rssKb(), reset() });
     flush();
 }
 
