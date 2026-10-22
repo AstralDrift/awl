@@ -44,9 +44,13 @@ pub const Buf = struct {
         self.add(&[_]u8{c});
     }
 
+    /// Formatted append of any length (truncated only at capacity). Formats straight
+    /// into the reserved region; pages are touched only as text is written.
     pub fn print(self: *Buf, comptime fmt: []const u8, args: anytype) void {
-        var tmp: [512]u8 = undefined;
-        self.add(std.fmt.bufPrint(&tmp, fmt, args) catch tmp[0..0]);
+        if (self.base == null) self.reserve();
+        var w = std.Io.Writer.fixed(self.base.?[self.len..self.cap]);
+        w.print(fmt, args) catch {};
+        self.len += w.end;
     }
 
     pub fn free(self: *Buf) void {
@@ -129,4 +133,12 @@ test "truncate keeps content below n" {
     try std.testing.expectEqual(@as(usize, 10), b.len);
     b.add("yz");
     try std.testing.expectEqualStrings("xxxxxxxxxxyz", b.items());
+}
+
+test "print: long output is kept whole" {
+    var b = Buf.init(1 << 16);
+    defer b.free();
+    b.print("<{s}>", .{"y" ** 5000});
+    try std.testing.expectEqual(@as(usize, 5002), b.len);
+    try std.testing.expectEqualStrings(">", b.items()[5001..]);
 }

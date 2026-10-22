@@ -90,9 +90,11 @@ fn flushTo(fd: sys.fd_t) void {
 fn flush() void {
     flushTo(if (oneshot) sys.stderr else sys.stdout);
 }
+var print_buf = @import("buf.zig").Buf.init(1 << 20);
 fn print(comptime f: []const u8, a: anytype) void {
-    var t: [1024]u8 = undefined;
-    put(std.fmt.bufPrint(&t, f, a) catch t[0..0]);
+    print_buf.truncate(0); // keeps its pages: no syscall per line
+    print_buf.print(f, a);
+    put(print_buf.items());
 }
 
 // Stream state for one assistant turn.
@@ -139,6 +141,7 @@ var live_t0: u64 = 0;
 pub var draft: []const u8 = ""; // text typed while the agent works (owned by tui)
 pub var queued: usize = 0; // messages waiting for the next step
 pub var draft_changed = false;
+pub var held: []const u8 = ""; // a /command waiting for the turn to end
 
 /// A new wait starts (model request or tool): restart the timer.
 pub fn liveStart() void {
@@ -158,7 +161,7 @@ pub fn tick() void {
     draft_changed = false;
     // Streaming text: stay out of the way unless the user is typing.
     if (!changed and now -| last_out < 700 * std.time.ns_per_ms) return;
-    if (!changed and (now - live_t0) < std.time.ns_per_s and queued == 0) return;
+    if (!changed and (now - live_t0) < std.time.ns_per_s and queued == 0 and held.len == 0) return;
     drawLive();
 }
 
@@ -172,6 +175,11 @@ fn drawLive() void {
     var cols: usize = 4 + std.fmt.count("{d}", .{secs});
     if (queued > 0) {
         const q = std.fmt.bufPrint(b[n..], " · {d} queued", .{queued}) catch "";
+        n += q.len;
+        cols += q.len;
+    }
+    if (held.len > 0) {
+        const q = std.fmt.bufPrint(b[n..], " · then {s}", .{held[0..@min(held.len, 40)]}) catch "";
         n += q.len;
         cols += q.len;
     }
@@ -641,4 +649,9 @@ test "copy: last code block and OSC 52" {
     try tt.expectEqualStrings("b = 2\n", lastCodeBlock("x\n```py\na = 1\n```\ntext\n```\nb = 2\n```\n").?);
     try tt.expect(lastCodeBlock("no code\n```\nunclosed") == null);
     try tt.expectEqualStrings("\x1b]52;c;aGk=\x07", try render(clipboard, .{"hi"}));
+}
+
+test "long notes are printed whole" {
+    const long = "x" ** 3000;
+    try tt.expectEqual(@as(usize, 3001), (try render(note, .{ "{s}", .{long} })).len);
 }

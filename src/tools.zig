@@ -46,6 +46,12 @@ fn save(path: []const u8) void {
     if (!undo.snapshot(path)) ui.note("{s} is too large for /undo; the change goes ahead", .{path});
 }
 
+/// A command the user typed with `!`: no approval, same output limits as bash.
+pub fn userShell(cmd: [:0]const u8, out: *Buf) error{Cancel}!bool {
+    const argv = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
+    return spawn(&argv, 600_000, out, .bash);
+}
+
 pub fn undoLast(out: *Buf) usize {
     return undo.undo(&write, out);
 }

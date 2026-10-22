@@ -347,5 +347,102 @@ def safety():
 
 
 safety()
+
+
+def inputs():
+    """@file attach + Tab, !cmd, /model, /new + /resume, history across restarts + Ctrl-R."""
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "src"))
+    open(os.path.join(d, "src", "parser.py"), "w").write("def parse(s):\n    return s.split()\n")
+    open(os.path.join(d, "src", "pager.py"), "w").write("x\n")
+    sp4 = os.path.join(d, "s.json")
+    json.dump([{"content": "seen"}] * 4 + [{"delay": 1, "content": "slow-seen"}, {"content": "seen"}], open(sp4, "w"))
+    log4 = os.path.join(d, "req.jsonl")
+    srv4 = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp4, "--log", log4], stdout=subprocess.PIPE)
+    port4 = srv4.stdout.readline().decode().strip()
+    env4 = dict(env, AWL_URL=f"http://127.0.0.1:{port4}", XDG_STATE_HOME=os.path.join(d, "state"))
+    out = [b""]
+
+    def start():
+        p, f = pty.fork()
+        if p == 0:
+            os.chdir(d)
+            os.execve(AWL, [AWL], env4)
+        return p, f
+
+    def until(f, pat, t=3.0):
+        end = time.time() + t
+        while pat.encode() not in out[0] and time.time() < end:
+            r, _, _ = select.select([f], [], [], 0.05)
+            if r:
+                try:
+                    out[0] += os.read(f, 65536)
+                except OSError:
+                    break
+        return pat.encode() in out[0]
+
+    def reqs():
+        return [json.loads(l) for l in open(log4)]
+    p4, f4 = start()
+    until(f4, "› ")
+    os.write(f4, b"read @src/par\t")
+    check("tab completes a unique @file", until(f4, "@src/parser.py "), out[0][-120:])
+    os.write(f4, b"\r")
+    until(f4, "tok/s")
+    time.sleep(0.3)
+    c = reqs()[-1]["messages"][-1]["content"]
+    check("@file attached to the message", c.startswith("read @src/parser.py") and '<file path="src/parser.py">\ndef parse(s):\n    return s.split()\n</file>' in c, c[:120])
+    os.write(f4, b"@src/pa\t")
+    check("tab lists several choices", until(f4, "pager.py  parser.py"), out[0][-160:])
+    os.write(f4, b"\x15!echo hi-from-shell\r")
+    check("!cmd output shown", until(f4, "hi-from-shell\r\n"), out[0][-120:])
+    os.write(f4, b"/model other-model\r")
+    check("/model switches", until(f4, "model: other-model"), out[0][-120:])
+    out[0] = b""
+    os.write(f4, b"next\r")
+    until(f4, "seen")
+    r = reqs()[-1]
+    check("!cmd output goes to the model", r["messages"][-1]["content"] == "[The user ran `echo hi-from-shell` in the shell:\nhi-from-shell\n]\n\nnext", r["messages"][-1]["content"][:100])
+    check("next request uses the new model", r["model"] == "other-model", r["model"])
+    time.sleep(0.3)
+    os.write(f4, b"/new\r")
+    until(f4, "new conversation")
+    time.sleep(1.1)  # session files are named by the second
+    out[0] = b""
+    os.write(f4, b"second chat\r")
+    until(f4, "tok/s")
+    time.sleep(0.3)
+    out[0] = b""
+    os.write(f4, b"/resume\r")
+    check("/resume lists this folder's sessions", until(f4, "/resume N") and b"second chat  (this one)" in out[0] and b"read @src/parser.py" in out[0], out[0][-300:])
+    os.write(f4, b"/resume 2\r")
+    check("/resume N opens it", until(f4, "resumed 4 messages"), out[0][-200:])
+    out[0] = b""
+    os.write(f4, b"after resume\r")
+    until(f4, "tok/s")
+    m = reqs()[-1]["messages"]
+    check("resumed conversation continues", m[1]["content"].startswith("read @src/parser.py") and m[-1]["content"] == "after resume", [x["content"][:20] for x in m[1:]])
+    # a /command typed while the model works runs after the turn instead of being sent
+    time.sleep(0.3)
+    n_before = len(reqs())
+    out[0] = b""
+    os.write(f4, b"slow one\r")
+    time.sleep(0.4)
+    os.write(f4, b"/context\r")
+    check("held /command shown while waiting", until(f4, "then /context"), out[0][-200:])
+    check("held /command runs after the turn", until(f4, "slow-seen") and until(f4, "context: ") and len(reqs()) == n_before + 1, out[0][-200:])
+    os.kill(p4, signal.SIGKILL)
+    os.waitpid(p4, 0)
+    out[0] = b""
+    p4, f4 = start()
+    until(f4, "› ")
+    os.write(f4, b"parser\x12")
+    check("history survives a restart (Ctrl-R)", until(f4, "read @src/parser.py"), out[0][-200:])
+    os.kill(p4, signal.SIGKILL)
+    os.waitpid(p4, 0)
+    srv4.kill()
+
+
+inputs()
 print(f"tui: {'all passed' if not fails else f'{fails} failed'}")
 sys.exit(1 if fails else 0)

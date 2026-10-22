@@ -30,6 +30,17 @@ prompt Ctrl-O (or `/expand`) prints the last tool output in full. `/copy` puts t
 the clipboard, `/copy code` its last code block (through the terminal, OSC 52: kitty, foot,
 ghostty, alacritty, and over ssh).
 
+## Sessions and input
+
+- Every conversation is saved under `~/.local/state/awl/sessions/`. `/resume` lists the ones
+  started in this folder, `/resume N` opens one, `awl -c` continues the newest; `/new` starts over.
+- Prompt history is kept across sessions: ↑↓, and Ctrl-R finds older prompts containing what you typed.
+- `@path` attaches a small text file to the message (Tab completes names); `!cmd` runs a shell
+  command yourself and passes its output to the model with your next message.
+- `/model NAME` switches model, `/compact` summarizes the conversation now, `/context` shows the
+  window use and the files read and changed. A `/command` typed while the model works runs when
+  the turn ends.
+
 ## Safety
 
 - `/undo` puts back the files the last turn wrote or edited (and removes files it created);

@@ -101,12 +101,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     agent.init(cwd);
     defer tools.killJobs(); // background jobs never outlive awl
 
-    var latest_b: [512]u8 = undefined;
-    if (cont) resume_path = session.latest(&latest_b) orelse die("no saved sessions", .{});
-    if (resume_path) |p| {
-        const n = agent.resume_(p) catch die("cannot read session {s}", .{p});
-        if (!ui.oneshot) ui.note("resumed {d} messages from {s}", .{ n, p });
-    } else {
+    {
         var w = bufm.Buf.init(8192);
         defer w.free();
         w.add("{\"awl\":\"" ++ version ++ "\",\"model\":");
@@ -114,7 +109,25 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         w.add(",\"cwd\":");
         bufm.str(&w, cwd);
         w.byte('}');
-        session.create(w.items());
+        const k = @min(w.len, session.meta_b.len);
+        @memcpy(session.meta_b[0..k], w.items()[0..k]);
+        session.start_meta = session.meta_b[0..k];
+        const c = @min(cwd.len, session.cwd_b.len);
+        @memcpy(session.cwd_b[0..c], cwd[0..c]);
+        session.start_cwd = session.cwd_b[0..c];
+    }
+    var latest_b: [512]u8 = undefined;
+    if (cont) { // the newest session started in this directory
+        var one: [1]session.Entry = undefined;
+        const l = session.list(cwd, &one);
+        if (l.len == 0) die("no saved sessions for {s}", .{cwd});
+        resume_path = session.pathOf(&l[0], &latest_b) orelse die("no saved sessions", .{});
+    }
+    if (resume_path) |p| {
+        const n = agent.resume_(p) catch die("cannot read session {s}", .{p});
+        if (!ui.oneshot) ui.note("resumed {d} messages from {s}", .{ n, p });
+    } else {
+        session.create(session.start_meta);
     }
 
     if (prompt) |p| {

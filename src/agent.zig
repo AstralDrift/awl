@@ -63,6 +63,31 @@ pub fn init(cwd: []const u8) void {
     head.add("\"}");
 }
 
+var model_b: [256]u8 = undefined;
+
+/// Switch models for the next request (the conversation is kept).
+pub fn setModel(name: []const u8) void {
+    const k = @min(name.len, model_b.len);
+    @memcpy(model_b[0..k], name[0..k]);
+    cfg.model = model_b[0..k];
+    const rest = std.mem.indexOf(u8, head.items(), ",\"stream\":") orelse return;
+    var tail = Buf.init(head.len);
+    defer tail.free();
+    tail.add(head.items()[rest..]);
+    head.reset();
+    head.add("{\"model\":");
+    bufm.str(&head, cfg.model);
+    head.add(tail.items());
+}
+
+pub fn compactNow() bool {
+    return compact(true);
+}
+
+pub fn systemBytes() usize {
+    return head.len;
+}
+
 /// The git root containing `cwd`, or `cwd` itself outside a repository.
 fn projectRoot(cwd: []const u8) []const u8 {
     var pb: [4200]u8 = undefined;

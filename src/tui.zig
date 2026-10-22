@@ -55,9 +55,10 @@ pub fn repl() u8 {
     if (home.len > 1 and std.mem.startsWith(u8, dir, home)) dir = std.fmt.bufPrint(&tb, "~{s}", .{dir[home.len..]}) catch dir;
     ui.note("awl · {s} · {s}{s}{s} · /help", .{ agent.cfg.model, dir, if (tools.mode != .auto) " · mode " else "", if (tools.mode != .auto) @tagName(tools.mode) else "" });
     var ed = Editor{};
+    session.loadHistory(&ed.hist);
     while (true) {
         setMode(false);
-        const line = ed.read() orelse return 0;
+        const line = if (cmd_n > 0) heldCommand() else ed.read() orelse return 0;
         setMode(true);
         const text = std.mem.trim(u8, line, " \t\r\n");
         if (text.len == 0) continue;
@@ -65,7 +66,15 @@ pub fn repl() u8 {
             if (quit) return 0;
             continue;
         };
-        agent.user(text);
+        if (text[0] == '!') {
+            shell(text[1..]);
+            continue;
+        }
+        var msg = Buf.init(text.len + (1 << 20));
+        defer msg.free();
+        msg.add(text);
+        attach(text, &msg);
+        agent.user(msg.items());
         runAgent(&ed);
         out("\n");
     }
@@ -84,6 +93,7 @@ fn runAgent(ed: *Editor) void {
         agent.steer = null;
         ui.draft = "";
         ui.queued = 0;
+        ui.held = "";
     }
     while (true) {
         const o = agent.run();
@@ -189,6 +199,7 @@ fn takeQueued() ?[]const u8 {
     if (hist) |h| {
         h.add(t);
         h.byte(0);
+        session.appendHistory(t);
     }
     q_n = 0;
     q_count = 0;
@@ -247,6 +258,7 @@ fn key(c: u8) void {
     switch (c) {
         27 => esc = .esc,
         '\r' => if (ta_paste) addDraft("\n") else queueDraft(),
+        '\t' => if (ta_paste) addDraft("\t") else replayAdd("\t"), // completion runs in the editor
         '\n' => addDraft("\n"),
         127, 8 => {
             while (draft_n > 0) {
@@ -270,9 +282,35 @@ fn addDraft(s: []const u8) void {
     ui.draft_changed = true;
 }
 
+// A /command or !command typed during a run waits for the turn to end, then runs.
+var cmd_mem: [1024]u8 = undefined;
+var cmd_n: usize = 0;
+var cmd_out: [1024]u8 = undefined;
+
+fn heldCommand() []const u8 {
+    const n = cmd_n;
+    cmd_n = 0;
+    @memcpy(cmd_out[0..n], cmd_mem[0..n]);
+    ui.userEcho(cmd_out[0..n]);
+    if (hist) |h| {
+        h.add(cmd_out[0..n]);
+        h.byte(0);
+    }
+    session.appendHistory(cmd_out[0..n]);
+    return cmd_out[0..n];
+}
+
 fn queueDraft() void {
     const t = std.mem.trim(u8, draft_mem[0..draft_n], " \t\n");
     if (t.len == 0) return;
+    if ((t[0] == '/' or t[0] == '!') and t.len <= cmd_mem.len and std.mem.indexOfScalar(u8, t, '\n') == null) {
+        @memcpy(cmd_mem[0..t.len], t);
+        cmd_n = t.len;
+        draft_n = 0;
+        ui.draft_changed = true;
+        ui.held = cmd_mem[0..cmd_n];
+        return;
+    }
     const sep: []const u8 = if (q_n > 0) "\n\n" else "";
     if (q_n + sep.len + t.len > q_mem.len) return;
     @memcpy(q_mem[q_n .. q_n + sep.len], sep);
@@ -284,13 +322,77 @@ fn queueDraft() void {
     ui.draft_changed = true;
 }
 
+/// `!cmd`: run it, show the output, and pass both to the model with the next message.
+fn shell(cmd: []const u8) void {
+    const c = std.mem.trim(u8, cmd, " ");
+    if (c.len == 0) return;
+    var zb = Buf.init(c.len + 1);
+    defer zb.free();
+    zb.add(c);
+    zb.byte(0);
+    var o = Buf.init(64 << 10);
+    defer o.free();
+    ui.tool("!", c);
+    const ok = tools.userShell(zb.items()[0..c.len :0], &o) catch false;
+    ui.toolOutput(o.items(), ok);
+    if (agent.pending_note.len > 0) agent.pending_note.add("\n");
+    agent.pending_note.print("[The user ran `{s}` in the shell:\n{s}\n]", .{ c, std.mem.trimEnd(u8, o.items()[0..@min(o.len, 16 << 10)], "\n") });
+}
+
+/// `@path` words: append each small text file to the message, so the model has it now.
+fn attach(text: []const u8, msg: *Buf) void {
+    var it = std.mem.tokenizeAny(u8, text, " \t\n");
+    var n: usize = 0;
+    while (it.next()) |w0| {
+        if (w0.len < 2 or w0[0] != '@') continue;
+        const w = std.mem.trimEnd(u8, w0[1..], ".,;:!?)\"'");
+        var fb: [32 << 10]u8 = undefined;
+        const body = sys.readFile(w, &fb) catch continue; // not a file: leave the word as text
+        if (body.len == fb.len or std.mem.indexOfScalar(u8, body, 0) != null) {
+            ui.note("@{s}: too large or binary to attach; the model can read it", .{w});
+            continue;
+        }
+        msg.print("\n\n<file path=\"{s}\">\n{s}{s}</file>", .{ w, body, if (body.len > 0 and body[body.len - 1] != '\n') "\n" else "" });
+        tools.files_read.note(w);
+        ui.note("attached {s} ({d} lines)", .{ w, std.mem.count(u8, body, "\n") });
+        n += 1;
+        if (n == 16) break;
+    }
+}
+
 /// Returns null if `text` is not a known command, true to quit.
 fn command(text: []const u8) ?bool {
     const eq = std.mem.eql;
     if (eq(u8, text, "/quit") or eq(u8, text, "/exit")) return true;
-    if (eq(u8, text, "/clear")) {
+    if (eq(u8, text, "/clear") or eq(u8, text, "/new")) {
         agent.clear();
-        ui.note("conversation cleared", .{});
+        session.restart();
+        ui.note("new conversation", .{});
+    } else if (eq(u8, text, "/resume") or std.mem.startsWith(u8, text, "/resume ")) {
+        var ents: [12]session.Entry = undefined;
+        const l = session.list(session.start_cwd, &ents);
+        const arg = std.mem.trim(u8, text[7..], " ");
+        if (arg.len == 0) {
+            if (l.len == 0) return ui.note("no saved sessions for this folder", .{}) == {};
+            for (l, 1..) |*e, k| {
+                const f = e.file(); // 20261022-152614-<pid>.jsonl
+                ui.note("{d:>2}  {s}-{s} {s}:{s}  {s}{s}", .{ k, f[4..6], f[6..8], f[9..11], f[11..13], e.prompt(), if (std.mem.eql(u8, f, std.fs.path.basename(session.path))) "  (this one)" else "" });
+            }
+            ui.note("/resume N to open one", .{});
+        } else {
+            const k = std.fmt.parseInt(usize, arg, 10) catch 0;
+            if (k == 0 or k > l.len) return ui.note("no session {s}; /resume lists them", .{arg}) == {};
+            var pb: [512]u8 = undefined;
+            const p = session.pathOf(&l[k - 1], &pb) orelse return false;
+            agent.clear();
+            session.close();
+            const n = agent.resume_(p) catch {
+                ui.err("cannot read {s}", .{p});
+                session.restart();
+                return false;
+            };
+            ui.note("resumed {d} messages · {s}", .{ n, l[k - 1].prompt() });
+        }
     } else if (eq(u8, text, "/copy") or eq(u8, text, "/copy code")) {
         const all = ui.reply.items();
         const t = if (text.len > 5) ui.lastCodeBlock(all) orelse "" else std.mem.trim(u8, all, "\n");
@@ -310,7 +412,7 @@ fn command(text: []const u8) ?bool {
             ui.note("{s}", .{list});
             agent.pending_note.print("[The user ran /undo. Your file changes from the previous turn were reverted:\n{s}\nThe files are back to how they were before that turn.]", .{list});
         }
-    } else if (std.mem.startsWith(u8, text, "/mode")) {
+    } else if (eq(u8, text, "/mode") or std.mem.startsWith(u8, text, "/mode ")) {
         const arg = std.mem.trim(u8, text[5..], " ");
         if (arg.len > 0) {
             tools.mode = std.meta.stringToEnum(tools.Mode, arg) orelse {
@@ -324,13 +426,34 @@ fn command(text: []const u8) ?bool {
             };
         }
         ui.note("mode: {s}", .{@tagName(tools.mode)});
+    } else if (eq(u8, text, "/model") or std.mem.startsWith(u8, text, "/model ")) {
+        const arg = std.mem.trim(u8, text[6..], " ");
+        if (arg.len > 0) agent.setModel(arg);
+        ui.note("model: {s}{s}", .{ agent.cfg.model, if (arg.len == 0) "  (/model NAME to switch)" else "" });
+    } else if (eq(u8, text, "/compact")) {
+        if (!agent.compactNow()) ui.note("nothing to compact yet", .{});
+    } else if (eq(u8, text, "/context")) {
+        var o = Buf.init(64 << 10);
+        defer o.free();
+        o.print("context: {d:.1}k", .{@as(f64, @floatFromInt(agent.ctx_tokens)) / 1000});
+        if (agent.ctx_limit > 0) o.print(" of {d}k ({d}%)", .{ agent.ctx_limit / 1000, agent.ctx_tokens * 100 / agent.ctx_limit });
+        o.print(" · {d} messages · system prompt + tools {d:.1} KB · mode {s}", .{ agent.n_msgs, @as(f64, @floatFromInt(agent.systemBytes())) / 1024, @tagName(tools.mode) });
+        if (tools.files_changed.n > 0) {
+            o.add("\nchanged: ");
+            for (0..tools.files_changed.n) |i| o.print("{s}{s}", .{ if (i > 0) ", " else "", tools.files_changed.buf[i][0..tools.files_changed.len[i]] });
+        }
+        if (tools.files_read.n > 0) {
+            o.add("\nread: ");
+            for (0..tools.files_read.n) |i| o.print("{s}{s}", .{ if (i > 0) ", " else "", tools.files_read.buf[i][0..tools.files_read.len[i]] });
+        }
+        ui.note("{s}", .{o.items()});
     } else if (eq(u8, text, "/expand")) {
         ui.expand();
     } else if (eq(u8, text, "/theme")) {
         ui.loadTheme();
         ui.note("theme reloaded", .{});
     } else if (eq(u8, text, "/help")) {
-        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\nWhile it works: type and Enter to queue a message for the next step · Esc or Ctrl-C to stop\nCtrl-O: show all of a long draft, or (empty prompt) the last tool output\n/undo  /mode auto|ask|plan  /copy  /copy code  /expand  /clear  /theme  /quit\nsession: {s}", .{session.path});
+        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-R search history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\nWhile it works: type and Enter to queue a message for the next step · Esc or Ctrl-C to stop\n/new (or /clear) starts over · /resume lists this folder's sessions\nCtrl-O: show all of a long draft, or (empty prompt) the last tool output\n!cmd runs a shell command (output goes to the model too) · @file attaches a file (Tab completes)\n/undo  /mode auto|ask|plan  /copy  /copy code  /expand  /context  /compact  /model  /new  /resume  /theme  /quit\nsession: {s}", .{session.path});
     } else return null;
     return false;
 }
@@ -379,6 +502,9 @@ const Editor = struct {
     in_n: usize = 0,
     in_i: usize = 0,
     preset: usize = 0, // text[0..preset] starts the next prompt (type-ahead left over)
+    search_q: [256]u8 = undefined,
+    search_n: ?usize = null, // Ctrl-R query length while searching
+    search_pos: usize = 0, // search continues in hist before this offset
 
     fn byte(self: *Editor) ?u8 {
         if (self.in_i == self.in_n) {
@@ -412,6 +538,7 @@ const Editor = struct {
         while (true) {
             const c = self.byte() orelse return null;
             if (c != 3) self.ctrl_c = false;
+            if (c != 18) self.search_n = null;
             switch (c) {
                 '\r' => {
                     if (self.pasting) {
@@ -429,6 +556,7 @@ const Editor = struct {
                     if (std.mem.trim(u8, t, " \n").len > 0) {
                         self.hist.add(t);
                         self.hist.byte(0);
+                        session.appendHistory(t);
                     }
                     return t;
                 },
@@ -466,6 +594,8 @@ const Editor = struct {
                     while (s > 0 and self.text[s - 1] != ' ' and self.text[s - 1] != '\n') s -= 1;
                     self.cut(s, self.cur);
                 },
+                18 => self.search(), // Ctrl-R
+                '\t' => if (self.pasting) self.insert("\t") else self.complete(),
                 15 => if (self.len == 0) { // Ctrl-O: the whole draft, or the last tool output
                     out("\r\x1b[J");
                     ui.expand();
@@ -550,6 +680,107 @@ const Editor = struct {
     }
     fn lineEnd(self: *Editor) usize {
         return if (std.mem.indexOfScalarPos(u8, self.text[0..self.len], self.cur, '\n')) |i| i else self.len;
+    }
+
+    /// Tab after `@part`: complete a file or directory name; list the choices when several.
+    fn complete(self: *Editor) void {
+        var s = self.cur;
+        while (s > 0 and self.text[s - 1] != ' ' and self.text[s - 1] != '\n') s -= 1;
+        const word = self.text[s..self.cur];
+        if (word.len == 0 or word[0] != '@') return self.insert("\t");
+        const p = word[1..];
+        const slash = std.mem.lastIndexOfScalar(u8, p, '/');
+        const dir = if (slash) |i| p[0 .. i + 1] else "";
+        const base = if (slash) |i| p[i + 1 ..] else p;
+        const dfd = sys.open(if (dir.len > 0) dir else ".", .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch return out("\x07");
+        defer sys.close(dfd);
+        var names: [4096]u8 = undefined; // matches, each followed by '/' (directory) or ' '
+        var nn: usize = 0;
+        var ends: [256]u16 = undefined; // end of each match in `names` (after its mark)
+        var count: usize = 0;
+        var common: []const u8 = "";
+        var b: [8192]u8 align(8) = undefined;
+        while (true) {
+            const got = sys.check(linux.getdents64(dfd, &b, b.len)) catch break;
+            if (got == 0) break;
+            var off: usize = 0;
+            while (off < got) {
+                const e: *align(1) linux.dirent64 = @ptrCast(&b[off]);
+                off += e.reclen;
+                const name = std.mem.sliceTo(@as([*:0]u8, @ptrCast(&b[off - e.reclen + @offsetOf(linux.dirent64, "name")])), 0);
+                if (!std.mem.startsWith(u8, name, base) or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+                if (name[0] == '.' and (base.len == 0 or base[0] != '.')) continue;
+                if (nn + name.len + 1 > names.len or count == ends.len) continue;
+                const start = nn;
+                @memcpy(names[nn .. nn + name.len], name);
+                nn += name.len;
+                names[nn] = if (e.type == linux.DT.DIR) '/' else ' ';
+                nn += 1;
+                common = if (count == 0) names[start .. start + name.len] else common[0..commonLen(common, name)];
+                ends[count] = @intCast(nn);
+                count += 1;
+            }
+        }
+        if (count == 0) return out("\x07");
+        if (count == 1) {
+            self.insert(common[base.len..]);
+            self.insert(names[nn - 1 .. nn]); // '/' for a directory, ' ' for a file
+            return;
+        }
+        if (common.len > base.len) return self.insert(common[base.len..]);
+        // several choices and nothing to add: list them above the prompt
+        if (self.row > 0) out(std.fmt.bufPrint(&b, "\x1b[{d}A", .{self.row}) catch "");
+        out("\r\x1b[J");
+        self.row = 0;
+        var list = Buf.init(nn * 2 + 64);
+        defer list.free();
+        var from: usize = 0;
+        for (ends[0..count], 0..) |end, k| {
+            if (k == 40) {
+                list.print("… {d} more", .{count - k});
+                break;
+            }
+            const e = names[from..end];
+            list.add(if (e[e.len - 1] == '/') e else e[0 .. e.len - 1]); // keep '/' on directories
+            list.add("  ");
+            from = end;
+        }
+        ui.note("{s}", .{list.items()});
+    }
+
+    fn commonLen(a: []const u8, b: []const u8) usize {
+        var i: usize = 0;
+        while (i < a.len and i < b.len and a[i] == b[i]) i += 1;
+        return i;
+    }
+
+    /// Ctrl-R: the newest history entry containing what was typed; again for older ones.
+    fn search(self: *Editor) void {
+        const h = self.hist.items();
+        if (self.search_n == null) {
+            const q = std.mem.trim(u8, self.text[0..self.len], " \n");
+            const k = @min(q.len, self.search_q.len);
+            @memcpy(self.search_q[0..k], q[0..k]);
+            self.search_n = k;
+            self.search_pos = h.len;
+        }
+        const q = self.search_q[0..self.search_n.?];
+        var end = self.search_pos; // entries are "text\0"; walk back from `end`
+        while (end > 0) {
+            const stop = end - 1; // the 0 ending this entry
+            const start = if (std.mem.lastIndexOfScalar(u8, h[0..stop], 0)) |i| i + 1 else 0;
+            const e = h[start..stop];
+            end = start;
+            if (std.mem.indexOf(u8, e, q) != null and !std.mem.eql(u8, e, self.text[0..self.len])) {
+                @memcpy(self.text[0..e.len], e);
+                self.len = e.len;
+                self.cur = e.len;
+                self.hpos = start;
+                self.search_pos = start;
+                return;
+            }
+        }
+        out("\x07"); // no older match
     }
 
     /// Walk history entries (newest last). dir -1 = older, +1 = newer.
