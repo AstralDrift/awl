@@ -22,7 +22,7 @@ const schema_core =
     \\{"type":"function","function":{"name":"read","description":"Read a text file. Returns numbered lines. For large files, grep for what you need first, then read with offset/limit (1-based).","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}},
     \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file with the given content. Creates parent directories.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
     \\{"type":"function","function":{"name":"edit","description":"Replace exact text in a file. One change: old_string + new_string. Several changes in one file: edits, a list of {old_string, new_string}, each matched against the file as it was before this call; all apply or none do. Each old_string must occur exactly once; include enough context. Read the file first.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["old_string","new_string"]}}},"required":["path"]}}},
-    \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"}},"required":["command"]}}},
+    \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"},"background":{"type":"boolean","description":"start it and return at once (servers, watchers, long test runs); output goes to a log file"}},"required":["command"]}}},
     \\{"type":"function","function":{"name":"todo","description":"Checklist for long tasks with several distinct steps; skip it for quick fixes. Send the whole list every time. status: pending, doing, done or skip (put the reason in text). Keep exactly one item doing. The latest list always stays in context.","parameters":{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"status":{"type":"string","enum":["pending","doing","done","skip"]}},"required":["text","status"]}}},"required":["items"]}}}
 ;
 const schema_grep =
@@ -73,6 +73,7 @@ fn sum(r: *Result, name: []const u8, comptime f: []const u8, a: anytype) void {
 /// Run tool `name` with JSON `args`. Output text goes to `out` (bounded).
 pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
     defer argFree();
+    reapJobs(out);
     const a = argAlloc();
     var r = Result{ .ok = false };
     const opts: std.json.ParseOptions = .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed };
@@ -114,9 +115,13 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         sum(&r, name, "{d}/{d} done", .{ done, p.items.len });
         r.ok = todo(p.items, out);
     } else if (eq(u8, name, "bash")) {
-        const p = std.json.parseFromSliceLeaky(struct { command: []const u8, timeout: ?u32 = null }, a, args, opts) catch return badArgs(out, name, &r);
-        sum(&r, name, "{s}", .{p.command});
+        const p = std.json.parseFromSliceLeaky(struct { command: []const u8, timeout: ?u32 = null, background: bool = false }, a, args, opts) catch return badArgs(out, name, &r);
+        if (p.background) sum(&r, name, "&{s}", .{p.command}) else sum(&r, name, "{s}", .{p.command});
         const cmd = a.dupeZ(u8, p.command) catch return badArgs(out, name, &r);
+        if (p.background) {
+            r.ok = startJob(cmd, out);
+            return r;
+        }
         const argv = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
         r.ok = try spawn(&argv, @as(u64, p.timeout orelse 120) * 1000, out, .bash);
     } else if (eq(u8, name, "grep") and have_rg) {
@@ -471,6 +476,88 @@ fn capLines(out: *Buf, max: usize, what: []const u8) void {
 }
 
 const Kind = enum { bash, grep, find };
+// Background jobs (bash with background=true): own session, output in a log file.
+const Job = struct { pid: linux.pid_t = 0, id: usize = 0, log: [96]u8 = undefined, log_n: usize = 0, cmd: [60]u8 = undefined, cmd_n: usize = 0 };
+var jobs: [16]Job = [_]Job{.{}} ** 16;
+var job_seq: usize = 0;
+
+fn startJob(cmd: [*:0]const u8, out: *Buf) bool {
+    const slot = for (&jobs) |*j| {
+        if (j.pid == 0) break j;
+    } else {
+        out.add("too many background jobs (16); stop one with kill first");
+        return false;
+    };
+    job_seq += 1;
+    const path = std.fmt.bufPrint(&slot.log, "/tmp/awl-{d}-job{d}.log", .{ linux.getpid(), job_seq }) catch return false;
+    const lfd = sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600) catch |e| return errMsg(out, "background", path, e);
+    const pid_rc = linux.fork();
+    if (linux.errno(pid_rc) != .SUCCESS) {
+        sys.close(lfd);
+        return errMsg(out, "background", "fork", error.Sys);
+    }
+    const pid: linux.pid_t = @intCast(pid_rc);
+    if (pid == 0) {
+        _ = linux.setsid(); // own session and process group: no terminal signals, one kill stops it all
+        const devnull = linux.open("/dev/null", .{}, 0);
+        _ = linux.dup2(@intCast(devnull), 0);
+        _ = linux.dup2(lfd, 1);
+        _ = linux.dup2(lfd, 2);
+        sys.unblockAll();
+        var env: [1024]?[*:0]const u8 = undefined;
+        const argv = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
+        _ = linux.execve("/bin/bash", &argv, sys.childEnvp(sys.envp, &env));
+        linux.exit_group(127);
+    }
+    sys.close(lfd);
+    const c = std.mem.span(cmd);
+    slot.* = .{ .pid = pid, .id = job_seq, .log = slot.log, .log_n = path.len, .cmd_n = @min(c.len, 60) };
+    @memcpy(slot.cmd[0..slot.cmd_n], c[0..slot.cmd_n]);
+    out.print("started background job {d} (pid {d}); output goes to {s}. Read it with read or tail; stop it with: kill -- -{d}", .{ job_seq, pid, path, pid });
+    return true;
+}
+
+/// Note finished background jobs at the top of the next tool result (and reap them).
+fn reapJobs(out: *Buf) void {
+    for (&jobs) |*j| {
+        if (j.pid == 0) continue;
+        var status: u32 = 0;
+        const rc = linux.wait4(j.pid, &status, 1, null); // WNOHANG
+        if (linux.errno(rc) != .SUCCESS or rc == 0) continue;
+        const code: u32 = if (status & 0x7f == 0) (status >> 8) & 0xff else 128 + (status & 0x7f);
+        out.print("[background job {d} ({s}) exited with code {d}; output in {s}]\n", .{ j.id, j.cmd[0..j.cmd_n], code, j.log[0..j.log_n] });
+        j.pid = 0;
+    }
+}
+
+/// Stop every background job still running (on exit): SIGTERM, then SIGKILL after ~0.5 s.
+pub fn killJobs() void {
+    var any = false;
+    for (jobs) |j| if (j.pid != 0) {
+        _ = linux.kill(-j.pid, .TERM);
+        any = true;
+    };
+    if (!any) return;
+    var tries: usize = 0;
+    while (tries < 10) : (tries += 1) {
+        var alive = false;
+        for (&jobs) |*j| if (j.pid != 0) {
+            var status: u32 = 0;
+            const rc = linux.wait4(j.pid, &status, 1, null);
+            if (linux.errno(rc) == .SUCCESS and rc != 0) j.pid = 0 else alive = true;
+        };
+        if (!alive) return;
+        const ts = linux.timespec{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
+        _ = linux.nanosleep(&ts, null);
+    }
+    for (&jobs) |*j| if (j.pid != 0) {
+        _ = linux.kill(-j.pid, .KILL);
+        var status: u32 = 0;
+        _ = linux.wait4(j.pid, &status, 0, null);
+        j.pid = 0;
+    };
+}
+
 var tail_ring: [out_cap / 2]u8 = undefined;
 var log_seq: usize = 0;
 
@@ -756,6 +843,46 @@ test "grep: alternation, context, ignore_case, limit" {
     out.reset();
     r = try run("grep", try std.fmt.bufPrint(&ab, "{{\"pattern\":\"o\",\"path\":\"{s}\",\"limit\":2}}", .{f}), &out);
     try t.expectEqualStrings("1:one\n3:two\n[1 more lines; narrow the search]", out.items());
+}
+
+test "background jobs: start, log, exit notice, kill on exit" {
+    ui.quiet = true;
+    var out = Buf.init(1 << 20);
+    var r = try run("bash", "{\"command\":\"echo hi; sleep 0.2; echo bye\",\"background\":true}", &out);
+    try t.expect(r.ok);
+    try t.expect(std.mem.startsWith(u8, out.items(), "started background job "));
+    const ps = std.mem.indexOf(u8, out.items(), "/tmp/awl-").?;
+    const pe = std.mem.indexOfPos(u8, out.items(), ps, ". Read").?;
+    var lp: [96]u8 = undefined;
+    const log = lp[0 .. pe - ps];
+    @memcpy(log, out.items()[ps..pe]);
+    const ts = linux.timespec{ .sec = 0, .nsec = 600 * std.time.ns_per_ms };
+    _ = linux.nanosleep(&ts, null);
+    out.reset();
+    r = try run("bash", "{\"command\":\"echo next\"}", &out);
+    try t.expect(std.mem.startsWith(u8, out.items(), "[background job "));
+    try t.expect(std.mem.indexOf(u8, out.items(), "(echo hi; sleep 0.2; echo bye) exited with code 0; output in /tmp/awl-") != null);
+    try t.expect(std.mem.endsWith(u8, out.items(), "]\nnext\n"));
+    var lb: [64]u8 = undefined;
+    try t.expectEqualStrings("hi\nbye\n", try sys.readFile(log, &lb));
+    var zb: [128]u8 = undefined;
+    _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&zb, log), 0);
+    // a long job is stopped by killJobs (what main does on exit)
+    out.reset();
+    r = try run("bash", "{\"command\":\"sleep 30\",\"background\":true}", &out);
+    try t.expect(r.ok);
+    var pid: linux.pid_t = 0;
+    for (jobs) |j| if (j.pid != 0) {
+        pid = j.pid;
+    };
+    try t.expect(pid != 0);
+    const t0 = sys.nowNs();
+    killJobs();
+    try t.expect(sys.nowNs() - t0 < 1 * std.time.ns_per_s);
+    try t.expect(linux.errno(linux.kill(pid, @enumFromInt(0))) == .SRCH);
+    const pe2 = std.mem.indexOf(u8, out.items(), ". Read").?;
+    const ps2 = std.mem.indexOf(u8, out.items(), "/tmp/awl-").?;
+    _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&zb, out.items()[ps2..pe2]), 0);
 }
 
 test "edit: not-found hint when only whitespace differs" {

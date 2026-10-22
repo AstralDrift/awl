@@ -98,6 +98,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         die("no model at {s}. Start one with Omarchy Local AI, or set AWL_URL / AWL_MODEL.", .{agent.cfg.url.host});
     if (info) |m| agent.ctx_limit = m.ctx;
     agent.init(cwd);
+    defer tools.killJobs(); // background jobs never outlive awl
 
     var latest_b: [512]u8 = undefined;
     if (cont) resume_path = session.latest(&latest_b) orelse die("no saved sessions", .{});

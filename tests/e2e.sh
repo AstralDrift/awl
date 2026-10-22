@@ -188,6 +188,19 @@ ms=$((($(date +%s%N) - t0) / 1000000))
 pgrep -f "sleep 100" >/dev/null && bad "ctrl-c kills group" "sleep still running" || ok "ctrl-c kills group"
 stop
 
+# 6b. background jobs: started through the model, killed when awl exits
+echo '[{"tool_calls":[{"name":"bash","arguments":{"command":"sleep 77","background":true}}]},{"content":"started"}]' >"$W/bg.json"
+serve "$W/bg.json"
+out=$(cd "$W" && "$AWL" -p go 2>/dev/null)
+python3 - "$LOG" <<'EOF' && ok "background job started" || bad "background job" "$out"
+import json, sys
+m = [json.loads(l) for l in open(sys.argv[1])][-1]["messages"]
+assert [x for x in m if x["role"] == "tool"][0]["content"].startswith("started background job ")
+EOF
+sleep 0.3
+pgrep -f "^sleep 77" >/dev/null && bad "background job killed on exit" "still running" || ok "background job killed on exit"
+stop
+
 # 7. session written and resumable
 f=$(ls "$XDG_STATE_HOME"/awl/sessions/*.jsonl | head -1)
 [ -n "$f" ] && head -1 "$f" | grep -q '"awl"' && ok "session file" || bad "session file" "$f"
