@@ -37,6 +37,7 @@ script = [
     {"content": "**done** edit"},
     {"delay": 5, "content": "slow2"},
     {"content": "final"},
+    {"content": "pasted ok"},
 ]
 sp = os.path.join(W, "s.json")
 json.dump(script, open(sp, "w"))
@@ -51,6 +52,8 @@ if pid == 0:
     os.chdir(W)
     os.execve(AWL, [AWL], env)
 
+import fcntl, struct
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
 buf = b""
 
 
@@ -175,6 +178,30 @@ send("\x15")  # Ctrl-U
 send("x\r")
 check("continues after esc", read_until("final", 3), buf[-300:])
 
+# a paste taller than the screen (24 rows here): windowed while typing, sent and shown once
+rows = "".join(f"row-{i:03d}\n" for i in range(60))
+send("\x1b[200~" + rows.replace("\n", "\r") + "\x1b[201~tail")
+check("tall input is windowed", read_until("more lines · Ctrl-O shows all", 2), buf[-300:])
+read_until("tail", 1)
+time.sleep(0.3)
+read_until("never", 0.3)  # drain the last redraw
+buf = b""
+send("\r")
+check("tall paste reply", read_until("pasted ok", 3), buf[-200:])
+check("tall paste printed once on send", buf.count(b"row-") == 60, buf.count(b"row-"))
+got = requests()[-1]["messages"][-1]["content"]
+check("tall paste sent whole", got == rows + "tail", repr(got[:80]) + " ... " + repr(got[-40:]))
+
+# /copy sends the last reply to the terminal clipboard (OSC 52); Ctrl-O at an empty
+# prompt prints the last tool output in full
+import base64
+buf = b""
+send("/copy\r")
+check("/copy emits OSC 52", read_until("copied 1 lines", 2) and b"\x1b]52;c;" + base64.b64encode(b"pasted ok") + b"\x07" in buf, buf[-200:])
+buf = b""
+send("\x0f")
+check("ctrl-o shows the last tool output", read_until("+ BETA", 2) or read_until("edited", 2), buf[-200:])
+
 # double Ctrl-C at an empty prompt quits and restores the terminal
 send("\x03")
 read_until("again to quit", 2)
@@ -204,5 +231,44 @@ while True:
 check("bracketed paste disabled on exit", buf.rstrip().endswith(b"\x1b[?2004l\x1b[0m") or b"\x1b[?2004l" in buf[-40:], buf[-60:])
 
 srv.kill()
+
+
+def keys_during_run():
+    """Fresh session: Up pressed while a reply is still coming recalls history afterwards."""
+    sp2 = os.path.join(W, "s2.json")
+    json.dump([{"content": "first"}, {"delay": 1, "content": "wait1"}], open(sp2, "w"))
+    srv2 = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp2], stdout=subprocess.PIPE)
+    port2 = srv2.stdout.readline().decode().strip()
+    pid2, fd2 = pty.fork()
+    if pid2 == 0:
+        os.chdir(W)
+        os.execve(AWL, [AWL], dict(env, AWL_URL=f"http://127.0.0.1:{port2}"))
+
+    def drain(t):
+        out = b""
+        end = time.time() + t
+        while time.time() < end:
+            r, _, _ = select.select([fd2], [], [], 0.05)
+            if r:
+                try:
+                    out += os.read(fd2, 65536)
+                except OSError:
+                    break
+        return out
+    drain(0.5)
+    os.write(fd2, b"hello\r")
+    drain(0.8)
+    os.write(fd2, b"upkey-test\r")
+    drain(0.4)
+    os.write(fd2, b"\x1b[A")
+    out = drain(1.5)
+    os.kill(pid2, signal.SIGKILL)
+    os.waitpid(pid2, 0)
+    srv2.kill()
+    # the editor's redraw of the recalled entry (a queued echo would end with "\n")
+    check("arrow key during a run reaches the prompt", b"wait1" in out and b"upkey-test\r\x1b[" in out, out[-120:])
+
+
+keys_during_run()
 print(f"tui: {'all passed' if not fails else f'{fails} failed'}")
 sys.exit(1 if fails else 0)

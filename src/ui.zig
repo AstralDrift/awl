@@ -205,10 +205,16 @@ fn endThinking() void {
 
 var started = false; // has this message printed any text yet
 
+// The newest assistant text and tool output, kept for /copy and /expand.
+pub var reply = @import("buf.zig").Buf.init(4 << 20);
+pub var last_tool = @import("buf.zig").Buf.init(1 << 20);
+
 pub fn content(s0: []const u8) void {
     // Models often open with blank lines; drop them so replies start flush.
     const s = if (started) s0 else std.mem.trimStart(u8, s0, " \t\r\n");
     if (s.len == 0) return;
+    if (!started) reply.reset();
+    reply.add(s);
     started = true;
     endThinking();
     if (oneshot) {
@@ -443,6 +449,8 @@ fn lines(s: []const u8, out: [][]const u8) []const []const u8 {
 /// Show at most 8 lines of tool output, dimmed.
 pub fn toolOutput(text: []const u8, ok: bool) void {
     if (oneshot) return;
+    last_tool.reset();
+    last_tool.add(text);
     if (ok and diffed) {
         diffed = false;
         if (diff_hidden > 0) print("{s}  … {d} more changed lines{s}\n", .{ muted(), diff_hidden, reset() });
@@ -490,6 +498,46 @@ pub fn err(comptime f: []const u8, a: anytype) void {
     put(reset());
     put("\n");
     flushTo(sys.stderr);
+}
+
+/// Put `text` on the clipboard through the terminal (OSC 52: kitty, foot, ghostty,
+/// alacritty; works over ssh). Nothing to spawn.
+pub fn clipboard(text: []const u8) void {
+    const enc = std.base64.standard.Encoder;
+    var b = @import("buf.zig").Buf.init(enc.calcSize(text.len) + 16);
+    defer b.free();
+    b.add("\x1b]52;c;");
+    _ = enc.encode(b.extend(enc.calcSize(text.len)), text);
+    b.add("\x07");
+    if (capture) |c| c.add(b.items()) else if (!quiet) sys.writeAll(sys.stdout, b.items()) catch {};
+}
+
+/// The last ``` fenced block in `s` (without the fence lines), or null.
+pub fn lastCodeBlock(s: []const u8) ?[]const u8 {
+    var open: ?usize = null; // start of the block's body
+    var found: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < s.len) {
+        const end = std.mem.indexOfScalarPos(u8, s, i, '\n') orelse s.len;
+        const line = std.mem.trimStart(u8, s[i..end], " ");
+        if (std.mem.startsWith(u8, line, "```")) {
+            if (open) |o| {
+                found = s[o..i];
+                open = null;
+            } else open = @min(end + 1, s.len);
+        }
+        i = end + 1;
+    }
+    return found;
+}
+
+/// Print the last tool output in full.
+pub fn expand() void {
+    if (last_tool.len == 0) return note("no tool output yet", .{});
+    endMessage();
+    put(last_tool.items());
+    if (last_tool.items()[last_tool.len - 1] != '\n') put("\n");
+    flush();
 }
 
 /// A message the user queued mid-run, shown where the model receives it.
@@ -569,4 +617,10 @@ test "edit diff: only changed lines, capped" {
     try tt.expectEqual(@as(usize, 16 - max_diff), diff_hidden);
     diff_lines = 0;
     diffed = false;
+}
+
+test "copy: last code block and OSC 52" {
+    try tt.expectEqualStrings("b = 2\n", lastCodeBlock("x\n```py\na = 1\n```\ntext\n```\nb = 2\n```\n").?);
+    try tt.expect(lastCodeBlock("no code\n```\nunclosed") == null);
+    try tt.expectEqualStrings("\x1b]52;c;aGk=\x07", try render(clipboard, .{"hi"}));
 }

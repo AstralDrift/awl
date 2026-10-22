@@ -98,10 +98,33 @@ fn runAgent(ed: *Editor) void {
         n += k;
     }
     ed.preset = n;
+    // Keys the type-ahead does not use (arrows, Home, ...) and a half-read escape
+    // sequence go to the editor as if typed now.
+    if (esc != .none) {
+        replayAdd(&[_]u8{27});
+        if (esc == .seq) {
+            replayAdd("[");
+            replayAdd(ta_seq[0..@min(seq_n, ta_seq.len)]);
+        }
+    }
+    @memcpy(ed.in[0..replay_n], replay[0..replay_n]);
+    ed.in_n = replay_n;
+    ed.in_i = 0;
+    ed.pasting = ta_paste;
+    replay_n = 0;
     q_n = 0;
     q_count = 0;
     draft_n = 0;
     esc = .none;
+    ta_paste = false;
+}
+
+var replay: [256]u8 = undefined;
+var replay_n: usize = 0;
+fn replayAdd(s: []const u8) void {
+    const k = @min(s.len, replay.len - replay_n);
+    @memcpy(replay[replay_n .. replay_n + k], s[0..k]);
+    replay_n += k;
 }
 
 // Type-ahead while the agent runs: keys are read on each tick, never blocking.
@@ -165,8 +188,14 @@ fn key(c: u8) void {
             if (c >= 0x40 and c <= 0x7e) {
                 esc = .none;
                 const s = ta_seq[0..@min(seq_n, ta_seq.len)];
-                if (std.mem.eql(u8, s, "200~")) ta_paste = true;
-                if (std.mem.eql(u8, s, "201~")) ta_paste = false;
+                if (std.mem.eql(u8, s, "200~")) {
+                    ta_paste = true;
+                } else if (std.mem.eql(u8, s, "201~")) {
+                    ta_paste = false;
+                } else {
+                    replayAdd("\x1b[");
+                    replayAdd(s);
+                }
             }
             return;
         },
@@ -219,11 +248,22 @@ fn command(text: []const u8) ?bool {
     if (eq(u8, text, "/clear")) {
         agent.clear();
         ui.note("conversation cleared", .{});
+    } else if (eq(u8, text, "/copy") or eq(u8, text, "/copy code")) {
+        const all = ui.reply.items();
+        const t = if (text.len > 5) ui.lastCodeBlock(all) orelse "" else std.mem.trim(u8, all, "\n");
+        if (t.len == 0) {
+            ui.note("{s}", .{if (text.len > 5) "no code block in the last reply" else "nothing to copy yet"});
+        } else {
+            ui.clipboard(t);
+            ui.note("copied {d} lines to the clipboard", .{std.mem.count(u8, std.mem.trimEnd(u8, t, "\n"), "\n") + 1});
+        }
+    } else if (eq(u8, text, "/expand")) {
+        ui.expand();
     } else if (eq(u8, text, "/theme")) {
         ui.loadTheme();
         ui.note("theme reloaded", .{});
     } else if (eq(u8, text, "/help")) {
-        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\nWhile it works: type and Enter to queue a message for the next step · Esc or Ctrl-C to stop\n/clear  /theme  /quit\nsession: {s}", .{session.path});
+        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\nWhile it works: type and Enter to queue a message for the next step · Esc or Ctrl-C to stop\nCtrl-O: show all of a long draft, or (empty prompt) the last tool output\n/copy  /copy code  /expand  /clear  /theme  /quit\nsession: {s}", .{session.path});
     } else return null;
     return false;
 }
@@ -312,8 +352,12 @@ const Editor = struct {
                         continue;
                     }
                     self.cur = self.len;
-                    self.render();
-                    out("\r\n");
+                    if (self.layout(sys.termCols(), 0, 0, null).rows > @max(@as(usize, sys.termRows()) -| 3, 3)) {
+                        self.showAll(false);
+                    } else {
+                        self.render();
+                        out("\r\n");
+                    }
                     const t = self.text[0..self.len];
                     if (std.mem.trim(u8, t, " \n").len > 0) {
                         self.hist.add(t);
@@ -355,6 +399,11 @@ const Editor = struct {
                     while (s > 0 and self.text[s - 1] != ' ' and self.text[s - 1] != '\n') s -= 1;
                     self.cut(s, self.cur);
                 },
+                15 => if (self.len == 0) { // Ctrl-O: the whole draft, or the last tool output
+                    out("\r\x1b[J");
+                    ui.expand();
+                    self.row = 0;
+                } else self.showAll(true),
                 12 => { // Ctrl-L
                     out("\x1b[H\x1b[2J");
                     self.row = 0;
@@ -463,49 +512,96 @@ const Editor = struct {
         self.cur = e.len;
     }
 
-    /// Redraw the prompt in place and park the cursor.
+    /// Redraw the prompt in place and park the cursor. Input taller than the screen
+    /// shows a window around the cursor (a cursor-up past the top would spill copies
+    /// into the scrollback); Ctrl-O prints all of it, and so does sending it.
     fn render(self: *Editor) void {
         const w: usize = sys.termCols();
+        const max_rows: usize = @max(@as(usize, sys.termRows()) -| 3, 3);
+        const all = self.layout(w, 0, 0, null);
+        var lo: usize = 0;
+        var hi: usize = all.rows;
+        if (all.rows > max_rows) { // window ending at the cursor's row or later
+            hi = @min(all.rows, @max(all.cur_row + 1, max_rows - 1));
+            lo = hi - (max_rows - 1);
+        }
         var b = Buf.init(self.len * 2 + 4096);
         defer b.free();
         if (self.row > 0) b.print("\x1b[{d}A", .{self.row});
         b.add("\r\x1b[J");
-        b.add(ui.accent());
-        b.add(prompt);
-        b.add(ui.plain());
+        if (lo > 0) b.print("{s}  ↑ {d} more lines · Ctrl-O shows all{s}\r\n", .{ ui.muted(), lo, ui.plain() });
+        const r = self.layout(w, lo, hi, &b);
+        const top: usize = @intFromBool(lo > 0); // the header row
+        const last = hi - 1 - lo + top; // screen row (from the prompt top) where output ended
+        const cur = r.cur_row - lo + top;
+        if (last > cur) b.print("\x1b[{d}A", .{last - cur});
+        b.add("\r");
+        if (r.cur_col > 0) b.print("\x1b[{d}C", .{r.cur_col});
+        self.row = cur;
+        out(b.items());
+    }
+
+    /// Print the whole input as a plain block (scrolls normally), then a fresh prompt.
+    fn showAll(self: *Editor, then_prompt: bool) void {
+        var b = Buf.init(self.len * 2 + 4096);
+        defer b.free();
+        if (self.row > 0) b.print("\x1b[{d}A", .{self.row});
+        b.add("\r\x1b[J");
+        const all = self.layout(sys.termCols(), 0, std.math.maxInt(usize), &b);
+        _ = all;
+        b.add("\r\n");
+        out(b.items());
+        self.row = 0;
+        if (then_prompt) {
+            ui.note("── end of draft ({d} lines) ──", .{std.mem.count(u8, self.text[0..self.len], "\n") + 1});
+            self.render();
+        }
+    }
+
+    const Layout = struct { rows: usize, cur_row: usize, cur_col: usize };
+
+    /// Walk the text as the terminal will wrap it. Rows in [lo, hi) are written to `b`
+    /// (hi == 0 writes nothing). Returns the row count and the cursor position.
+    fn layout(self: *Editor, w: usize, lo: usize, hi: usize, b: ?*Buf) Layout {
         var row: usize = 0;
         var col: usize = 2;
-        var cur_row: usize = 0;
-        var cur_col: usize = 2;
+        var res = Layout{ .rows = 1, .cur_row = 0, .cur_col = 2 };
+        const show = struct {
+            fn in(r: usize, l: usize, h: usize) bool {
+                return r >= l and r < h;
+            }
+        }.in;
+        if (b) |o| if (show(0, lo, hi)) {
+            o.add(ui.accent());
+            o.add(prompt);
+            o.add(ui.plain());
+        };
         var i: usize = 0;
         while (i <= self.len) {
             if (i == self.cur) {
-                cur_row = row;
-                cur_col = col;
+                res.cur_row = row;
+                res.cur_col = col;
             }
             if (i == self.len) break;
             const c = self.text[i];
             if (c == '\n') {
-                b.add("\r\n" ++ indent);
                 row += 1;
                 col = 2;
+                if (b) |o| if (show(row, lo, hi)) o.add(if (row > lo) "\r\n" ++ indent else indent);
                 i += 1;
                 continue;
             }
             const n = @min(std.unicode.utf8ByteSequenceLength(c) catch 1, self.len - i);
-            b.add(if (c == '\t') " " else self.text[i .. i + n]);
+            if (b) |o| if (show(row, lo, hi)) o.add(if (c == '\t') " " else self.text[i .. i + n]);
             i += n;
             col += 1;
             if (col == w) { // force the wrap now so positions stay exact
-                b.add("\r\n");
                 row += 1;
                 col = 0;
+                if (b) |o| if (show(row, lo, hi) and row > lo) o.add("\r\n");
             }
         }
-        if (row > cur_row) b.print("\x1b[{d}A", .{row - cur_row});
-        b.add("\r");
-        if (cur_col > 0) b.print("\x1b[{d}C", .{cur_col});
-        self.row = cur_row;
-        out(b.items());
+        res.rows = row + 1;
+        return res;
     }
 };

@@ -24,6 +24,12 @@ While it works you can keep typing: Enter queues the message and the model gets 
 step (to steer it), or as the next prompt if it has finished. Esc or Ctrl-C stops the turn, and
 anything you queued or typed comes back in the prompt. `/help` lists the keys.
 
+A paste or dictation taller than the screen is shown as a window around the cursor; Ctrl-O
+prints all of it so you can scroll up and read it, and sending prints it once. At an empty
+prompt Ctrl-O (or `/expand`) prints the last tool output in full. `/copy` puts the last reply on
+the clipboard, `/copy code` its last code block (through the terminal, OSC 52: kitty, foot,
+ghostty, alacritty, and over ssh).
+
 ## What it loads
 
 - `AGENTS.md` from the working directory and every parent up to `/`, outermost first (24 KB cap).

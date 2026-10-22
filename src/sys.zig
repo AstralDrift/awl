@@ -80,6 +80,12 @@ pub fn isatty(fd: fd_t) bool {
     return linux.errno(linux.ioctl(fd, linux.T.IOCGWINSZ, @intFromPtr(&ws))) == .SUCCESS;
 }
 
+pub fn termRows() u16 {
+    var ws: std.posix.winsize = undefined;
+    if (linux.errno(linux.ioctl(stdout, linux.T.IOCGWINSZ, @intFromPtr(&ws))) != .SUCCESS or ws.row == 0) return 24;
+    return ws.row;
+}
+
 pub fn termCols() u16 {
     var ws: std.posix.winsize = undefined;
     if (linux.errno(linux.ioctl(stdout, linux.T.IOCGWINSZ, @intFromPtr(&ws))) != .SUCCESS or ws.col == 0) return 80;
