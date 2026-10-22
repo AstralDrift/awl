@@ -66,7 +66,7 @@ ghostty, alacritty, and over ssh).
   repeat it to go further back. The model is told what was undone. Changes made by shell
   commands are not tracked.
 - `/mode auto` (default) runs everything; `/mode ask` shows each edit's diff and each command
-  and waits for y/n (a = allow the rest); `/mode plan` keeps files read-only and asks before
+  and waits for y/n (a = allow the rest: switches to auto); `/mode plan` keeps files read-only and asks before
   commands, so the model investigates and proposes. `AWL_MODE` sets the starting mode.
 
 ## What it loads

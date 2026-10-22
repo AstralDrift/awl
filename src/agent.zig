@@ -306,7 +306,10 @@ pub fn run() Outcome {
         for (turn.calls[0..turn.n], 0..) |*c, i| {
             out.reset();
             const r = tools.run(c.name.get(), c.args.items(), &out) catch {
-                ui.toolOutput(out.items(), false);
+                // the model gets the "[interrupted by user]" marker; the screen says it once, below
+                const o = out.items();
+                const shown = std.mem.trimEnd(u8, if (std.mem.endsWith(u8, o, "[interrupted by user]")) o[0 .. o.len - 21] else o, "\n");
+                if (shown.len > 0) ui.toolOutput(shown, false);
                 pushResult(c, step, i, out.items());
                 for (turn.calls[i + 1 .. turn.n], i + 1..) |*rest, j| pushResult(rest, step, j, "[skipped: interrupted by user]");
                 ui.note("interrupted", .{});

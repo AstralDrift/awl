@@ -635,6 +635,19 @@ def full_screen():
                     break
         return pat.encode() in out[0]
 
+    def after_leave(pat, t=3.0):  # `pat` printed after the switch back to the normal screen
+        end = time.time() + t
+        while time.time() < end:
+            parts = out[0].split(b"\x1b[?1049l", 1)
+            if len(parts) == 2 and pat.encode() in parts[1]:
+                return True
+            if select.select([f7], [], [], 0.05)[0]:
+                try:
+                    out[0] += os.read(f7, 65536)
+                except OSError:
+                    break
+        return False
+
     check("--full enters the alternate screen with wheel reports", until("\x1b[?1049h\x1b[?1000h\x1b[?1006h"), out[0][:120])
     until("fake-model \xc2\xb7 ".encode().decode("latin-1"), 1)
     until("\x1b[?2026l")
@@ -660,7 +673,7 @@ def full_screen():
     check("wheel down returns to the bottom", until("row 60") and b"PgDn" not in out[0].split(b"row 60")[-1], out[0][-200:])
     out[0] = b""
     os.write(f7, b"/full\r")
-    check("/full leaves: transcript printed on the normal screen", until("\x1b[?1049l") and until("row 60") and b"short reply" in out[0], out[0][-200:])
+    check("/full leaves: transcript printed on the normal screen", after_leave("row 60") and b"short reply" in out[0].split(b"\x1b[?1049l", 1)[1], out[0][-200:])
     out[0] = b""
     os.write(f7, b"/full\r")
     check("/full enters again", until("\x1b[?1049h"), out[0][-100:])
@@ -668,7 +681,7 @@ def full_screen():
     until("after toggle")
     out[0] = b""
     os.write(f7, b"\x04")  # Ctrl-D quits
-    check("quitting prints the transcript and restores the screen", until("\x1b[?1049l") and until("after toggle"), out[0][-200:])
+    check("quitting prints the transcript and restores the screen", after_leave("after toggle"), out[0][-200:])
     try:
         os.waitpid(p7, 0)
     except ChildProcessError:

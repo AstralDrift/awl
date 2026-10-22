@@ -245,10 +245,15 @@ fn welcome() void {
     b.print(" · mode {s}{s}{s}", .{ modeColor(), @tagName(tools.mode), m });
     ui.raw(b.items());
     b.reset();
-    b.print("{s}{s}", .{ m, dir });
-    if (br.len > 0) b.print(" · ⎇ {s}", .{br});
-    if (agent.n_agents_md > 0) b.print(" · {d} AGENTS.md", .{agent.n_agents_md});
-    if (agent.n_skills > 0) b.print(" · {d} skill{s}", .{ agent.n_skills, if (agent.n_skills == 1) "" else "s" });
+    var rest = Buf.init(4096); // what follows the folder; the folder gets the rest of the row
+    defer rest.free();
+    if (br.len > 0) rest.print(" · ⎇ {s}", .{br});
+    if (agent.n_agents_md > 0) rest.print(" · {d} AGENTS.md", .{agent.n_agents_md});
+    if (agent.n_skills > 0) rest.print(" · {d} skill{s}", .{ agent.n_skills, if (agent.n_skills == 1) "" else "s" });
+    const rest_w = std.unicode.utf8CountCodepoints(rest.items()) catch rest.len;
+    const room = @as(usize, sys.termCols()) -| (rest_w + 1);
+    const short = tailCols(dir, @max(room, 12));
+    b.print("{s}{s}{s}{s}", .{ m, if (short.len < dir.len) "…" else "", short, rest.items() });
     ui.raw(b.items());
     if (agent.n_msgs <= 1) { // a fresh start: offer the last conversation held here
         var one: [1]session.Entry = undefined;
@@ -273,6 +278,23 @@ fn modeColor() []const u8 {
         .ask => ui.yellow(),
         .plan => ui.accent(),
     };
+}
+
+/// The end of path `s` in at most `w` columns, starting after a '/' when it is cut (the
+/// caller shows "…" in front).
+fn tailCols(s: []const u8, w: usize) []const u8 {
+    const n = std.unicode.utf8CountCodepoints(s) catch s.len;
+    if (n <= w) return s;
+    var i: usize = 0;
+    var skip = n - (w -| 1); // leave a column for the "…"
+    while (skip > 0 and i < s.len) : (skip -= 1) i += std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+    const t = s[@min(i, s.len)..];
+    return if (std.mem.indexOfScalar(u8, t, '/')) |k| t[k..] else t;
+}
+
+test "tailCols keeps the end of a path" {
+    try std.testing.expectEqualStrings("~/Work/awl", tailCols("~/Work/awl", 20));
+    try std.testing.expectEqualStrings("/demo/proj", tailCols("/tmp/claude-1000/scratchpad/demo/proj", 14));
 }
 
 /// `s` cut to at most `w` columns (counting UTF-8 sequences as one column each).
@@ -317,7 +339,7 @@ fn footer(b: *Buf, w: usize) void {
             else if (eq(u8, name, "session")) std.fs.path.basename(session.path) //
             else if (eq(u8, name, "ctx")) blk: {
                 const k = @as(f64, @floatFromInt(agent.ctx_tokens)) / 1000;
-                if (agent.ctx_limit == 0) break :blk std.fmt.bufPrint(&item_b, "ctx {d:.1}k", .{k}) catch "";
+                if (agent.ctx_limit == 0) break :blk if (agent.ctx_tokens == 0) "" else std.fmt.bufPrint(&item_b, "ctx {d:.1}k", .{k}) catch "";
                 const pct = agent.ctx_tokens * 100 / agent.ctx_limit;
                 // amber once old tool output starts being trimmed (60%), red near compaction (80%)
                 color = if (pct >= 80) ui.red() else if (pct >= 60) ui.yellow() else m;
@@ -442,10 +464,11 @@ var ta_paste = false;
 
 var hist: ?*Buf = null; // the editor's history: queued messages are added to it
 
-/// Approval for a command or file change (ask and plan modes): y / Enter, n, a = always.
+/// Approval for a command or file change (ask and plan modes): y / Enter, n, and in
+/// ask mode a = allow this and everything after (switches to auto).
 fn askUser() tools.Answer {
     pump(); // keys typed before the question belong to the draft, not the answer
-    ui.ask("  allow? y/n, a = always ");
+    ui.ask(if (tools.mode == .ask) "  allow? y/n · a = all from now on (auto mode) " else "  allow? y/n ");
     ui.drawNow();
     while (true) {
         var p = [2]linux.pollfd{
@@ -772,7 +795,25 @@ fn command(text: []const u8) ?bool {
         ui.loadTheme();
         ui.note("theme reloaded", .{});
     } else if (eq(u8, text, "/help")) {
-        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-R search history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\nWhile it works: type and Enter to queue a message for the next step · Esc or Ctrl-C to stop\n/new (or /clear) starts over · /resume lists this folder's sessions\nCtrl-O: show all of a long draft, or (empty prompt) the last tool output\n!cmd runs a shell command (output goes to the model too) · @file attaches a file\nTab: complete, or pick from the project's files after @ or from the commands after / · Ctrl-P next model (AWL_MODELS) or pick one\n/undo  /mode auto|ask|plan  /copy  /copy code  /expand  /context  /compact  /model  /new  /resume  /full  /theme  /quit\nsession: {s}", .{session.path});
+        var pb: [4096]u8 = undefined;
+        const home = sys.getenv("HOME") orelse "";
+        const sp = session.path;
+        const spath = if (home.len > 1 and std.mem.startsWith(u8, sp, home)) std.fmt.bufPrint(&pb, "~{s}", .{sp[home.len..]}) catch sp else sp;
+        ui.note(
+            \\keys
+            \\  Enter send · Alt-Enter or Ctrl-J newline · ↑↓ history · Ctrl-R search
+            \\  Tab completes; after @ or / it opens a picker · Ctrl-P switch model
+            \\  Ctrl-O shows a long draft, or the last tool output · Ctrl-L clears
+            \\  Ctrl-C clears the line (twice quits) · Ctrl-D quits
+            \\while it works
+            \\  type and Enter to queue a message · Esc or Ctrl-C stops
+            \\in a message
+            \\  @file attaches a file · !cmd runs a command (the model sees it too)
+            \\commands
+            \\  /new  /resume  /model  /mode auto|ask|plan  /undo  /compact  /context
+            \\  /copy  /copy code  /expand  /full  /theme  /quit
+            \\session {s}
+        , .{spath});
     } else return null;
     return false;
 }
@@ -787,11 +828,12 @@ fn lower(c: u8) u8 {
     return std.ascii.toLower(c);
 }
 
-/// 3: `q` is in the last path part of `s`; 2: anywhere in `s`; 1: its letters appear in
-/// order; 0: no match. Case is ignored.
-fn score(s: []const u8, q: []const u8) u2 {
-    if (q.len == 0) return 3;
+/// 4: the last path part of `s` starts with `q`; 3: contains it; 2: `s` contains it;
+/// 1: its letters appear in order; 0: no match. Case is ignored.
+fn score(s: []const u8, q: []const u8) u3 {
+    if (q.len == 0) return 4;
     const base = if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| s[i + 1 ..] else s;
+    if (std.ascii.startsWithIgnoreCase(base, q)) return 4;
     if (std.ascii.indexOfIgnoreCase(base, q) != null) return 3;
     if (std.ascii.indexOfIgnoreCase(s, q) != null) return 2;
     var j: usize = 0;
@@ -803,8 +845,11 @@ fn score(s: []const u8, q: []const u8) u2 {
 
 /// Show `items` under `title`; typing filters, ↑↓ (or Tab, Ctrl-N/P) move, Enter picks,
 /// Esc or Ctrl-C cancels. Returns the index into `items`. Draws where the cursor is and
-/// erases itself before returning.
-fn pick(title: []const u8, items: []const []const u8, query: []const u8) ?usize {
+/// erases itself before returning. `start`: the item selected first (with no query);
+/// `paths`: among equal matches, shorter paths first.
+const PickOpts = struct { start: usize = 0, paths: bool = false };
+
+fn pick(title: []const u8, items: []const []const u8, query: []const u8, opts: PickOpts) ?usize {
     const ed = editor orelse return null;
     if (items.len == 0) return null;
     setMode(false);
@@ -813,7 +858,8 @@ fn pick(title: []const u8, items: []const []const u8, query: []const u8) ?usize 
     var qn = @min(query.len, q.len);
     @memcpy(q[0..qn], query[0..qn]);
     var shown: [max_items]u16 = undefined;
-    var sel: usize = 0;
+    var sc: [max_items]u3 = undefined;
+    var sel: usize = if (query.len == 0) @min(opts.start, items.len - 1) else 0;
     var top: usize = 0;
     var cur_row: usize = 0; // the cursor's row in the drawn block (the query line)
     var drawn = false;
@@ -827,13 +873,21 @@ fn pick(title: []const u8, items: []const []const u8, query: []const u8) ?usize 
     while (true) {
         // filter: name matches first, then path matches, then in-order letter matches
         var n: usize = 0;
-        for ([_]u2{ 3, 2, 1 }) |want| {
-            for (items, 0..) |it, i| {
-                if (n == shown.len) break;
-                if (score(it, q[0..qn]) == want) {
-                    shown[n] = @intCast(i);
-                    n += 1;
-                }
+        const all = items[0..@min(items.len, max_items)];
+        for (all, 0..) |it, i| sc[i] = score(it, q[0..qn]);
+        for ([_]u3{ 4, 3, 2, 1 }) |want| {
+            const tier = n;
+            for (all, 0..) |_, i| if (sc[i] == want) {
+                shown[n] = @intCast(i);
+                n += 1;
+            };
+            if (opts.paths and qn > 0) { // src/calc.py before src/__pycache__/calc.cpython-314.pyc
+                const C = struct {
+                    fn lt(its: []const []const u8, x: u16, y: u16) bool {
+                        return its[x].len < its[y].len or (its[x].len == its[y].len and x < y);
+                    }
+                };
+                std.sort.pdq(u16, shown[tier..n], all, C.lt);
             }
         }
         sel = @min(sel, n -| 1);
@@ -929,7 +983,7 @@ fn resumePicker(l: []session.Entry) ?usize {
         names[k] = text.items()[start..ends[k]];
         start = ends[k];
     }
-    return pick("resume a conversation from this folder", names[0..l.len], "");
+    return pick("resume a conversation from this folder", names[0..l.len], "", .{});
 }
 
 /// /model without a name (and Ctrl-P without AWL_MODELS): choose from the server's list.
@@ -943,8 +997,14 @@ fn modelPicker() void {
     defer text.free();
     var names: [1024][]const u8 = undefined;
     var ends: [1024]usize = undefined;
+    var cur: usize = 0;
     for (l, 0..) |m, k| {
-        if (m.ctx > 0) text.print("{s}  {d}k", .{ m.id, m.ctx / 1000 }) else text.add(m.id);
+        text.add(m.id);
+        if (m.ctx > 0) text.print("  {d}k", .{m.ctx / 1000});
+        if (std.mem.eql(u8, m.id, agent.cfg.model)) {
+            text.add("  (current)");
+            cur = k;
+        }
         ends[k] = text.len;
     }
     var start: usize = 0;
@@ -952,7 +1012,7 @@ fn modelPicker() void {
         names[k] = text.items()[start..ends[k]];
         start = ends[k];
     }
-    const k = pick("switch model", names[0..l.len], "") orelse return;
+    const k = pick("switch model", names[0..l.len], "", .{ .start = cur }) orelse return;
     switchModel(l[k].id, l[k].ctx);
 }
 
@@ -990,11 +1050,12 @@ fn cycleModel() void {
 }
 
 test "picker ranking" {
-    try std.testing.expectEqual(@as(u2, 3), score("src/tui.zig", "TUI"));
-    try std.testing.expectEqual(@as(u2, 2), score("tui/main.zig", "tui"));
-    try std.testing.expectEqual(@as(u2, 1), score("tests/unit/i.py", "tui"));
-    try std.testing.expectEqual(@as(u2, 0), score("README.md", "tui"));
-    try std.testing.expectEqual(@as(u2, 3), score("anything", ""));
+    try std.testing.expectEqual(@as(u3, 4), score("src/tui.zig", "TUI"));
+    try std.testing.expectEqual(@as(u3, 3), score("src/my_tui.zig", "tui"));
+    try std.testing.expectEqual(@as(u3, 2), score("tui/main.zig", "tui"));
+    try std.testing.expectEqual(@as(u3, 1), score("tests/unit/i.py", "tui"));
+    try std.testing.expectEqual(@as(u3, 0), score("README.md", "tui"));
+    try std.testing.expectEqual(@as(u3, 4), score("anything", ""));
 }
 
 const commands = [_][]const u8{
@@ -1344,7 +1405,7 @@ const Editor = struct {
         const k = @min(n, al.len);
         for (list[0..k], 0..) |x, i| al[i] = x;
         self.aside();
-        const choice = pick("attach a file", al[0..k], q[0..qn]) orelse return true;
+        const choice = pick("attach a file", al[0..k], q[0..qn], .{ .paths = true }) orelse return true;
         const path = al[choice];
         self.cut(s, self.cur);
         self.insert("@");
@@ -1366,7 +1427,7 @@ const Editor = struct {
             const qn = @min(word.len, q.len);
             @memcpy(q[0..qn], word[0..qn]);
             self.aside();
-            const k = pick("commands", &commands, q[0..qn]) orelse return;
+            const k = pick("commands", &commands, q[0..qn], .{}) orelse return;
             break :blk commands[k];
         };
         self.cut(0, self.cur);
@@ -1553,10 +1614,10 @@ const Editor = struct {
             if (b) |o| if (show(row, lo, hi)) o.add(if (c == '\t') " " else self.text[i .. i + n]);
             i += n;
             col += 1;
-            if (col == w) { // force the wrap now so positions stay exact
+            if (col == w) { // force the wrap now so positions stay exact; line up under the text
                 row += 1;
-                col = 0;
-                if (b) |o| if (show(row, lo, hi) and row > lo) o.add("\r\n");
+                col = 2;
+                if (b) |o| if (show(row, lo, hi)) o.add(if (row > lo) "\r\n" ++ indent else indent);
             }
         }
         res.rows = row + 1;
