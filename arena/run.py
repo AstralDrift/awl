@@ -6,6 +6,7 @@
   arena/run.py t2 [--h ...] [--repeat 2] [--timeout 300] [--tasks a,b]
   arena/run.py t3 [...]                 # real coding/build tasks, 600 s timeout
   arena/run.py t4 [...]                 # long-horizon tasks (server, big log, migration, wrong fix, rules)
+  arena/run.py t5 [...]                 # 40-100 steps in a small window: 8 issues, 40-file API move, spec implementation
   arena/run.py t3 --upstream openrouter [--model deepseek/deepseek-v4.1-flash] [--provider P] [--budget 1.50]
 
 --upstream openrouter reads the key from ~/.local/state/awl-arena/openrouter.key (or
@@ -224,7 +225,7 @@ def main():
     if harnesses == ["all"]:
         harnesses = "awl pi omp grok".split()
     repeat = int(arg("--repeat", "1" if tier == "t1" else "2"))
-    timeout = int(arg("--timeout", "600" if tier in ("t3", "t4") else "300"))
+    timeout = int(arg("--timeout", "1200" if tier == "t5" else "600" if tier in ("t3", "t4") else "300"))
     tasks = arg("--tasks", "").split(",") if "--tasks" in sys.argv else tier_tasks(tier)
     upstream = arg("--upstream", "http://127.0.0.1:12434")
     env0 = tool_env()

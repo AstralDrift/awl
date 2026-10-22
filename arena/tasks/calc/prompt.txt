@@ -1,0 +1,1 @@
+Implement the calculator described in SPEC.md: fill in `run_line` in calc.py (add whatever else you need). Follow the spec exactly, including the error messages and columns. Add tests for what you build.

@@ -1,0 +1,1 @@
+ISSUES.md lists eight bugs reported against this shop package. Fix all eight. Add a regression test for each issue under tests/ (the existing tests must keep passing). Don't change behavior the issues don't mention.

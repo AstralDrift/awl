@@ -1,0 +1,2 @@
+"""Service modules, run in this order."""
+NAMES = ['billing', 'shipping', 'search', 'auth', 'audit', 'export', 'imports', 'cache', 'queue', 'email', 'sms', 'push', 'reports', 'tax', 'pricing', 'coupons', 'cart', 'orders', 'returns', 'refunds', 'stock', 'warehouse', 'suppliers', 'invoices', 'payments', 'fraud', 'users', 'sessions', 'profiles', 'reviews', 'ratings', 'media', 'thumbnails', 'sitemap', 'feeds', 'webhooks', 'scheduler', 'backup', 'metrics', 'health']

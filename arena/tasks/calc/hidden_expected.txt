@@ -1,0 +1,54 @@
+7
+9
+3
+2
+42
+14
+-14
+-14
+-2
+2
+1024
+512
+64
+-4
+4
+3
+4
+1
+246913578024691357802469135780
+x = 1000000
+y = 333333
+1
+x = 1000001
+1000001
+_tmp9 = -1000001
+-2
+3
+-1
+49
+6
+0
+1
+error: unknown name z at col 1
+error: division by zero at col 3
+error: division by zero at col 3
+error: negative exponent at col 3
+error: negative exponent at col 3
+error: wrong number of arguments to abs at col 1
+error: wrong number of arguments to gcd at col 1
+error: unknown name sqrt at col 1
+error: bad number at col 1
+error: bad number at col 1
+error: unexpected end of input at col 7
+error: unexpected end of input at col 4
+error: unexpected '4' at col 3
+error: unexpected ')' at col 5
+error: unknown character '$' at col 3
+error: unexpected '5' at col 7
+error: unexpected end of input at col 8
+error: unknown character 'X' at col 1
+error: unexpected ')' at col 7
+error: division by zero at col 11
+error: unknown name w at col 1
+333333

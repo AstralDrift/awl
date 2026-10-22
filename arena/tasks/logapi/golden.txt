@@ -1,0 +1,127 @@
+[info] svc.mods.billing: billing catalog: ['a', 'b', 'c']
+[info] svc.mods.billing: billing step 1 of 2 (n=3)
+[warn] svc.mods.billing: billing step 2 of 2
+[warn] svc.mods.shipping: shipping step 1 of 3
+[error] svc.mods.shipping: shipping step 2 of 3
+[info] svc.mods.shipping: shipping step 3 of 3
+[error] svc.mods.search: search step 1 of 4
+[info] svc.mods.search: search step 2 of 4
+[warn] svc.mods.search: search step 3 of 4
+[error] svc.mods.search: search step 4 of 4
+[info] svc.mods.auth: auth step 1 of 2
+[warn] svc.mods.auth: auth step 2 of 2
+[warn] svc.mods.audit: audit step 1 of 3
+[error] svc.mods.audit: audit step 2 of 3
+[info] svc.mods.audit: audit step 3 of 3
+[info] svc.mods.export: export catalog: ['a', 'b', 'c']
+[error] svc.mods.export: export step 1 of 4
+[info] svc.mods.export: export step 2 of 4
+[warn] svc.mods.export: export step 3 of 4 (n=3)
+[error] svc.mods.export: export step 4 of 4
+[info] svc.mods.imports: imports step 1 of 2
+[warn] svc.mods.imports: imports step 2 of 2 (n=3)
+[warn] svc.mods.cache: cache step 1 of 3 (n=3)
+[error] svc.mods.cache: cache step 2 of 3
+[info] svc.mods.cache: cache step 3 of 3
+[error] svc.mods.queue: queue step 1 of 4
+[info] svc.mods.queue: queue step 2 of 4
+[warn] svc.mods.queue: queue step 3 of 4
+[warn] svc.mods.queue: queue step 4 of 4
+[info] svc.mods.email: email step 1 of 2
+[warn] svc.mods.email: email step 2 of 2
+[info] svc.mods.sms: sms catalog: ['a', 'b', 'c']
+[warn] svc.mods.sms: sms step 1 of 3
+[warn] svc.mods.sms: sms step 2 of 3
+[info] svc.mods.sms: sms step 3 of 3
+[warn] svc.mods.push: push step 1 of 4
+[info] svc.mods.push: push step 2 of 4
+[warn] svc.mods.push: push step 3 of 4
+[error] svc.mods.push: push step 4 of 4 (n=3)
+[info] svc.mods.reports: reports step 1 of 2
+[warn] svc.mods.reports: reports step 2 of 2
+[warn] svc.mods.tax: tax step 1 of 3
+[error] svc.mods.tax: tax step 2 of 3 (n=3)
+[info] svc.mods.tax: tax step 3 of 3
+[error] svc.mods.pricing: pricing step 1 of 4 (n=3)
+[info] svc.mods.pricing: pricing step 2 of 4
+[warn] svc.mods.pricing: pricing step 3 of 4
+[error] svc.mods.pricing: pricing step 4 of 4
+[info] svc.mods.coupons: coupons catalog: ['a', 'b', 'c']
+[info] svc.mods.coupons: coupons step 1 of 2
+[warn] svc.mods.coupons: coupons step 2 of 2
+[warn] svc.mods.cart: cart step 1 of 3
+[error] svc.mods.cart: cart step 2 of 3
+[info] svc.mods.cart: cart step 3 of 3
+[error] svc.mods.orders: orders step 1 of 4
+[info] svc.mods.orders: orders step 2 of 4
+[warn] svc.mods.orders: orders step 3 of 4
+[error] svc.mods.orders: orders step 4 of 4
+[info] svc.mods.returns: returns step 1 of 2
+[warn] svc.mods.returns: returns step 2 of 2
+[warn] svc.mods.refunds: refunds step 1 of 3
+[error] svc.mods.refunds: refunds step 2 of 3
+[info] svc.mods.refunds: refunds step 3 of 3 (n=3)
+[info] svc.mods.stock: stock catalog: ['a', 'b', 'c']
+[error] svc.mods.stock: stock step 1 of 4
+[info] svc.mods.stock: stock step 2 of 4 (n=3)
+[warn] svc.mods.stock: stock step 3 of 4
+[error] svc.mods.stock: stock step 4 of 4
+[info] svc.mods.warehouse: warehouse step 1 of 2 (n=3)
+[warn] svc.mods.warehouse: warehouse step 2 of 2
+[warn] svc.mods.suppliers: suppliers step 1 of 3
+[error] svc.mods.suppliers: suppliers step 2 of 3
+[info] svc.mods.suppliers: suppliers step 3 of 3
+[error] svc.mods.invoices: invoices step 1 of 4
+[info] svc.mods.invoices: invoices step 2 of 4
+[warn] svc.mods.invoices: invoices step 3 of 4
+[error] svc.mods.invoices: invoices step 4 of 4
+[info] svc.mods.payments: payments step 1 of 2
+[warn] svc.mods.payments: payments step 2 of 2
+[info] svc.mods.fraud: fraud catalog: ['a', 'b', 'c']
+[warn] svc.mods.fraud: fraud step 1 of 3
+[error] svc.mods.fraud: fraud step 2 of 3
+[info] svc.mods.fraud: fraud step 3 of 3
+[error] svc.mods.users: users step 1 of 4
+[info] svc.mods.users: users step 2 of 4
+[warn] svc.mods.users: users step 3 of 4 (n=3)
+[error] svc.mods.users: users step 4 of 4
+[info] svc.mods.sessions: sessions step 1 of 2
+[warn] svc.mods.sessions: sessions step 2 of 2 (n=3)
+[warn] svc.mods.profiles: profiles step 1 of 3 (n=3)
+[error] svc.mods.profiles: profiles step 2 of 3
+[info] svc.mods.profiles: profiles step 3 of 3
+[error] svc.mods.reviews: reviews step 1 of 4
+[info] svc.mods.reviews: reviews step 2 of 4
+[warn] svc.mods.reviews: reviews step 3 of 4
+[error] svc.mods.reviews: reviews step 4 of 4
+[info] svc.mods.ratings: ratings catalog: ['a', 'b', 'c']
+[info] svc.mods.ratings: ratings step 1 of 2
+[warn] svc.mods.ratings: ratings step 2 of 2
+[warn] svc.mods.media: media step 1 of 3
+[error] svc.mods.media: media step 2 of 3
+[warn] svc.mods.media: media step 3 of 3
+[error] svc.mods.thumbnails: thumbnails step 1 of 4
+[warn] svc.mods.thumbnails: thumbnails step 2 of 4
+[warn] svc.mods.thumbnails: thumbnails step 3 of 4
+[error] svc.mods.thumbnails: thumbnails step 4 of 4 (n=3)
+[warn] svc.mods.sitemap: sitemap step 1 of 2
+[warn] svc.mods.sitemap: sitemap step 2 of 2
+[warn] svc.mods.feeds: feeds step 1 of 3
+[error] svc.mods.feeds: feeds step 2 of 3 (n=3)
+[info] svc.mods.feeds: feeds step 3 of 3
+[info] svc.mods.webhooks: webhooks catalog: ['a', 'b', 'c']
+[error] svc.mods.webhooks: webhooks step 1 of 4 (n=3)
+[info] svc.mods.webhooks: webhooks step 2 of 4
+[warn] svc.mods.webhooks: webhooks step 3 of 4
+[error] svc.mods.webhooks: webhooks step 4 of 4
+[info] svc.mods.scheduler: scheduler step 1 of 2
+[warn] svc.mods.scheduler: scheduler step 2 of 2
+[warn] svc.mods.backup: backup step 1 of 3
+[error] svc.mods.backup: backup step 2 of 3
+[info] svc.mods.backup: backup step 3 of 3
+[error] svc.mods.metrics: metrics step 1 of 4
+[info] svc.mods.metrics: metrics step 2 of 4
+[warn] svc.mods.metrics: metrics step 3 of 4
+[error] svc.mods.metrics: metrics step 4 of 4
+[info] svc.mods.health: health step 1 of 2
+[warn] svc.mods.health: health step 2 of 2

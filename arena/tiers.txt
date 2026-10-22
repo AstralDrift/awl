@@ -2,3 +2,4 @@ t1: ledger offbyone rename needle cliflag
 t2: ledger offbyone rename needle cliflag stacktrace hello jsonfix shellbug whereis
 t3: cbuild zigport flaky feature-cli feature-api impl-spec multifile refactor bigrepo longsession
 t4: server biglog migrate wrongfix rules
+t5: issues logapi calc
