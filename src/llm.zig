@@ -84,6 +84,8 @@ pub const Error = http.Error || error{ Status, Server };
 
 /// Status/error detail for the last failure (for messages).
 pub var detail: [512]u8 = undefined;
+/// HTTP status of the last non-200 reply (0 when the failure was not an HTTP status).
+pub var last_status: u16 = 0;
 pub var detail_len: usize = 0;
 fn setDetail(s: []const u8) void {
     detail_len = @min(s.len, detail.len);
@@ -91,6 +93,7 @@ fn setDetail(s: []const u8) void {
 }
 
 pub fn stream(cfg: Cfg, body: []const []const u8, t: *Turn) Error!void {
+    last_status = 0;
     const fd = try http.connect(cfg.url);
     var r = http.Response{ .fd = fd };
     defer r.deinit();
@@ -105,6 +108,7 @@ pub fn stream(cfg: Cfg, body: []const []const u8, t: *Turn) Error!void {
         }
         var tmp: [512]u8 = undefined;
         setDetail(std.fmt.bufPrint(&tmp, "HTTP {d}: {s}", .{ r.status, eb.items() }) catch "HTTP error");
+        last_status = r.status;
         return error.Status;
     }
     while (try r.nextLine()) |line| {

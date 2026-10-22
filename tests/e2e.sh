@@ -125,9 +125,39 @@ stop
 # 3. server error is reported, exit 1
 echo '[{"status":500,"content":"model exploded"}]' >"$W/err.json"
 serve "$W/err.json"
-out=$(cd "$W" && "$AWL" -p hi 2>&1)
+out=$(cd "$W" && AWL_RETRIES=1 "$AWL" -p hi 2>&1)
 rc=$?
 [ $rc -eq 1 ] && case "$out" in *"model exploded"*) true ;; *) false ;; esac && ok "http 500 reported" || bad "http 500" "rc=$rc $out"
+stop
+
+# 3b. transient errors are retried with backoff; a 4xx is not
+echo '[{"status":503,"content":"overloaded"},{"status":429,"content":"slow down"},{"content":"recovered"}]' >"$W/retry.json"
+serve "$W/retry.json"
+t0=$(date +%s%N)
+out=$(cd "$W" && "$AWL" -p hi 2>"$W/rerr")
+ms=$((($(date +%s%N) - t0) / 1000000))
+[ "$out" = "recovered" ] && grep -q "retry 1/5 in 1 s" "$W/rerr" && grep -q "retry 2/5 in 2 s" "$W/rerr" && [ $ms -ge 2900 ] && ok "503 + 429 retried (${ms} ms)" || bad "retry" "out=$out ms=$ms $(cat "$W/rerr")"
+[ "$(wc -l <"$LOG")" -eq 3 ] && ok "retried requests sent" || bad "retried requests sent" "$(wc -l <"$LOG")"
+stop
+echo '[{"status":400,"content":"bad request"},{"content":"should not get here"}]' >"$W/r400.json"
+serve "$W/r400.json"
+out=$(cd "$W" && "$AWL" -p hi 2>&1)
+rc=$?
+[ $rc -eq 1 ] && [ "$(wc -l <"$LOG")" -eq 1 ] && ok "400 not retried" || bad "400 not retried" "rc=$rc $(wc -l <"$LOG") $out"
+stop
+
+# 3c. Ctrl-C during a retry wait stops at once
+echo '[{"status":503,"content":"down"}]' >"$W/down.json"
+serve "$W/down.json"
+(cd "$W" && exec "$AWL" -p go >/dev/null 2>&1) &
+apid=$!
+sleep 0.5
+t0=$(date +%s%N)
+kill -INT $apid
+wait $apid
+rc=$?
+ms=$((($(date +%s%N) - t0) / 1000000))
+[ $rc -eq 130 ] && [ $ms -lt 200 ] && ok "ctrl-c in retry wait (${ms} ms)" || bad "ctrl-c in retry wait" "rc=$rc ${ms} ms"
 stop
 
 # 4. no server: clear message, exit 2

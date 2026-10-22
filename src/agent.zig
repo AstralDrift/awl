@@ -4,6 +4,7 @@
 const std = @import("std");
 const sys = @import("sys.zig");
 const llm = @import("llm.zig");
+const http = @import("http.zig");
 const tools = @import("tools.zig");
 const ui = @import("ui.zig");
 const session = @import("session.zig");
@@ -194,9 +195,8 @@ pub const Outcome = enum { done, cancelled, failed, max_steps };
 pub fn run() Outcome {
     var step: usize = 0;
     while (step < max_steps) : (step += 1) {
-        turn.reset();
         const t0 = sys.nowNs();
-        llm.stream(cfg, &.{ head.items(), msgs.items(), "]}" }, &turn) catch |e| {
+        streamRetrying() catch |e| {
             ui.endMessage();
             switch (e) {
                 error.Cancel => {
@@ -234,6 +234,35 @@ pub fn run() Outcome {
     }
     ui.err("stopped after {d} steps (AWL_MAX_STEPS)", .{max_steps});
     return .max_steps;
+}
+
+pub var max_retries: u32 = 5;
+
+/// One model request, retried with backoff (1, 2, 4, 8, 16 s) on failures that are
+/// usually transient: connection loss, 408/425/429/5xx, provider error events. Only
+/// retried while nothing of the reply has arrived, so output is never duplicated.
+fn streamRetrying() llm.Error!void {
+    var attempt: u32 = 0;
+    while (true) : (attempt += 1) {
+        turn.reset();
+        llm.stream(cfg, &.{ head.items(), msgs.items(), "]}" }, &turn) catch |e| {
+            const transient = switch (e) {
+                error.Cancel => false,
+                error.Status => switch (llm.last_status) {
+                    408, 425, 429, 500, 502, 503, 504 => true,
+                    else => false,
+                },
+                else => true,
+            };
+            if (!transient or attempt >= max_retries or turn.content.len > 0 or turn.n > 0) return e;
+            const secs = @as(u32, 1) << @intCast(@min(attempt, 4));
+            ui.endMessage();
+            ui.note("model request failed ({s}); retry {d}/{d} in {d} s", .{ if (e == error.Status) llm.detail[0..@min(llm.detail_len, 60)] else @errorName(e), attempt + 1, max_retries, secs });
+            if (try http.wait(sys.sigfd, @intCast(secs * 1000))) return error.Cancel;
+            continue;
+        };
+        return;
+    }
 }
 
 fn callId(c: *const llm.Call, step: usize, i: usize, b: []u8) []const u8 {

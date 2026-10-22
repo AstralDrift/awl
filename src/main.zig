@@ -28,7 +28,7 @@ const usage =
     \\  -p PROMPT   run once and print the reply (no TUI)
     \\  -c          continue the latest session
     \\  -r FILE     resume a session file
-    \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MAX_STEPS AWL_SYSTEM AWL_REASONING
+    \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MAX_STEPS AWL_SYSTEM AWL_REASONING AWL_RETRIES
     \\
 ;
 
@@ -82,6 +82,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var key_b: [512]u8 = undefined;
     agent.cfg.key = sys.getenv("AWL_KEY") orelse gatewayKey(&key_b);
     if (sys.getenv("AWL_MAX_STEPS")) |s| agent.max_steps = std.fmt.parseInt(usize, s, 10) catch 200;
+    if (sys.getenv("AWL_RETRIES")) |s| agent.max_retries = std.fmt.parseInt(u32, s, 10) catch 5;
 
     if (idle) { // budget probe: full startup minus the network
         agent.cfg.model = "idle";
