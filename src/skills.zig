@@ -13,7 +13,8 @@ const max_desc = 160;
 
 pub const Meta = struct { name: []const u8, desc: []const u8 };
 
-/// Parse `name` and `description` from YAML frontmatter. Handles inline values (quoted or
+/// Parse `name` and `description` from YAML frontmatter. A skill marked
+/// `disable-model-invocation: true` is for the user to invoke and yields null. Handles inline values (quoted or
 /// not) and folded/literal blocks (`>`, `>-`, `|`) whose lines are indented. The folded
 /// description is joined into `out` with single spaces.
 pub fn parse(text: []const u8, out: []u8) ?Meta {
@@ -33,7 +34,9 @@ pub fn parse(text: []const u8, out: []u8) ?Meta {
             }
             in_block = false;
         }
-        if (std.mem.startsWith(u8, line, "name:")) {
+        if (std.mem.startsWith(u8, line, "disable-model-invocation:")) {
+            if (std.mem.eql(u8, std.mem.trim(u8, line[25..], " \t\"'"), "true")) return null;
+        } else if (std.mem.startsWith(u8, line, "name:")) {
             name = unquote(std.mem.trim(u8, line[5..], " \t"));
         } else if (std.mem.startsWith(u8, line, "description:")) {
             const v = std.mem.trim(u8, line[12..], " \t");
@@ -121,4 +124,7 @@ test "skill frontmatter: inline, quoted and folded descriptions" {
     var b3: [256]u8 = undefined;
     try t.expect(parse("no frontmatter here", &b3) == null);
     try t.expect(parse("---\nname: x\n---\n", &b3) == null); // no description
+    // user-invoked only (Agent Skills spec): never listed for the model
+    try t.expect(parse("---\nname: tdd\ndescription: x\ndisable-model-invocation: true\n---\n", &b3) == null);
+    try t.expect(parse("---\nname: tdd\ndescription: x\ndisable-model-invocation: false\n---\n", &b3) != null);
 }
