@@ -91,6 +91,22 @@ assert "PATH=" in tool["content"], tool["content"]
 EOF
 stop
 
+# 2c. AGENTS.md from every parent directory, outermost first (nearest wins conflicts)
+mkdir -p "$W/outer/inner"
+echo "OUTER-RULE" >"$W/outer/AGENTS.md"
+echo "INNER-RULE" >"$W/outer/inner/AGENTS.md"
+echo '[{"content":"ok"}]' >"$W/ag.json"
+serve "$W/ag.json"
+(cd "$W/outer/inner" && "$AWL" -p hi >/dev/null 2>&1)
+python3 - "$LOG" "$W" <<'EOF' && ok "AGENTS.md from parents, outer first" || bad "AGENTS.md from parents" "see above"
+import json, sys
+sysmsg = json.loads(open(sys.argv[1]).readline())["messages"][0]["content"]
+o, i = sysmsg.find("OUTER-RULE"), sysmsg.find("INNER-RULE")
+assert 0 < o < i, (o, i, sysmsg[-300:])
+assert f"# AGENTS.md from {sys.argv[2]}/outer\n" in sysmsg, sysmsg[-300:]
+EOF
+stop
+
 # 3. server error is reported, exit 1
 echo '[{"status":500,"content":"model exploded"}]' >"$W/err.json"
 serve "$W/err.json"
