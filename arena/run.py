@@ -230,6 +230,8 @@ def main():
         check_openrouter_model(model)
         pargs = ["--model", model, "--ctx", env0["ARENA_CTX"]] + (["--key-file", key] if key else [])
         pargs += ["--provider", provider] if provider else []
+        if "--keep-reasoning" in sys.argv:  # each harness sends its own reasoning setting
+            pargs += ["--keep-reasoning-params"]
         budget = float(arg("--budget", "1.50"))
     else:
         model = arg("--model", None) or first_model(upstream)
@@ -244,7 +246,8 @@ def main():
     base = f"http://127.0.0.1:{proxy.stdout.readline().decode().strip()}"
     results = os.path.join(ROOT, "results", ts + ".jsonl")
     meta = {"meta": True, "tier": tier, "model": model, "ts": ts, "upstream": upstream, "provider": provider,
-            "ctx": int(env0["ARENA_CTX"]), "budget": budget, "total": repeat * len(tasks) * len(harnesses), "versions": {h: version(h) for h in harnesses}}
+            "ctx": int(env0["ARENA_CTX"]), "budget": budget, "keep_reasoning": "--keep-reasoning" in sys.argv,
+            "awl_reasoning": os.environ.get("AWL_REASONING", ""), "total": repeat * len(tasks) * len(harnesses), "versions": {h: version(h) for h in harnesses}}
     with open(results, "w") as f:
         f.write(json.dumps(meta) + "\n")
     print(f"arena {tier}: {len(tasks)} tasks x {len(harnesses)} harnesses x {repeat} on {model}")

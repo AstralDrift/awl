@@ -28,7 +28,7 @@ const usage =
     \\  -p PROMPT   run once and print the reply (no TUI)
     \\  -c          continue the latest session
     \\  -r FILE     resume a session file
-    \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MAX_STEPS AWL_SYSTEM
+    \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MAX_STEPS AWL_SYSTEM AWL_REASONING
     \\
 ;
 

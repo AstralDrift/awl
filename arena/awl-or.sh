@@ -18,7 +18,7 @@ python3 "$REPO/arena/proxy.py" --upstream https://openrouter.ai/api --out "$LOG"
 PROXY=$!
 trap 'kill $PROXY 2>/dev/null' EXIT
 for _ in $(seq 100); do [ -s "$LOG/port" ] && break; sleep 0.05; done
-AWL_URL=http://127.0.0.1:$(cat "$LOG/port") AWL_KEY=openrouter AWL_MODEL=$MODEL "$REPO/zig-out/bin/awl" "$@"
+AWL_REASONING=${AWL_REASONING:-low} AWL_URL=http://127.0.0.1:$(cat "$LOG/port") AWL_KEY=openrouter AWL_MODEL=$MODEL "$REPO/zig-out/bin/awl" "$@"
 rc=$?
 cat "$LOG"/none.jsonl 2>/dev/null | python3 -c "
 import sys, json

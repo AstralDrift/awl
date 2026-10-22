@@ -34,7 +34,13 @@ const base_prompt =
 pub fn init(cwd: []const u8) void {
     head.add("{\"model\":");
     bufm.str(&head, cfg.model);
-    head.add(",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"tools\":[");
+    head.add(",\"stream\":true,\"stream_options\":{\"include_usage\":true}");
+    // Optional reasoning level for servers that honor it (OpenAI-style; local Qwen ignores it).
+    if (sys.getenv("AWL_REASONING")) |r| {
+        head.add(",\"reasoning_effort\":");
+        bufm.str(&head, r);
+    }
+    head.add(",\"tools\":[");
     tools.schema(&head);
     head.add("],\"messages\":[{\"role\":\"system\",\"content\":\"");
     var pb: [16384]u8 = undefined;
