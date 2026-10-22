@@ -9,7 +9,7 @@ const bufm = @import("buf.zig");
 const Buf = bufm.Buf;
 
 const max_skills = 32;
-const max_desc = 240;
+const max_desc = 160;
 
 pub const Meta = struct { name: []const u8, desc: []const u8 };
 
@@ -70,6 +70,7 @@ pub fn add(head: *Buf, dirs: []const []const u8) void {
         const dfd = sys.open(dir, .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch continue;
         defer sys.close(dfd);
         var b: [8192]u8 align(8) = undefined;
+        var listed_dir = false;
         while (count < max_skills) {
             const got = sys.check(linux.getdents64(dfd, &b, b.len)) catch break;
             if (got == 0) break;
@@ -87,8 +88,12 @@ pub fn add(head: *Buf, dirs: []const []const u8) void {
                 const m = parse(text, &db) orelse continue;
                 if (count == 0) bufm.escape(head, "\n\n# Skills\nWhen a task matches a skill below, read its SKILL.md with the read tool before you start, then follow it.");
                 var lb: [1600]u8 = undefined;
+                if (!listed_dir) {
+                    bufm.escape(head, std.fmt.bufPrint(&lb, "\nIn {s}/<name>/SKILL.md:", .{dir}) catch continue);
+                    listed_dir = true;
+                }
                 const desc = cut(m.desc, max_desc);
-                bufm.escape(head, std.fmt.bufPrint(&lb, "\n- {s}: {s}{s} ({s})", .{ m.name, desc, if (desc.len < m.desc.len) "…" else "", path }) catch continue);
+                bufm.escape(head, std.fmt.bufPrint(&lb, "\n- {s}: {s}{s}", .{ m.name, desc, if (desc.len < m.desc.len) "…" else "" }) catch continue);
                 count += 1;
             }
         }

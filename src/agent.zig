@@ -154,7 +154,8 @@ fn elide() void {
         const m = items[start + 1 .. end];
         offs[i] = nb.len;
         const est = ctx_tokens - ctx_tokens * saved / before;
-        if (i + 8 < n_msgs and est > target and m.len > 400 and std.mem.startsWith(u8, m, tool_prefix)) {
+        const is_todo = std.mem.indexOf(u8, m[0..@min(m.len, 200)], "\"content\":\"" ++ tools.todo_marker) != null;
+        if (i + 8 < n_msgs and est > target and m.len > 400 and !is_todo and std.mem.startsWith(u8, m, tool_prefix)) {
             // the id is the JSON string right after the prefix (ids never contain quotes)
             const rest = m[tool_prefix.len..];
             if (rest.len > 1 and rest[0] == '"') if (std.mem.indexOfScalarPos(u8, rest, 1, '"')) |q| {

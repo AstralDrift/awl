@@ -1,4 +1,4 @@
-//! The six tools: read, write, edit, bash, grep (ripgrep), find (fd).
+//! The tools: read, write, edit, bash, todo, grep (ripgrep), find (fd).
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
@@ -22,7 +22,8 @@ const schema_core =
     \\{"type":"function","function":{"name":"read","description":"Read a text file. Returns numbered lines. For large files, grep for what you need first, then read with offset/limit (1-based).","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}},
     \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file with the given content. Creates parent directories.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
     \\{"type":"function","function":{"name":"edit","description":"Replace exact text in a file. One change: old_string + new_string. Several changes in one file: edits, a list of {old_string, new_string}, each matched against the file as it was before this call; all apply or none do. Each old_string must occur exactly once; include enough context. Read the file first.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["old_string","new_string"]}}},"required":["path"]}}},
-    \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"}},"required":["command"]}}}
+    \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"}},"required":["command"]}}},
+    \\{"type":"function","function":{"name":"todo","description":"Checklist for multi-step work. Send the whole list every time. status: pending, doing, done or skip (put the reason in text). Keep exactly one item doing. The latest list always stays in context.","parameters":{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"status":{"type":"string","enum":["pending","doing","done","skip"]}},"required":["text","status"]}}},"required":["items"]}}}
 ;
 const schema_grep =
     \\,{"type":"function","function":{"name":"grep","description":"Search file contents with ripgrep (regex, smart case, respects .gitignore). Returns path:line:text.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string","description":"e.g. *.zig"}},"required":["pattern"]}}}
@@ -38,10 +39,10 @@ pub fn schema(out: *Buf) void {
 }
 
 pub fn names() []const u8 {
-    if (have_rg and have_fd) return "read, write, edit, bash, grep, find";
-    if (have_rg) return "read, write, edit, bash, grep";
-    if (have_fd) return "read, write, edit, bash, find";
-    return "read, write, edit, bash";
+    if (have_rg and have_fd) return "read, write, edit, bash, todo, grep, find";
+    if (have_rg) return "read, write, edit, bash, todo, grep";
+    if (have_fd) return "read, write, edit, bash, todo, find";
+    return "read, write, edit, bash, todo";
 }
 
 // Argument parsing scratch: a reserved region, reset after each tool call.
@@ -106,6 +107,12 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         if (n == 0) return badArgs(out, name, &r);
         if (n == 1) sum(&r, name, "{s}", .{p.path}) else sum(&r, name, "{s} ({d} changes)", .{ p.path, n });
         r.ok = editFile(p.path, pairs[0..n], out);
+    } else if (eq(u8, name, "todo")) {
+        const p = std.json.parseFromSliceLeaky(struct { items: []const struct { text: []const u8, status: []const u8 = "pending" } }, a, args, opts) catch return badArgs(out, name, &r);
+        var done: usize = 0;
+        for (p.items) |it| done += @intFromBool(eq(u8, it.status, "done") or eq(u8, it.status, "skip"));
+        sum(&r, name, "{d}/{d} done", .{ done, p.items.len });
+        r.ok = todo(p.items, out);
     } else if (eq(u8, name, "bash")) {
         const p = std.json.parseFromSliceLeaky(struct { command: []const u8, timeout: ?u32 = null }, a, args, opts) catch return badArgs(out, name, &r);
         sum(&r, name, "{s}", .{p.command});
@@ -251,6 +258,35 @@ fn write(path: []const u8, parts: []const []const u8, out: *Buf) bool {
         _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&tz, tmp), 0);
         return errMsg(out, "write", path, error.Sys);
     }
+    return true;
+}
+
+/// Results start with this; context elision keeps every message that carries it.
+pub const todo_marker = "Checklist (current):";
+
+fn todo(items: anytype, out: *Buf) bool {
+    if (items.len > 50) {
+        out.add("too many items (max 50); group them");
+        return false;
+    }
+    for (items) |it| {
+        const known = for ([_][]const u8{ "pending", "doing", "done", "skip" }) |k| {
+            if (std.mem.eql(u8, it.status, k)) break true;
+        } else false;
+        if (!known) {
+            out.print("unknown status \"{s}\" for \"{s}\"; use pending, doing, done or skip", .{ it.status, it.text });
+            return false;
+        }
+    }
+    out.add(todo_marker);
+    var done: usize = 0;
+    for (items) |it| {
+        const eq = std.mem.eql;
+        const mark: []const u8 = if (eq(u8, it.status, "done")) "[x]" else if (eq(u8, it.status, "doing")) "[>]" else if (eq(u8, it.status, "skip")) "[-]" else "[ ]";
+        done += @intFromBool(eq(u8, it.status, "done") or eq(u8, it.status, "skip"));
+        out.print("\n{s} {s}", .{ mark, it.text });
+    }
+    out.print("\n({d}/{d} done)", .{ done, items.len });
     return true;
 }
 
@@ -653,6 +689,19 @@ test "edit tool call with an edits list" {
     try t.expect(r.ok);
     try t.expectEqualStrings("X\nY\n", try sys.readFile(f, &fb));
     try t.expect(std.mem.endsWith(u8, out.items(), ": 2 changes at lines 1, 2 (-2 +2 lines)"));
+}
+
+test "todo renders the checklist and rejects unknown statuses" {
+    ui.quiet = true;
+    var out = Buf.init(1 << 20);
+    const r = try run("todo", "{\"items\":[{\"text\":\"read code\",\"status\":\"done\"},{\"text\":\"fix bug\",\"status\":\"doing\"},{\"text\":\"add test\",\"status\":\"pending\"},{\"text\":\"docs (skip: no public API change)\",\"status\":\"skip\"}]}", &out);
+    try t.expect(r.ok);
+    try t.expectEqualStrings("Checklist (current):\n[x] read code\n[>] fix bug\n[ ] add test\n[-] docs (skip: no public API change)\n(2/4 done)", out.items());
+    try t.expectEqualStrings("2/4 done", r.summary[0..r.summary_n]);
+    out.reset();
+    const bad = try run("todo", "{\"items\":[{\"text\":\"x\",\"status\":\"maybe\"}]}", &out);
+    try t.expect(!bad.ok);
+    try t.expectEqualStrings("unknown status \"maybe\" for \"x\"; use pending, doing, done or skip", out.items());
 }
 
 test "edit: not-found hint when only whitespace differs" {

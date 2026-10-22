@@ -116,7 +116,7 @@ serve "$W/sk.json"
 python3 - "$LOG" "$W" <<'EOF' && ok "project skills listed" || bad "project skills listed" "see above"
 import json, sys
 s = json.loads(open(sys.argv[1]).readline())["messages"][0]["content"]
-want = f"- demo: Demo skill for tests. Second line. ({sys.argv[2]}/skp/.agents/skills/demo/SKILL.md)"
+want = f"\nIn {sys.argv[2]}/skp/.agents/skills/<name>/SKILL.md:\n- demo: Demo skill for tests. Second line."
 assert want in s, s[s.find("# Skills"):][:400]
 assert "SECRET-BODY" not in s
 EOF
@@ -176,6 +176,27 @@ python3 "$HERE/ctx_script.py" "$W/ctx.json"
 serve "$W/ctx.json" --ctx 1500
 (cd "$W" && "$AWL" -p go >/dev/null 2>"$W/o")
 python3 "$HERE/ctx_check.py" "$LOG" 2>"$W/o2" && ok "context elision" || bad "context elision" "$(tail -1 "$W/o2") $(cat "$W/o")"
+stop
+
+# 8b. the checklist survives context elision; old reads around it are elided
+python3 - "$W/ctodo.json" <<'EOF'
+import json, sys
+items = [{"text": f"step {i}: " + "x" * 40, "status": "doing" if i == 0 else "pending"} for i in range(10)]
+t = [{"tool_calls": [{"name": "todo", "arguments": {"items": items}}], "usage": {"prompt_tokens": 400, "completion_tokens": 5}}]
+t += [{"tool_calls": [{"name": "read", "arguments": {"path": "big.txt"}}], "usage": {"prompt_tokens": 500 + 100 * i, "completion_tokens": 5}} for i in range(12)]
+t.append({"content": "done"})
+json.dump(t, open(sys.argv[1], "w"))
+EOF
+serve "$W/ctodo.json" --ctx 1500
+(cd "$W" && "$AWL" -p go >/dev/null 2>"$W/o")
+python3 - "$LOG" <<'EOF' && ok "checklist survives elision" || bad "checklist survives elision" "see above"
+import json, sys
+m = [json.loads(l) for l in open(sys.argv[1])][-1]["messages"]
+tools = [x["content"] for x in m if x["role"] == "tool"]
+assert tools[0].startswith("Checklist (current):\n[>] step 0"), tools[0][:80]
+assert len(tools[0]) > 400
+assert any(c.startswith("[old tool output elided") for c in tools[1:]), "nothing elided"
+EOF
 stop
 
 # 9. interactive TUI through a pty
