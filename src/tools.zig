@@ -6,6 +6,49 @@ const http = @import("http.zig");
 const bufm = @import("buf.zig");
 const Buf = bufm.Buf;
 const ui = @import("ui.zig");
+const undo = @import("undo.zig");
+
+/// auto: run every tool. ask: the user approves each command and file change.
+/// plan: files are read-only and commands need approval (look, then propose).
+pub const Mode = enum { auto, ask, plan };
+pub var mode: Mode = .auto;
+pub const Answer = enum { yes, no, always, cancel };
+/// Set by the TUI. Without it (one-shot, pipes) ask mode allows everything.
+pub var ask: ?*const fn () Answer = null;
+
+/// May this file change or command run? false: refused, and `out` says why.
+fn gate(name: []const u8, changes_files: bool, out: *Buf) error{Cancel}!bool {
+    if (mode == .auto) return true;
+    if (mode == .plan and changes_files) {
+        out.add("Plan mode: files are read-only. Investigate with read, grep, find and bash, then describe the change you propose; the user will switch modes to let you make it.");
+        return false;
+    }
+    const f = ask orelse return true;
+    switch (f()) {
+        .yes => return true,
+        .always => {
+            if (mode == .ask) mode = .auto;
+            return true;
+        },
+        .no => {
+            out.print("The user declined this {s} call. Ask what they want, or try another way.", .{name});
+            return false;
+        },
+        .cancel => {
+            out.add("[interrupted by user]");
+            return error.Cancel;
+        },
+    }
+}
+
+/// Snapshot `path` for /undo before it changes.
+fn save(path: []const u8) void {
+    if (!undo.snapshot(path)) ui.note("{s} is too large for /undo; the change goes ahead", .{path});
+}
+
+pub fn undoLast(out: *Buf) usize {
+    return undo.undo(&write, out);
+}
 
 pub const out_cap = 64 * 1024;
 pub var have_rg = false;
@@ -86,6 +129,8 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
     } else if (eq(u8, name, "write")) {
         const p = std.json.parseFromSliceLeaky(struct { path: []const u8, content: []const u8 }, a, args, opts) catch return badArgs(out, name, &r);
         sum(&r, name, "{s} ({d} lines)", .{ p.path, std.mem.count(u8, p.content, "\n") + @intFromBool(p.content.len > 0 and p.content[p.content.len - 1] != '\n') });
+        if (!try gate(name, true, out)) return r;
+        save(p.path);
         r.ok = write(p.path, &.{p.content}, out);
         if (r.ok) files_changed.note(p.path);
         if (r.ok) out.print("wrote {d} bytes to {s}", .{ p.content.len, p.path });
@@ -110,15 +155,23 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         if (n == 0) return badArgs(out, name, &r);
         if (p.replace_all and n == 1) {
             sum(&r, name, "{s} (all)", .{p.path});
+            const preview = mode != .auto;
+            if (preview) ui.diff(pairs[0].old, pairs[0].new);
+            if (!try gate(name, true, out)) return r;
+            save(p.path);
             r.ok = replaceAll(p.path, pairs[0].old, pairs[0].new, out);
             if (r.ok) files_changed.note(p.path);
-            if (r.ok) ui.diff(pairs[0].old, pairs[0].new);
+            if (r.ok and !preview) ui.diff(pairs[0].old, pairs[0].new);
             return r;
         }
         if (n == 1) sum(&r, name, "{s}", .{p.path}) else sum(&r, name, "{s} ({d} changes)", .{ p.path, n });
+        const preview = mode != .auto; // show the change before asking
+        if (preview) for (pairs[0..n]) |pp| ui.diff(pp.old, pp.new);
+        if (!try gate(name, true, out)) return r;
+        save(p.path);
         r.ok = editFile(p.path, pairs[0..n], out);
         if (r.ok) files_changed.note(p.path);
-        if (r.ok) for (pairs[0..n]) |pp| ui.diff(pp.old, pp.new);
+        if (r.ok and !preview) for (pairs[0..n]) |pp| ui.diff(pp.old, pp.new);
     } else if (eq(u8, name, "todo")) {
         const p = std.json.parseFromSliceLeaky(struct { items: []const struct { text: []const u8, status: []const u8 = "pending" } }, a, args, opts) catch return badArgs(out, name, &r);
         var done: usize = 0;
@@ -128,6 +181,7 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
     } else if (eq(u8, name, "bash")) {
         const p = std.json.parseFromSliceLeaky(struct { command: []const u8, timeout: ?u32 = null, background: bool = false }, a, args, opts) catch return badArgs(out, name, &r);
         if (p.background) sum(&r, name, "&{s}", .{p.command}) else sum(&r, name, "{s}", .{p.command});
+        if (!try gate(name, false, out)) return r;
         const cmd = a.dupeZ(u8, p.command) catch return badArgs(out, name, &r);
         if (p.background) {
             r.ok = startJob(cmd, out);
@@ -268,11 +322,11 @@ fn write(path: []const u8, parts: []const []const u8, out: *Buf) bool {
     mkdirs(path);
     var tb: [4096]u8 = undefined;
     const tmp = std.fmt.bufPrint(&tb, "{s}.awl-{d}", .{ path, linux.getpid() }) catch return errMsg(out, "write", path, error.Sys);
-    var mode: linux.mode_t = 0o644;
+    var fmode: linux.mode_t = 0o644;
     var pb: [4096]u8 = undefined;
     var st: linux.Statx = undefined;
-    if (linux.errno(linux.statx(linux.AT.FDCWD, sys.z(&pb, path), 0, .{ .MODE = true }, &st)) == .SUCCESS) mode = st.mode & 0o7777;
-    const fd = sys.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, mode) catch |e| return errMsg(out, "write", path, e);
+    if (linux.errno(linux.statx(linux.AT.FDCWD, sys.z(&pb, path), 0, .{ .MODE = true }, &st)) == .SUCCESS) fmode = st.mode & 0o7777;
+    const fd = sys.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, fmode) catch |e| return errMsg(out, "write", path, e);
     var ok = true;
     for (parts) |p| sys.writeAll(fd, p) catch {
         ok = false;

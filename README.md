@@ -30,6 +30,15 @@ prompt Ctrl-O (or `/expand`) prints the last tool output in full. `/copy` puts t
 the clipboard, `/copy code` its last code block (through the terminal, OSC 52: kitty, foot,
 ghostty, alacritty, and over ssh).
 
+## Safety
+
+- `/undo` puts back the files the last turn wrote or edited (and removes files it created);
+  repeat it to go further back. The model is told what was undone. Changes made by shell
+  commands are not tracked.
+- `/mode auto` (default) runs everything; `/mode ask` shows each edit's diff and each command
+  and waits for y/n (a = allow the rest); `/mode plan` keeps files read-only and asks before
+  commands, so the model investigates and proposes. `AWL_MODE` sets the starting mode.
+
 ## What it loads
 
 - `AGENTS.md` from the working directory and every parent up to `/`, outermost first (24 KB cap).
@@ -57,6 +66,7 @@ ghostty, alacritty, and over ssh).
 | `AWL_RETRIES` | 5 | retries for transient model errors |
 | `AWL_REASONING` | unset | `reasoning_effort` to send (hosted models; local Qwen ignores it) |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |
+| `AWL_MODE` | `auto` | `auto`, `ask` (approve commands and edits) or `plan` (read-only) |
 
 ## Arena (benchmark against pi, omp, grok)
 

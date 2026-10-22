@@ -9,6 +9,7 @@ const agent = @import("agent.zig");
 const session = @import("session.zig");
 const http = @import("http.zig");
 const Buf = @import("buf.zig").Buf;
+const tools = @import("tools.zig");
 
 var orig: linux.termios = undefined;
 var have_orig = false;
@@ -52,7 +53,7 @@ pub fn repl() u8 {
     const home = sys.getenv("HOME") orelse "";
     var tb: [4096]u8 = undefined;
     if (home.len > 1 and std.mem.startsWith(u8, dir, home)) dir = std.fmt.bufPrint(&tb, "~{s}", .{dir[home.len..]}) catch dir;
-    ui.note("awl · {s} · {s} · /help", .{ agent.cfg.model, dir });
+    ui.note("awl · {s} · {s}{s}{s} · /help", .{ agent.cfg.model, dir, if (tools.mode != .auto) " · mode " else "", if (tools.mode != .auto) @tagName(tools.mode) else "" });
     var ed = Editor{};
     while (true) {
         setMode(false);
@@ -74,6 +75,8 @@ pub fn repl() u8 {
 /// unsent draft in the editor.
 fn runAgent(ed: *Editor) void {
     hist = &ed.hist;
+    tools.ask = &askUser;
+    defer tools.ask = null;
     sys.tick = &pump;
     agent.steer = &takeQueued;
     defer {
@@ -139,6 +142,46 @@ var seq_n: usize = 0;
 var ta_paste = false;
 
 var hist: ?*Buf = null; // the editor's history: queued messages are added to it
+
+/// Approval for a command or file change (ask and plan modes): y / Enter, n, a = always.
+fn askUser() tools.Answer {
+    pump(); // keys typed before the question belong to the draft, not the answer
+    ui.ask("  allow? y/n, a = always ");
+    while (true) {
+        var p = [2]linux.pollfd{
+            .{ .fd = sys.stdin, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = sys.sigfd, .events = linux.POLL.IN, .revents = 0 },
+        };
+        _ = sys.check(linux.poll(&p, 2, -1)) catch continue;
+        if (p[1].revents != 0) {
+            sys.drainSignals();
+            ui.answered("stopped");
+            return .cancel;
+        }
+        var b: [16]u8 = undefined;
+        const n = sys.read(sys.stdin, &b) catch 0;
+        if (n == 0) return .cancel;
+        if (b[0] == 27 and n == 1) {
+            ui.answered("stopped");
+            return .cancel;
+        }
+        switch (b[0]) {
+            'y', 'Y', '\r' => {
+                ui.answered("allowed");
+                return .yes;
+            },
+            'n', 'N' => {
+                ui.answered("declined");
+                return .no;
+            },
+            'a', 'A' => {
+                ui.answered(if (tools.mode == .ask) "allowed · mode is now auto" else "allowed");
+                return .always;
+            },
+            else => {},
+        }
+    }
+}
 
 fn takeQueued() ?[]const u8 {
     if (q_count == 0) return null;
@@ -257,13 +300,37 @@ fn command(text: []const u8) ?bool {
             ui.clipboard(t);
             ui.note("copied {d} lines to the clipboard", .{std.mem.count(u8, std.mem.trimEnd(u8, t, "\n"), "\n") + 1});
         }
+    } else if (eq(u8, text, "/undo")) {
+        var o = Buf.init(64 << 10);
+        defer o.free();
+        if (tools.undoLast(&o) == 0) {
+            ui.note("nothing to undo (changes made by commands are not tracked)", .{});
+        } else {
+            const list = std.mem.trimEnd(u8, o.items(), "\n");
+            ui.note("{s}", .{list});
+            agent.pending_note.print("[The user ran /undo. Your file changes from the previous turn were reverted:\n{s}\nThe files are back to how they were before that turn.]", .{list});
+        }
+    } else if (std.mem.startsWith(u8, text, "/mode")) {
+        const arg = std.mem.trim(u8, text[5..], " ");
+        if (arg.len > 0) {
+            tools.mode = std.meta.stringToEnum(tools.Mode, arg) orelse {
+                ui.note("modes: auto (run everything), ask (approve commands and edits), plan (read-only)", .{});
+                return false;
+            };
+            agent.mode_note = switch (tools.mode) {
+                .plan => "[Plan mode is on: files are read-only. Investigate, then propose a plan; the user will switch modes to let you carry it out.]",
+                .ask => "[Mode is now ask: you may change files and run commands; each one needs the user's approval.]",
+                .auto => "[Mode is now auto: you may change files and run commands.]",
+            };
+        }
+        ui.note("mode: {s}", .{@tagName(tools.mode)});
     } else if (eq(u8, text, "/expand")) {
         ui.expand();
     } else if (eq(u8, text, "/theme")) {
         ui.loadTheme();
         ui.note("theme reloaded", .{});
     } else if (eq(u8, text, "/help")) {
-        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\nWhile it works: type and Enter to queue a message for the next step · Esc or Ctrl-C to stop\nCtrl-O: show all of a long draft, or (empty prompt) the last tool output\n/copy  /copy code  /expand  /clear  /theme  /quit\nsession: {s}", .{session.path});
+        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\nWhile it works: type and Enter to queue a message for the next step · Esc or Ctrl-C to stop\nCtrl-O: show all of a long draft, or (empty prompt) the last tool output\n/undo  /mode auto|ask|plan  /copy  /copy code  /expand  /clear  /theme  /quit\nsession: {s}", .{session.path});
     } else return null;
     return false;
 }

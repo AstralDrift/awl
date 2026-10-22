@@ -9,6 +9,7 @@ const tools = @import("tools.zig");
 const ui = @import("ui.zig");
 const session = @import("session.zig");
 const skills = @import("skills.zig");
+const undo = @import("undo.zig");
 const bufm = @import("buf.zig");
 const Buf = bufm.Buf;
 
@@ -183,11 +184,31 @@ fn elide() void {
     ctx_tokens -|= freed;
 }
 
+/// Said to the model with the next user message (e.g. what /undo restored).
+pub var pending_note = Buf.init(64 << 10);
+pub var mode_note: []const u8 = ""; // the latest /mode change, said once
+
 pub fn user(text: []const u8) void {
-    var m = Buf.init(text.len * 6 + 64);
+    undo.newTurn();
+    var m = Buf.init(text.len * 6 + pending_note.len * 6 + 64);
     defer m.free();
     m.add("{\"role\":\"user\",\"content\":");
-    bufm.str(&m, text);
+    if (mode_note.len > 0) {
+        var keep = Buf.init(64 << 10);
+        defer keep.free();
+        keep.add(pending_note.items());
+        pending_note.reset();
+        pending_note.add(mode_note);
+        if (keep.len > 0) pending_note.add("\n");
+        pending_note.add(keep.items());
+        mode_note = "";
+    }
+    if (pending_note.len > 0) {
+        pending_note.add("\n\n");
+        pending_note.add(text);
+        bufm.str(&m, pending_note.items());
+        pending_note.reset();
+    } else bufm.str(&m, text);
     m.byte('}');
     push(&m);
 }

@@ -270,5 +270,82 @@ def keys_during_run():
 
 
 keys_during_run()
+
+
+def safety():
+    """ask mode (preview, decline, allow), /undo, plan mode."""
+    d = tempfile.mkdtemp()
+    g = os.path.join(d, "g.txt")
+    open(g, "w").write("one\n")
+    turns = [
+        {"tool_calls": [{"name": "edit", "arguments": {"path": "g.txt", "old_string": "one", "new_string": "ONE"}}]},
+        {"content": "ok declined"},
+        {"tool_calls": [{"name": "edit", "arguments": {"path": "g.txt", "old_string": "one", "new_string": "ONE"}}]},
+        {"content": "applied"},
+        {"content": "noted"},
+        {"tool_calls": [{"name": "write", "arguments": {"path": "h.txt", "content": "x"}}]},
+        {"content": "planned"},
+    ]
+    sp3 = os.path.join(d, "s.json")
+    json.dump(turns, open(sp3, "w"))
+    log3 = os.path.join(d, "req.jsonl")
+    srv3 = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp3, "--log", log3], stdout=subprocess.PIPE)
+    port3 = srv3.stdout.readline().decode().strip()
+    pid3, fd3 = pty.fork()
+    if pid3 == 0:
+        os.chdir(d)
+        os.execve(AWL, [AWL], dict(env, AWL_URL=f"http://127.0.0.1:{port3}"))
+    out = [b""]
+
+    def until(pat, t=3.0):
+        end = time.time() + t
+        while pat.encode() not in out[0] and time.time() < end:
+            r, _, _ = select.select([fd3], [], [], 0.05)
+            if r:
+                try:
+                    out[0] += os.read(fd3, 65536)
+                except OSError:
+                    break
+        return pat.encode() in out[0]
+
+    def reqs():
+        return [json.loads(l) for l in open(log3)]
+    until("› ")
+    os.write(fd3, b"/mode ask\r")
+    check("mode set", until("mode: ask"))
+    out[0] = b""
+    os.write(fd3, b"change it\r")
+    check("ask: diff shown before the question", until("allow? y/n") and out[0].find(b"- one") < out[0].find(b"allow?"), out[0][-200:])
+    os.write(fd3, b"n")
+    check("ask: declined", until("ok declined") and open(g).read() == "one\n", out[0][-200:])
+    m = reqs()[-1]["messages"]
+    check("ask: model told it was declined", "declined" in m[-1]["content"] and m[-1]["role"] == "tool", m[-1])
+    check("mode change told to the model", m[1]["content"].startswith("[Mode is now ask"), m[1]["content"][:60])
+    out[0] = b""
+    os.write(fd3, b"again\r")
+    until("allow? y/n")
+    os.write(fd3, b"y")
+    check("ask: allowed edit applied", until("applied") and open(g).read() == "ONE\n", out[0][-200:])
+    time.sleep(0.3)
+    out[0] = b""
+    os.write(fd3, b"/undo\r")
+    check("/undo restores", until("restored g.txt") and open(g).read() == "one\n", out[0][-200:])
+    os.write(fd3, b"thanks\r")
+    until("noted")
+    last = reqs()[-1]["messages"][-1]["content"]
+    check("/undo told to the model", last.startswith("[The user ran /undo.") and last.endswith("thanks"), last[:80])
+    time.sleep(0.3)
+    os.write(fd3, b"/mode plan\r")
+    until("mode: plan")
+    os.write(fd3, b"make h\r")
+    check("plan: write refused", until("planned") and not os.path.exists(os.path.join(d, "h.txt")), out[0][-200:])
+    m = reqs()[-1]["messages"]
+    check("plan: model told files are read-only", m[-1]["content"].startswith("Plan mode") and m[-3]["content"].startswith("[Plan mode is on"), [x.get("content", "")[:30] for x in m[-3:]])
+    os.kill(pid3, signal.SIGKILL)
+    os.waitpid(pid3, 0)
+    srv3.kill()
+
+
+safety()
 print(f"tui: {'all passed' if not fails else f'{fails} failed'}")
 sys.exit(1 if fails else 0)

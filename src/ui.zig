@@ -540,6 +540,24 @@ pub fn expand() void {
     flush();
 }
 
+/// An approval question; the answer replaces it on the same line.
+pub fn ask(q: []const u8) void {
+    endMessage();
+    put(sgr(&th.yellow));
+    put(q);
+    put(reset());
+    flush();
+}
+pub fn answered(word: []const u8) void {
+    put("\r\x1b[K");
+    put(muted());
+    put("  ");
+    put(word);
+    put(reset());
+    put("\n");
+    flush();
+}
+
 /// A message the user queued mid-run, shown where the model receives it.
 pub fn userEcho(text: []const u8) void {
     endMessage();
