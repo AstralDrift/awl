@@ -66,7 +66,7 @@ fn join(out: []u8, n0: usize, s: []const u8) usize {
 }
 
 /// Append a "# Skills" section for every skill found in `dirs` (missing dirs are skipped).
-pub fn add(head: *Buf, dirs: []const []const u8) void {
+pub fn add(head: *Buf, dirs: []const []const u8) usize {
     var count: usize = 0;
     for (dirs) |dir| {
         if (dir.len == 0) continue;
@@ -101,6 +101,7 @@ pub fn add(head: *Buf, dirs: []const []const u8) void {
             }
         }
     }
+    return count;
 }
 
 fn cut(s: []const u8, w: usize) []const u8 {

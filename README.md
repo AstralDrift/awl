@@ -38,6 +38,11 @@ ghostty, alacritty, and over ssh).
 
 - Every conversation is saved under `~/.local/state/awl/sessions/`. `/resume` lists the ones
   started in this folder, `/resume N` opens one, `awl -c` continues the newest; `/new` starts over.
+- On start, awl shows the model and its window, the mode, the folder and git branch, how many
+  AGENTS.md files and skills it loaded, and the last conversation held in this folder.
+- A status line under the prompt shows the model, context use (amber from 60%, when old tool
+  output starts being trimmed; red from 80%, near summarizing), the mode and the git branch.
+- Colors follow the active Omarchy theme and change with it (from the next prompt).
 - Prompt history is kept across sessions: ↑↓, and Ctrl-R finds older prompts containing what you typed.
 - `@path` attaches a small text file to the message (Tab completes names); `!cmd` runs a shell
   command yourself and passes its output to the model with your next message.
@@ -82,6 +87,8 @@ ghostty, alacritty, and over ssh).
 | `AWL_REASONING` | `medium` | `reasoning_effort` to send (`low`, `medium`, `xhigh`, ...; `off` sends none). Local AI's Qwen defaults to xhigh, about twice the tokens per turn; dropped automatically if a server rejects it |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |
 | `AWL_MODE` | `auto` | `auto`, `ask` (approve commands and edits) or `plan` (read-only) |
+| `AWL_STATUS` | `model,ctx,mode,branch` | items of the status line under the prompt, in order: `model`, `ctx`, `mode`, `branch`, `dir`, `session`; `off` hides it |
+| `AWL_WELCOME` | on | `off` shrinks the startup screen to one line |
 
 ## Arena (benchmark against pi, omp, grok)
 

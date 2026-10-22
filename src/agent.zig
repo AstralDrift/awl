@@ -23,6 +23,8 @@ var out = Buf.init(tools.out_cap + 4096);
 pub var ctx_tokens: u64 = 0;
 pub var ctx_limit: u64 = 0; // from the server; 0 = unknown
 pub var n_msgs: usize = 0;
+pub var n_agents_md: usize = 0; // AGENTS.md files loaded (for the welcome screen)
+pub var n_skills: usize = 0;
 // Start offset of each message in `msgs` (at its leading comma), for elision.
 const max_index = 16384;
 var offs: [max_index]usize = undefined;
@@ -63,7 +65,7 @@ pub fn init(cwd: []const u8) void {
     var rb: [1024]u8 = undefined;
     const user_dir = if (sys.getenv("HOME")) |h| (std.fmt.bufPrint(&hb, "{s}/.agents/skills", .{h}) catch "") else "";
     const proj_dir = std.fmt.bufPrint(&rb, "{s}/.agents/skills", .{projectRoot(cwd)}) catch "";
-    skills.add(&head, if (std.mem.eql(u8, user_dir, proj_dir)) &.{user_dir} else &.{ proj_dir, user_dir });
+    n_skills = skills.add(&head, if (std.mem.eql(u8, user_dir, proj_dir)) &.{user_dir} else &.{ proj_dir, user_dir });
     head.add("\"}");
 }
 
@@ -93,7 +95,7 @@ pub fn systemBytes() usize {
 }
 
 /// The git root containing `cwd`, or `cwd` itself outside a repository.
-fn projectRoot(cwd: []const u8) []const u8 {
+pub fn projectRoot(cwd: []const u8) []const u8 {
     var pb: [4200]u8 = undefined;
     var d = cwd;
     while (true) {
@@ -132,6 +134,7 @@ fn addAgentsMd(cwd: []const u8) void {
             continue;
         }
         used += t.len;
+        n_agents_md += 1;
         bufm.escape(&head, std.fmt.bufPrint(&hb, "\n\n# AGENTS.md from {s}\n", .{dir}) catch "\n\n# AGENTS.md\n");
         bufm.escape(&head, t);
     }

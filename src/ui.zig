@@ -27,6 +27,28 @@ fn setColor(s: *Sgr, hex: []const u8) void {
     s.n = out.len;
 }
 
+var theme_stamp: i64 = 0; // mtime (ns) of the colors.toml loaded last
+
+fn themePath(pb: []u8) ?[]const u8 {
+    const home = sys.getenv("HOME") orelse return null;
+    return std.fmt.bufPrint(pb, "{s}/.local/state/omarchy/current/theme/colors.toml", .{home}) catch null;
+}
+
+fn themeStamp(path: []const u8) i64 {
+    var zb: [520]u8 = undefined;
+    var st: std.os.linux.Statx = undefined;
+    const rc = std.os.linux.statx(std.os.linux.AT.FDCWD, sys.z(&zb, path), 0, .{ .MTIME = true }, &st);
+    if (std.os.linux.errno(rc) != .SUCCESS) return 0;
+    return st.mtime.sec * std.time.ns_per_s + st.mtime.nsec;
+}
+
+/// Reload the colors if Omarchy switched themes since the last load (one statx).
+pub fn themeTick() void {
+    var pb: [512]u8 = undefined;
+    const p = themePath(&pb) orelse return;
+    if (themeStamp(p) != theme_stamp) loadTheme();
+}
+
 /// Load the active Omarchy theme. Missing file → terminal default colors.
 pub fn loadTheme() void {
     const fallback = .{ .{ &th.accent, "\x1b[34m" }, .{ &th.fg, "\x1b[39m" }, .{ &th.muted, "\x1b[90m" }, .{ &th.red, "\x1b[31m" }, .{ &th.green, "\x1b[32m" }, .{ &th.yellow, "\x1b[33m" } };
@@ -34,9 +56,9 @@ pub fn loadTheme() void {
         @memcpy(f[0].b[0..f[1].len], f[1]);
         f[0].n = f[1].len;
     }
-    const home = sys.getenv("HOME") orelse return;
     var pb: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&pb, "{s}/.local/state/omarchy/current/theme/colors.toml", .{home}) catch return;
+    const path = themePath(&pb) orelse return;
+    theme_stamp = themeStamp(path);
     var fb: [8192]u8 = undefined;
     const text = sys.readFile(path, &fb) catch return;
     var it = std.mem.splitScalar(u8, text, '\n');
@@ -59,6 +81,18 @@ pub fn accent() []const u8 {
 }
 pub fn muted() []const u8 {
     return sgr(&th.muted);
+}
+pub fn yellow() []const u8 {
+    return sgr(&th.yellow);
+}
+pub fn red() []const u8 {
+    return sgr(&th.red);
+}
+pub fn green() []const u8 {
+    return sgr(&th.green);
+}
+pub fn fg() []const u8 {
+    return sgr(&th.fg);
 }
 pub fn plain() []const u8 {
     return reset();
@@ -610,6 +644,15 @@ pub fn userEcho(text: []const u8) void {
         first = false;
         put(l);
     }
+    put("\n");
+    flush();
+}
+
+/// One line printed as given (it carries its own colors).
+pub fn raw(s: []const u8) void {
+    endMessage();
+    put(s);
+    put(reset());
     put("\n");
     flush();
 }

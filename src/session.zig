@@ -100,7 +100,49 @@ pub const Entry = struct {
     pub fn prompt(e: *const Entry) []const u8 {
         return e.first[0..e.first_n];
     }
+    /// How long ago it started ("just now", "5 min ago", "3 h ago", "2 d ago"). File
+    /// names carry UTC, so this needs no time zone.
+    pub fn age(e: *const Entry, out: []u8) []const u8 {
+        return ago(e.file(), sys.wallSec(), out);
+    }
 };
+
+/// "20261022-152614-..." (UTC) as an age relative to `now` (Unix seconds).
+fn ago(f: []const u8, now: i64, out: []u8) []const u8 {
+    if (f.len < 15) return "";
+    const n = struct {
+        fn n(s: []const u8) i64 {
+            return std.fmt.parseInt(i64, s, 10) catch 0;
+        }
+    }.n;
+    // days from 1970-01-01 to y-m-d (Howard Hinnant's days_from_civil)
+    var y = n(f[0..4]);
+    const m = n(f[4..6]);
+    const d = n(f[6..8]);
+    if (m <= 2) y -= 1;
+    const era = @divFloor(y, 400);
+    const yoe = y - era * 400;
+    const mp = @mod(m + 9, 12);
+    const doy = @divFloor(153 * mp + 2, 5) + d - 1;
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+    const days = era * 146097 + doe - 719468;
+    const t = days * 86400 + n(f[9..11]) * 3600 + n(f[11..13]) * 60 + n(f[13..15]);
+    const s = @max(now - t, 0);
+    if (s < 60) return "just now";
+    if (s < 3600) return std.fmt.bufPrint(out, "{d} min ago", .{@divFloor(s, 60)}) catch "";
+    if (s < 86400) return std.fmt.bufPrint(out, "{d} h ago", .{@divFloor(s, 3600)}) catch "";
+    return std.fmt.bufPrint(out, "{d} d ago", .{@divFloor(s, 86400)}) catch "";
+}
+
+test "session age from a UTC file name" {
+    var b: [32]u8 = undefined;
+    // 2026-10-22 15:26:14 UTC = 1792682774
+    try std.testing.expectEqualStrings("just now", ago("20261022-152614-9.jsonl", 1792682774 + 30, &b));
+    try std.testing.expectEqualStrings("5 min ago", ago("20261022-152614-9.jsonl", 1792682774 + 300, &b));
+    try std.testing.expectEqualStrings("3 h ago", ago("20261022-152614-9.jsonl", 1792682774 + 3 * 3600 + 5, &b));
+    try std.testing.expectEqualStrings("2 d ago", ago("20261022-152614-9.jsonl", 1792682774 + 2 * 86400, &b));
+    try std.testing.expectEqualStrings("31 d ago", ago("20260101-000000-1.jsonl", 1767225600 + 31 * 86400, &b));
+}
 
 /// Sessions started in `cwd`, newest first (at most out.len).
 pub fn list(cwd: []const u8, out: []Entry) []Entry {

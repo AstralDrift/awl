@@ -7,8 +7,10 @@ ok() { echo "ok  $*"; }
 
 size=$(stat -c %s "$B")
 # A goal, not a cap: raise it only for features people use. (The TUI basics took it to
-# 224 KB; dropping std.json's float fallback, see src/jint.zig, brought it back to 199 KB.)
-[ "$size" -le 204800 ] || fail "size $size > 200 KB"
+# 224 KB; dropping std.json's float fallback, see src/jint.zig, brought it back to 199 KB.
+# The QOL round the user asked for (welcome, status line, pickers, full screen) has the
+# AGENTS.md soft goal of 256 KB.)
+[ "$size" -le 262144 ] || fail "size $size > 256 KB"
 ok "size $size B"
 
 file "$B" | grep -q 'statically linked' || fail "not static"

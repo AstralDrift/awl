@@ -267,8 +267,8 @@ def keys_during_run():
     os.kill(pid2, signal.SIGKILL)
     os.waitpid(pid2, 0)
     srv2.kill()
-    # the editor's redraw of the recalled entry (a queued echo would end with "\n")
-    check("arrow key during a run reaches the prompt", b"wait1" in out and b"upkey-test\r\x1b[" in out, out[-120:])
+    # the editor's redraw of the recalled entry (a queued echo would end with "\n", not "\r")
+    check("arrow key during a run reaches the prompt", b"wait1" in out and b"upkey-test\r" in out, out[-120:])
 
 
 keys_during_run()
@@ -464,5 +464,81 @@ def inputs():
 
 
 inputs()
+
+
+def screens():
+    """Welcome screen, status line under the prompt, Omarchy theme reloaded live."""
+    d = tempfile.mkdtemp()
+    proj = os.path.join(d, "proj")
+    os.makedirs(os.path.join(proj, ".git"))
+    open(os.path.join(proj, ".git", "HEAD"), "w").write("ref: refs/heads/feat-x\n")
+    open(os.path.join(proj, "AGENTS.md"), "w").write("- be brief\n")
+    theme = os.path.join(d, "home", ".local", "state", "omarchy", "current", "theme")
+    os.makedirs(theme)
+    colors = os.path.join(theme, "colors.toml")
+    open(colors, "w").write('accent = "#112233"\n')
+    sp5 = os.path.join(d, "s.json")
+    json.dump([{"content": "hi"}], open(sp5, "w"))
+    srv5 = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp5, "--ctx", "32000"], stdout=subprocess.PIPE)
+    port5 = srv5.stdout.readline().decode().strip()
+    env5 = dict(env, AWL_URL=f"http://127.0.0.1:{port5}", XDG_STATE_HOME=os.path.join(d, "state"), HOME=os.path.join(d, "home"))
+    out = [b""]
+
+    def start(extra={}):
+        p, f = pty.fork()
+        if p == 0:
+            os.chdir(proj)
+            os.execve(AWL, [AWL], dict(env5, **extra))
+        fcntl.ioctl(f, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+        return p, f
+
+    def until(f, pat, t=3.0):
+        end = time.time() + t
+        while pat.encode() not in out[0] and time.time() < end:
+            r, _, _ = select.select([f], [], [], 0.05)
+            if r:
+                try:
+                    out[0] += os.read(f, 65536)
+                except OSError:
+                    break
+        return pat.encode() in out[0]
+
+    p5, f5 = start()
+    until(f5, "› ")
+    until(f5, "auto", 1)
+    plain = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", out[0])
+    check("welcome: model, window, mode", b"awl 0.1.0 \xc2\xb7 fake-model \xc2\xb7 32k context \xc2\xb7 mode auto" in plain, plain[:300])
+    check("welcome: branch and AGENTS.md", b"\xe2\x8e\x87 feat-x \xc2\xb7 1 AGENTS.md" in plain, plain[:300])
+    check("status line under the prompt", b"fake-model \xc2\xb7 ctx 0% of 32k \xc2\xb7 auto \xc2\xb7 \xe2\x8e\x87 feat-x" in plain, plain[-200:])
+    check("theme accent on the prompt", b"\x1b[38;2;17;34;51m\xe2\x80\xba " in out[0], out[0][-200:])
+    time.sleep(0.05)
+    open(colors, "w").write('accent = "#445566"\n')
+    out[0] = b""
+    os.write(f5, b"\r")  # an empty line: a fresh prompt picks up the new theme
+    check("theme change applies at the next prompt", until(f5, "\x1b[38;2;68;85;102m"), out[0][-200:])
+    out[0] = b""
+    os.write(f5, b"hello\r")
+    check("status line gone from the sent prompt", until(f5, " step") and b"of 32k \xc2\xb7 auto" not in out[0].split(b"hello")[1].split(b"hi")[0], out[0][:300])
+    os.kill(p5, signal.SIGKILL)
+    os.waitpid(p5, 0)
+    out[0] = b""
+    p5, f5 = start({"AWL_STATUS": "off", "AWL_WELCOME": "off"})
+    until(f5, "› ")
+    time.sleep(0.3)
+    plain = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", out[0])
+    check("AWL_WELCOME=off: one line, AWL_STATUS=off: no status line", plain.count(b"fake-model") == 1 and b"Enter send" not in plain and b"auto" not in plain, plain)
+    os.kill(p5, signal.SIGKILL)
+    os.waitpid(p5, 0)
+    out[0] = b""
+    p5, f5 = start()
+    until(f5, "› ")
+    plain = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", out[0])
+    check("welcome offers the last session here", b"last here just now: \xe2\x80\x9chello\xe2\x80\x9d \xc2\xb7 /resume 1" in plain, plain[:400])
+    os.kill(p5, signal.SIGKILL)
+    os.waitpid(p5, 0)
+    srv5.kill()
+
+
+screens()
 print(f"tui: {'all passed' if not fails else f'{fails} failed'}")
 sys.exit(1 if fails else 0)

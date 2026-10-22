@@ -29,6 +29,7 @@ const usage =
     \\  -c          continue the latest session
     \\  -r FILE     resume a session file
     \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MAX_STEPS AWL_SYSTEM AWL_REASONING AWL_RETRIES AWL_MODE
+    \\     AWL_STATUS (model,ctx,mode,branch,dir,session or off) AWL_WELCOME (off: one line)
     \\
 ;
 
@@ -165,4 +166,5 @@ test {
     _ = @import("tools.zig");
     _ = @import("undo.zig");
     _ = @import("jint.zig");
+    _ = @import("session.zig");
 }

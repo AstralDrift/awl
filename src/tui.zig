@@ -47,13 +47,7 @@ pub fn repl() u8 {
     have_orig = linux.errno(linux.ioctl(sys.stdin, linux.T.CGETS, @intFromPtr(&orig))) == .SUCCESS;
     defer restore();
     out("\x1b[?2004h\x1b[?1004h"); // bracketed paste; focus in/out reports
-    var cb: [4096]u8 = undefined;
-    const rc = linux.getcwd(&cb, cb.len);
-    var dir: []const u8 = if (linux.errno(rc) == .SUCCESS) std.mem.sliceTo(&cb, 0) else ".";
-    const home = sys.getenv("HOME") orelse "";
-    var tb: [4096]u8 = undefined;
-    if (home.len > 1 and std.mem.startsWith(u8, dir, home)) dir = std.fmt.bufPrint(&tb, "~{s}", .{dir[home.len..]}) catch dir;
-    ui.noteAs(false, "awl · {s} · {s}{s}{s} · /help", .{ agent.cfg.model, dir, if (tools.mode != .auto) " · mode " else "", if (tools.mode != .auto) @tagName(tools.mode) else "" });
+    welcome();
     var ed = Editor{};
     session.loadHistory(&ed.hist);
     while (true) {
@@ -78,6 +72,147 @@ pub fn repl() u8 {
         runAgent(&ed);
         out("\n");
     }
+}
+
+/// The project folder with ~ for $HOME.
+fn homeDir(ob: []u8) []const u8 {
+    const dir = session.start_cwd;
+    const home = sys.getenv("HOME") orelse "";
+    if (home.len > 1 and std.mem.startsWith(u8, dir, home)) return std.fmt.bufPrint(ob, "~{s}", .{dir[home.len..]}) catch dir;
+    return dir;
+}
+
+/// The checked-out branch (or short commit) of the git repo holding the project, read
+/// from .git/HEAD; "" outside a repo.
+fn gitBranch(ob: []u8) []const u8 {
+    const root = agent.projectRoot(session.start_cwd);
+    var pb: [4300]u8 = undefined;
+    var fb: [512]u8 = undefined;
+    var gb: [512]u8 = undefined;
+    var head: []const u8 = sys.readFile(std.fmt.bufPrint(&pb, "{s}/.git/HEAD", .{root}) catch return "", &fb) catch blk: {
+        // a worktree or submodule: .git is a file naming the real git dir
+        const g = sys.readFile(std.fmt.bufPrint(&pb, "{s}/.git", .{root}) catch return "", &gb) catch return "";
+        if (!std.mem.startsWith(u8, g, "gitdir: ")) return "";
+        const gd = std.mem.trim(u8, g[8..], " \r\n");
+        var qb: [4300]u8 = undefined;
+        const p = if (gd.len > 0 and gd[0] == '/') std.fmt.bufPrint(&qb, "{s}/HEAD", .{gd}) else std.fmt.bufPrint(&qb, "{s}/{s}/HEAD", .{ root, gd });
+        break :blk sys.readFile(p catch return "", &fb) catch return "";
+    };
+    head = std.mem.trim(u8, head, " \r\n");
+    const ref = "ref: refs/heads/";
+    const name = if (std.mem.startsWith(u8, head, ref)) head[ref.len..] else head[0..@min(head.len, 7)];
+    const n = @min(name.len, ob.len);
+    @memcpy(ob[0..n], name[0..n]);
+    return ob[0..n];
+}
+
+/// What awl is pointed at, shown once at startup. AWL_WELCOME=off keeps it to one line.
+fn welcome() void {
+    var b = Buf.init(16 << 10);
+    defer b.free();
+    var db: [4096]u8 = undefined;
+    const dir = homeDir(&db);
+    var gb: [128]u8 = undefined;
+    const br = gitBranch(&gb);
+    const m = ui.muted();
+    const r = ui.plain();
+    if (sys.getenv("AWL_WELCOME")) |v| if (std.mem.eql(u8, v, "off")) {
+        b.print("{s}awl · {s} · {s} · /help", .{ m, agent.cfg.model, dir });
+        return ui.raw(b.items());
+    };
+    b.print("{s}\x1b[1mawl{s}{s} " ++ @import("main.zig").version ++ " · {s}{s}{s}", .{ ui.accent(), r, m, ui.fg(), agent.cfg.model, m });
+    if (agent.ctx_limit > 0) b.print(" · {d}k context", .{agent.ctx_limit / 1000});
+    b.print(" · mode {s}{s}{s}", .{ modeColor(), @tagName(tools.mode), m });
+    ui.raw(b.items());
+    b.reset();
+    b.print("{s}{s}", .{ m, dir });
+    if (br.len > 0) b.print(" · ⎇ {s}", .{br});
+    if (agent.n_agents_md > 0) b.print(" · {d} AGENTS.md", .{agent.n_agents_md});
+    if (agent.n_skills > 0) b.print(" · {d} skill{s}", .{ agent.n_skills, if (agent.n_skills == 1) "" else "s" });
+    ui.raw(b.items());
+    if (agent.n_msgs <= 1) { // a fresh start: offer the last conversation held here
+        var one: [1]session.Entry = undefined;
+        const l = session.list(session.start_cwd, &one);
+        if (l.len > 0) {
+            const pr = l[0].prompt();
+            const pc = cutCols(pr, @as(usize, sys.termCols()) -| 50);
+            b.reset();
+            var ab: [32]u8 = undefined;
+            b.print("{s}last here {s}: “{s}{s}” · /resume 1 or awl -c", .{ m, l[0].age(&ab), pc, if (pc.len < pr.len) "…" else "" });
+            ui.raw(b.items());
+        }
+    }
+    b.reset();
+    b.print("{s}Enter send · Esc stop · @file · !cmd · /help", .{m});
+    ui.raw(b.items());
+}
+
+fn modeColor() []const u8 {
+    return switch (tools.mode) {
+        .auto => ui.muted(),
+        .ask => ui.yellow(),
+        .plan => ui.accent(),
+    };
+}
+
+/// `s` cut to at most `w` columns (counting UTF-8 sequences as one column each).
+fn cutCols(s: []const u8, w: usize) []const u8 {
+    var cols: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (cols == w) return s[0..i];
+        i += std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+        cols += 1;
+    }
+    return s[0..@min(i, s.len)];
+}
+
+/// The status line under the prompt. AWL_STATUS picks the items, in order, from
+/// model, ctx, mode, branch, dir, session (default "model,ctx,mode,branch"); "off" hides it.
+var status_items: []const u8 = "model,ctx,mode,branch";
+var branch_b: [128]u8 = undefined;
+var branch: []const u8 = "";
+
+fn statusOn() bool {
+    return status_items.len > 0 and !std.mem.eql(u8, status_items, "off");
+}
+
+fn footer(b: *Buf, w: usize) void {
+    const m = ui.muted();
+    const start = b.len;
+    var cols: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, status_items, ',');
+    var first = true;
+    var item_b: [512]u8 = undefined;
+    while (it.next()) |name0| {
+        const name = std.mem.trim(u8, name0, " ");
+        const eq = std.mem.eql;
+        var color: []const u8 = m;
+        const text: []const u8 = if (eq(u8, name, "model")) cutCols(agent.cfg.model, 32) //
+            else if (eq(u8, name, "mode")) blk: {
+                color = modeColor();
+                break :blk @tagName(tools.mode);
+            } else if (eq(u8, name, "branch")) (if (branch.len > 0) std.fmt.bufPrint(&item_b, "⎇ {s}", .{branch}) catch "" else "") //
+            else if (eq(u8, name, "dir")) homeDir(&item_b) //
+            else if (eq(u8, name, "session")) std.fs.path.basename(session.path) //
+            else if (eq(u8, name, "ctx")) blk: {
+                const k = @as(f64, @floatFromInt(agent.ctx_tokens)) / 1000;
+                if (agent.ctx_limit == 0) break :blk std.fmt.bufPrint(&item_b, "ctx {d:.1}k", .{k}) catch "";
+                const pct = agent.ctx_tokens * 100 / agent.ctx_limit;
+                // amber once old tool output starts being trimmed (60%), red near compaction (80%)
+                color = if (pct >= 80) ui.red() else if (pct >= 60) ui.yellow() else m;
+                break :blk std.fmt.bufPrint(&item_b, "ctx {d}% of {d}k", .{ pct, agent.ctx_limit / 1000 }) catch "";
+            } else "";
+        if (text.len == 0) continue;
+        const sep: usize = if (first) 0 else 3;
+        if (cols + sep + text.len > w) break;
+        if (!first) b.print("{s} · ", .{m});
+        b.add(color);
+        b.add(text);
+        cols += sep + text.len;
+        first = false;
+    }
+    if (b.len > start) b.add(ui.plain());
 }
 
 /// Run the agent with type-ahead on; then send whatever was queued, and leave any
@@ -408,8 +543,8 @@ fn command(text: []const u8) ?bool {
         if (arg.len == 0) {
             if (l.len == 0) return ui.note("no saved sessions for this folder", .{}) == {};
             for (l, 1..) |*e, k| {
-                const f = e.file(); // 20261022-152614-<pid>.jsonl
-                ui.note("{d:>2}  {s}-{s} {s}:{s}  {s}{s}", .{ k, f[4..6], f[6..8], f[9..11], f[11..13], e.prompt(), if (std.mem.eql(u8, f, std.fs.path.basename(session.path))) "  (this one)" else "" });
+                var ab: [32]u8 = undefined;
+                ui.note("{d:>2}  {s:<10}  {s}{s}", .{ k, e.age(&ab), e.prompt(), if (std.mem.eql(u8, e.file(), std.fs.path.basename(session.path))) "  (this one)" else "" });
             }
             ui.note("/resume N to open one", .{});
         } else {
@@ -538,6 +673,7 @@ const Editor = struct {
     search_q: [256]u8 = undefined,
     search_n: ?usize = null, // Ctrl-R query length while searching
     search_pos: usize = 0, // search continues in hist before this offset
+    foot: bool = true, // draw the status line under the input
 
     fn byte(self: *Editor) ?u8 {
         if (self.in_i == self.in_n) {
@@ -567,6 +703,10 @@ const Editor = struct {
         self.preset = 0;
         self.row = 0;
         self.hpos = null;
+        self.foot = true;
+        ui.themeTick();
+        branch = gitBranch(&branch_b);
+        if (sys.getenv("AWL_STATUS")) |v| status_items = v;
         self.render();
         while (true) {
             const c = self.byte() orelse return null;
@@ -581,10 +721,7 @@ const Editor = struct {
                     self.cur = self.len;
                     if (self.layout(sys.termCols(), 0, 0, null).rows > @max(@as(usize, sys.termRows()) -| 3, 3)) {
                         self.showAll(false);
-                    } else {
-                        self.render();
-                        out("\r\n");
-                    }
+                    } else self.leave();
                     const t = self.text[0..self.len];
                     if (std.mem.trim(u8, t, " \n").len > 0) {
                         self.hist.add(t);
@@ -599,19 +736,18 @@ const Editor = struct {
                         self.len = 0;
                         self.cur = 0;
                     } else if (self.ctrl_c) {
-                        out("\r\n");
+                        self.leave();
                         return null;
                     } else {
                         self.ctrl_c = true;
                         self.cur = 0;
-                        self.render();
-                        out("\r\n");
+                        self.leave();
                         ui.note("Ctrl-C again to quit", .{});
                         self.row = 0;
                     }
                 },
                 4 => if (self.len == 0) {
-                    out("\r\n");
+                    self.leave();
                     return null;
                 } else self.delete(),
                 1 => self.cur = self.lineStart(),
@@ -848,9 +984,18 @@ const Editor = struct {
     /// Redraw the prompt in place and park the cursor. Input taller than the screen
     /// shows a window around the cursor (a cursor-up past the top would spill copies
     /// into the scrollback); Ctrl-O prints all of it, and so does sending it.
+    /// Done with this prompt: redraw it without the status line, move below it.
+    fn leave(self: *Editor) void {
+        self.foot = false;
+        self.render();
+        out("\r\n");
+        self.foot = true;
+    }
+
     fn render(self: *Editor) void {
         const w: usize = sys.termCols();
-        const max_rows: usize = @max(@as(usize, sys.termRows()) -| 3, 3);
+        const foot = self.foot and statusOn();
+        const max_rows: usize = @max(@as(usize, sys.termRows()) -| (3 + @as(usize, @intFromBool(foot))), 3);
         const all = self.layout(w, 0, 0, null);
         var lo: usize = 0;
         var hi: usize = all.rows;
@@ -865,8 +1010,13 @@ const Editor = struct {
         if (lo > 0) b.print("{s}  ↑ {d} more lines · Ctrl-O shows all{s}\r\n", .{ ui.muted(), lo, ui.plain() });
         const r = self.layout(w, lo, hi, &b);
         const top: usize = @intFromBool(lo > 0); // the header row
-        const last = hi - 1 - lo + top; // screen row (from the prompt top) where output ended
+        var last = hi - 1 - lo + top; // screen row (from the prompt top) where output ended
         const cur = r.cur_row - lo + top;
+        if (foot) {
+            b.add("\r\n\x1b[K");
+            footer(&b, w -| 1);
+            last += 1;
+        }
         if (last > cur) b.print("\x1b[{d}A", .{last - cur});
         b.add("\r");
         if (r.cur_col > 0) b.print("\x1b[{d}C", .{r.cur_col});
