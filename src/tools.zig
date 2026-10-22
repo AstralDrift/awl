@@ -58,6 +58,13 @@ pub fn userShell(cmd: [:0]const u8, out: *Buf) error{Cancel}!bool {
     return spawn(&argv, 600_000, out, .bash);
 }
 
+/// The project's files for the @file picker (fd: respects .gitignore), one per line.
+pub fn listFiles(out: *Buf) bool {
+    if (!have_fd) return false;
+    const argv = [_:null]?[*:0]const u8{ fd_path, "--type", "f", "--color", "never", "--max-results", "20000" };
+    return spawn(&argv, 5_000, out, .find) catch false;
+}
+
 pub fn undoLast(out: *Buf) usize {
     return undo.undo(&write, out);
 }

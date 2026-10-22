@@ -17,7 +17,7 @@ import time
 
 args = sys.argv[1:]
 script = json.load(open(args[0]))
-opt = {"--port": "0", "--log": "", "--split": "0", "--mode": "chunked", "--ctx": "0", "--comments": "0"}
+opt = {"--port": "0", "--log": "", "--split": "0", "--mode": "chunked", "--ctx": "0", "--comments": "0", "--models": ""}
 for i in range(1, len(args), 2):
     opt[args[i]] = args[i + 1]
 split = int(opt["--split"])
@@ -79,7 +79,8 @@ def handle(conn):
             m = {"id": "fake-model"}
             if int(opt["--ctx"]):
                 m["max_model_len"] = int(opt["--ctx"])
-            body = json.dumps({"data": [m]}).encode()
+            extra = [{"id": x, "context_length": 64000} for x in opt["--models"].split(",") if x]
+            body = json.dumps({"data": [m] + extra}).encode()
             conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
             return
         req = json.loads(rest)

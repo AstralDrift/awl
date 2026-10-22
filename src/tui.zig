@@ -10,6 +10,7 @@ const session = @import("session.zig");
 const http = @import("http.zig");
 const Buf = @import("buf.zig").Buf;
 const tools = @import("tools.zig");
+const llm = @import("llm.zig");
 
 var orig: linux.termios = undefined;
 var have_orig = false;
@@ -49,6 +50,7 @@ pub fn repl() u8 {
     out("\x1b[?2004h\x1b[?1004h"); // bracketed paste; focus in/out reports
     welcome();
     var ed = Editor{};
+    editor = &ed;
     session.loadHistory(&ed.hist);
     while (true) {
         setMode(false);
@@ -538,11 +540,23 @@ fn command(text: []const u8) ?bool {
         session.restart();
         ui.note("new conversation", .{});
     } else if (eq(u8, text, "/resume") or std.mem.startsWith(u8, text, "/resume ")) {
-        var ents: [12]session.Entry = undefined;
+        var ents: [40]session.Entry = undefined;
         const l = session.list(session.start_cwd, &ents);
-        const arg = std.mem.trim(u8, text[7..], " ");
+        var arg = std.mem.trim(u8, text[7..], " ");
+        var nb: [8]u8 = undefined;
+        if (arg.len == 0 and editor != null) {
+            if (l.len == 0) {
+                ui.note("no saved sessions for this folder", .{});
+                return false;
+            }
+            const k = resumePicker(l) orelse return false;
+            arg = std.fmt.bufPrint(&nb, "{d}", .{k + 1}) catch return false;
+        }
         if (arg.len == 0) {
-            if (l.len == 0) return ui.note("no saved sessions for this folder", .{}) == {};
+            if (l.len == 0) {
+                ui.note("no saved sessions for this folder", .{});
+                return false;
+            }
             for (l, 1..) |*e, k| {
                 var ab: [32]u8 = undefined;
                 ui.note("{d:>2}  {s:<10}  {s}{s}", .{ k, e.age(&ab), e.prompt(), if (std.mem.eql(u8, e.file(), std.fs.path.basename(session.path))) "  (this one)" else "" });
@@ -550,7 +564,10 @@ fn command(text: []const u8) ?bool {
             ui.note("/resume N to open one", .{});
         } else {
             const k = std.fmt.parseInt(usize, arg, 10) catch 0;
-            if (k == 0 or k > l.len) return ui.note("no session {s}; /resume lists them", .{arg}) == {};
+            if (k == 0 or k > l.len) {
+                ui.note("no session {s}; /resume lists them", .{arg});
+                return false;
+            }
             var pb: [512]u8 = undefined;
             const p = session.pathOf(&l[k - 1], &pb) orelse return false;
             agent.clear();
@@ -598,6 +615,10 @@ fn command(text: []const u8) ?bool {
         ui.note("mode: {s}", .{@tagName(tools.mode)});
     } else if (eq(u8, text, "/model") or std.mem.startsWith(u8, text, "/model ")) {
         const arg = std.mem.trim(u8, text[6..], " ");
+        if (arg.len == 0 and editor != null) {
+                modelPicker();
+                return false;
+            }
         if (arg.len > 0) agent.setModel(arg);
         ui.note("model: {s}{s}", .{ agent.cfg.model, if (arg.len == 0) "  (/model NAME to switch)" else "" });
     } else if (eq(u8, text, "/compact")) {
@@ -623,10 +644,217 @@ fn command(text: []const u8) ?bool {
         ui.loadTheme();
         ui.note("theme reloaded", .{});
     } else if (eq(u8, text, "/help")) {
-        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-R search history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\nWhile it works: type and Enter to queue a message for the next step · Esc or Ctrl-C to stop\n/new (or /clear) starts over · /resume lists this folder's sessions\nCtrl-O: show all of a long draft, or (empty prompt) the last tool output\n!cmd runs a shell command (output goes to the model too) · @file attaches a file (Tab completes)\n/undo  /mode auto|ask|plan  /copy  /copy code  /expand  /context  /compact  /model  /new  /resume  /theme  /quit\nsession: {s}", .{session.path});
+        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-R search history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\nWhile it works: type and Enter to queue a message for the next step · Esc or Ctrl-C to stop\n/new (or /clear) starts over · /resume lists this folder's sessions\nCtrl-O: show all of a long draft, or (empty prompt) the last tool output\n!cmd runs a shell command (output goes to the model too) · @file attaches a file\nTab: complete, or pick from the project's files after @ or from the commands after / · Ctrl-P next model (AWL_MODELS) or pick one\n/undo  /mode auto|ask|plan  /copy  /copy code  /expand  /context  /compact  /model  /new  /resume  /theme  /quit\nsession: {s}", .{session.path});
     } else return null;
     return false;
 }
+
+// ---- pickers: a filtered list chosen with the arrow keys ----
+
+var editor: ?*Editor = null; // set in the interactive prompt; pickers read keys through it
+
+const max_items = 4096;
+
+fn lower(c: u8) u8 {
+    return std.ascii.toLower(c);
+}
+
+/// 3: `q` is in the last path part of `s`; 2: anywhere in `s`; 1: its letters appear in
+/// order; 0: no match. Case is ignored.
+fn score(s: []const u8, q: []const u8) u2 {
+    if (q.len == 0) return 3;
+    const base = if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| s[i + 1 ..] else s;
+    if (std.ascii.indexOfIgnoreCase(base, q) != null) return 3;
+    if (std.ascii.indexOfIgnoreCase(s, q) != null) return 2;
+    var j: usize = 0;
+    for (s) |c| {
+        if (j < q.len and lower(c) == lower(q[j])) j += 1;
+    }
+    return if (j == q.len) 1 else 0;
+}
+
+/// Show `items` under `title`; typing filters, ↑↓ (or Tab, Ctrl-N/P) move, Enter picks,
+/// Esc or Ctrl-C cancels. Returns the index into `items`. Draws where the cursor is and
+/// erases itself before returning.
+fn pick(title: []const u8, items: []const []const u8, query: []const u8) ?usize {
+    const ed = editor orelse return null;
+    if (items.len == 0) return null;
+    setMode(false);
+    defer setMode(true);
+    var q: [128]u8 = undefined;
+    var qn = @min(query.len, q.len);
+    @memcpy(q[0..qn], query[0..qn]);
+    var shown: [max_items]u16 = undefined;
+    var sel: usize = 0;
+    var top: usize = 0;
+    var cur_row: usize = 0; // the cursor's row in the drawn block (the query line)
+    var drawn = false;
+    var b = Buf.init(64 << 10);
+    defer b.free();
+    while (true) {
+        // filter: name matches first, then path matches, then in-order letter matches
+        var n: usize = 0;
+        for ([_]u2{ 3, 2, 1 }) |want| {
+            for (items, 0..) |it, i| {
+                if (n == shown.len) break;
+                if (score(it, q[0..qn]) == want) {
+                    shown[n] = @intCast(i);
+                    n += 1;
+                }
+            }
+        }
+        sel = @min(sel, n -| 1);
+        const vis = @min(@as(usize, 10), @max(@as(usize, sys.termRows()) -| 4, 1));
+        if (sel < top) top = sel;
+        if (sel >= top + vis) top = sel + 1 - vis;
+        const w = @as(usize, sys.termCols()) -| 3;
+        b.reset();
+        if (drawn and cur_row > 0) b.print("\x1b[{d}A", .{cur_row});
+        b.add("\r\x1b[J");
+        b.print("{s}{s} · {d} of {d} · ↑↓ Enter · Esc{s}\r\n", .{ ui.muted(), title, n, items.len, ui.plain() });
+        b.print("{s}› {s}{s}", .{ ui.accent(), ui.plain(), q[0..qn] });
+        var row: usize = 1;
+        for (shown[top..@min(n, top + vis)], top..) |ix, k| {
+            const it = cutCols(items[ix], w);
+            if (k == sel) b.print("\r\n{s}▸ {s}{s}", .{ ui.accent(), it, ui.plain() }) else b.print("\r\n{s}  {s}{s}", .{ ui.muted(), it, ui.plain() });
+            row += 1;
+        }
+        if (n == 0) {
+            b.print("\r\n{s}  no match{s}", .{ ui.muted(), ui.plain() });
+            row += 1;
+        }
+        // park the cursor after the query
+        if (row > 1) b.print("\x1b[{d}A", .{row - 1});
+        b.print("\r\x1b[{d}C", .{2 + qn});
+        cur_row = 1;
+        drawn = true;
+        out(b.items());
+
+        const c = ed.byte() orelse 3;
+        var pick_it = false;
+        var cancel = false;
+        switch (c) {
+            '\r' => pick_it = true,
+            3, 7 => cancel = true, // Ctrl-C, Ctrl-G
+            '\t', 14 => sel += 1, // Tab, Ctrl-N
+            16 => sel -|= 1, // Ctrl-P
+            127, 8 => while (qn > 0) {
+                qn -= 1;
+                if ((q[qn] & 0xC0) != 0x80) break;
+            },
+            21 => qn = 0, // Ctrl-U
+            27 => {
+                const c2 = ed.peekSoon() orelse 0;
+                if (c2 != '[' and c2 != 'O') {
+                    cancel = true;
+                } else {
+                    var seq: [8]u8 = undefined;
+                    var k: usize = 0;
+                    while (ed.byte()) |x| {
+                        if (k < seq.len) seq[k] = x;
+                        k += 1;
+                        if (x >= 0x40 and x <= 0x7e) break;
+                    }
+                    const sq = seq[0..@min(k, seq.len)];
+                    if (std.mem.eql(u8, sq, "A")) sel -|= 1 //
+                    else if (std.mem.eql(u8, sq, "B")) sel += 1 //
+                    else if (std.mem.eql(u8, sq, "5~")) sel -|= vis //
+                    else if (std.mem.eql(u8, sq, "6~")) sel += vis;
+                }
+            },
+            else => if (c >= 32 and qn < q.len) {
+                q[qn] = c;
+                qn += 1;
+                sel = 0;
+                top = 0;
+            },
+        }
+        if (pick_it or cancel) {
+            b.reset();
+            if (cur_row > 0) b.print("\x1b[{d}A", .{cur_row});
+            b.add("\r\x1b[J");
+            out(b.items());
+            if (cancel or n == 0) return null;
+            return shown[sel];
+        }
+    }
+}
+
+/// /resume without a number: choose from this folder's sessions.
+fn resumePicker(l: []session.Entry) ?usize {
+    var text = Buf.init(64 << 10);
+    defer text.free();
+    var names: [64][]const u8 = undefined;
+    var ends: [64]usize = undefined;
+    for (l, 0..) |*e, k| {
+        var ab: [32]u8 = undefined;
+        text.print("{s:<11} {s}{s}", .{ e.age(&ab), e.prompt(), if (std.mem.eql(u8, e.file(), std.fs.path.basename(session.path))) "  (this one)" else "" });
+        ends[k] = text.len;
+    }
+    var start: usize = 0;
+    for (l, 0..) |_, k| {
+        names[k] = text.items()[start..ends[k]];
+        start = ends[k];
+    }
+    return pick("resume a conversation from this folder", names[0..l.len], "");
+}
+
+/// /model without a name (and Ctrl-P without AWL_MODELS): choose from the server's list.
+fn modelPicker() void {
+    var ids = Buf.init(1 << 20);
+    defer ids.free();
+    var infos: [1024]llm.ModelInfo = undefined;
+    const l = llm.models(agent.cfg, &ids, &infos) catch return ui.note("could not list models at {s}", .{agent.cfg.url.host});
+    if (l.len < 2) return ui.note("model: {s} (the only one the server lists; /model NAME sets another)", .{agent.cfg.model});
+    var text = Buf.init(1 << 20);
+    defer text.free();
+    var names: [1024][]const u8 = undefined;
+    var ends: [1024]usize = undefined;
+    for (l, 0..) |m, k| {
+        if (m.ctx > 0) text.print("{s}  {d}k", .{ m.id, m.ctx / 1000 }) else text.add(m.id);
+        ends[k] = text.len;
+    }
+    var start: usize = 0;
+    for (l, 0..) |_, k| {
+        names[k] = text.items()[start..ends[k]];
+        start = ends[k];
+    }
+    const k = pick("switch model", names[0..l.len], "") orelse return;
+    switchModel(l[k].id, l[k].ctx);
+}
+
+fn switchModel(id: []const u8, ctx: u64) void {
+    agent.setModel(id);
+    if (ctx > 0) agent.ctx_limit = ctx;
+    ui.note("model: {s}", .{agent.cfg.model});
+}
+
+/// Ctrl-P: the next model in AWL_MODELS (comma-separated), or the model picker.
+fn cycleModel() void {
+    const list = sys.getenv("AWL_MODELS") orelse return modelPicker();
+    var it = std.mem.tokenizeScalar(u8, list, ',');
+    var first: ?[]const u8 = null;
+    var take_next = false;
+    while (it.next()) |m0| {
+        const m = std.mem.trim(u8, m0, " ");
+        if (first == null) first = m;
+        if (take_next) return switchModel(m, 0);
+        take_next = std.mem.eql(u8, m, agent.cfg.model);
+    }
+    if (first) |m| switchModel(m, 0);
+}
+
+test "picker ranking" {
+    try std.testing.expectEqual(@as(u2, 3), score("src/tui.zig", "TUI"));
+    try std.testing.expectEqual(@as(u2, 2), score("tui/main.zig", "tui"));
+    try std.testing.expectEqual(@as(u2, 1), score("tests/unit/i.py", "tui"));
+    try std.testing.expectEqual(@as(u2, 0), score("README.md", "tui"));
+    try std.testing.expectEqual(@as(u2, 3), score("anything", ""));
+}
+
+const commands = [_][]const u8{
+    "/help", "/new", "/resume", "/model", "/mode", "/undo", "/copy", "/copy code", "/expand", "/context", "/compact", "/theme", "/quit",
+};
 
 /// Piped stdin: one prompt per line.
 fn plain() u8 {
@@ -766,6 +994,10 @@ const Editor = struct {
                     self.cut(s, self.cur);
                 },
                 18 => self.search(), // Ctrl-R
+                16 => { // Ctrl-P: next favorite model (AWL_MODELS) or the model picker
+                    self.aside();
+                    cycleModel();
+                },
                 '\t' => if (self.pasting) self.insert("\t") else self.complete(),
                 15 => if (self.len == 0) { // Ctrl-O: the whole draft, or the last tool output
                     out("\r\x1b[J");
@@ -860,12 +1092,16 @@ const Editor = struct {
         var s = self.cur;
         while (s > 0 and self.text[s - 1] != ' ' and self.text[s - 1] != '\n') s -= 1;
         const word = self.text[s..self.cur];
+        if (s == 0 and word.len > 0 and word[0] == '/') return self.completeCommand(word);
         if (word.len == 0 or word[0] != '@') return self.insert("\t");
         const p = word[1..];
         const slash = std.mem.lastIndexOfScalar(u8, p, '/');
         const dir = if (slash) |i| p[0 .. i + 1] else "";
         const base = if (slash) |i| p[i + 1 ..] else p;
-        const dfd = sys.open(if (dir.len > 0) dir else ".", .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch return out("\x07");
+        const dfd = sys.open(if (dir.len > 0) dir else ".", .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch {
+            if (!self.filePicker(s, p)) out("\x07");
+            return;
+        };
         defer sys.close(dfd);
         var names: [4096]u8 = undefined; // matches, each followed by '/' (directory) or ' '
         var nn: usize = 0;
@@ -894,14 +1130,18 @@ const Editor = struct {
                 count += 1;
             }
         }
-        if (count == 0) return out("\x07");
+        if (count == 0) {
+            if (!self.filePicker(s, p)) out("\x07");
+            return;
+        }
         if (count == 1) {
             self.insert(common[base.len..]);
             self.insert(names[nn - 1 .. nn]); // '/' for a directory, ' ' for a file
             return;
         }
         if (common.len > base.len) return self.insert(common[base.len..]);
-        // several choices and nothing to add: list them above the prompt
+        // several choices and nothing to add: pick from the project's files
+        if (self.filePicker(s, p)) return;
         if (self.row > 0) out(std.fmt.bufPrint(&b, "\x1b[{d}A", .{self.row}) catch "");
         out("\r\x1b[J");
         self.row = 0;
@@ -919,6 +1159,64 @@ const Editor = struct {
             from = end;
         }
         ui.note("{s}", .{list.items()});
+    }
+
+    /// The project's files (fd), filtered by what follows the @; the choice replaces
+    /// the word at `s`. False when fd is missing (the caller lists the folder instead).
+    fn filePicker(self: *Editor, s: usize, typed: []const u8) bool {
+        var o = Buf.init(1 << 20);
+        defer o.free();
+        if (!tools.listFiles(&o)) return false;
+        var names = Buf.init(20001 * @sizeOf([]const u8));
+        defer names.free();
+        var it = std.mem.splitScalar(u8, o.items(), '\n');
+        var n: usize = 0;
+        while (it.next()) |l| {
+            if (l.len == 0 or l[0] == '[' or std.mem.eql(u8, l, "no files found")) continue;
+            const slot = names.extend(@sizeOf([]const u8));
+            if (slot.len < @sizeOf([]const u8)) break;
+            @as(*align(1) []const u8, @ptrCast(slot.ptr)).* = std.mem.trimStart(u8, l, "./");
+            n += 1;
+        }
+        const list = @as([*]align(1) const []const u8, @ptrCast(names.items().ptr))[0..n];
+        var q: [128]u8 = undefined;
+        const qn = @min(typed.len, q.len);
+        @memcpy(q[0..qn], typed[0..qn]); // the picker draws over the prompt; keep a copy
+        var al: [max_items][]const u8 = undefined;
+        const k = @min(n, al.len);
+        for (list[0..k], 0..) |x, i| al[i] = x;
+        self.aside();
+        const choice = pick("attach a file", al[0..k], q[0..qn]) orelse return true;
+        const path = al[choice];
+        self.cut(s, self.cur);
+        self.insert("@");
+        self.insert(path);
+        self.insert(" ");
+        return true;
+    }
+
+    /// Tab after "/x" at the start: complete a command, or pick one.
+    fn completeCommand(self: *Editor, word: []const u8) void {
+        var only: ?[]const u8 = null;
+        var count: usize = 0;
+        for (commands) |c| if (std.mem.startsWith(u8, c, word)) {
+            only = c;
+            count += 1;
+        };
+        const choice = if (count == 1) only.? else blk: {
+            var q: [64]u8 = undefined;
+            const qn = @min(word.len, q.len);
+            @memcpy(q[0..qn], word[0..qn]);
+            self.aside();
+            const k = pick("commands", &commands, q[0..qn]) orelse return;
+            break :blk commands[k];
+        };
+        self.cut(0, self.cur);
+        self.insert(choice);
+        const takes_arg = for ([_][]const u8{ "/resume", "/model", "/mode" }) |a| {
+            if (std.mem.eql(u8, a, choice)) break true;
+        } else false;
+        if (takes_arg) self.insert(" ");
     }
 
     fn commonLen(a: []const u8, b: []const u8) usize {
@@ -986,6 +1284,15 @@ const Editor = struct {
     /// Redraw the prompt in place and park the cursor. Input taller than the screen
     /// shows a window around the cursor (a cursor-up past the top would spill copies
     /// into the scrollback); Ctrl-O prints all of it, and so does sending it.
+    /// Take the prompt off the screen so something can print in its place; the next
+    /// render draws it again below.
+    fn aside(self: *Editor) void {
+        var b: [16]u8 = undefined;
+        if (self.row > 0) out(std.fmt.bufPrint(&b, "\x1b[{d}A", .{self.row}) catch "");
+        out("\r\x1b[J");
+        self.row = 0;
+    }
+
     /// Done with this prompt: redraw it without the status line, move below it.
     fn leave(self: *Editor) void {
         self.foot = false;

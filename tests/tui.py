@@ -412,8 +412,20 @@ def inputs():
     time.sleep(0.3)
     c = reqs()[-1]["messages"][-1]["content"]
     check("@file attached to the message", c.startswith("read @src/parser.py") and '<file path="src/parser.py">\ndef parse(s):\n    return s.split()\n</file>' in c, c[:120])
+    out[0] = b""
     os.write(f4, b"@src/pa\t")
-    check("tab lists several choices", until(f4, "pager.py  parser.py"), out[0][-160:])
+    check("tab opens the file picker on several choices", until(f4, "attach a file") and until(f4, "src/parser.py") and b"src/pager.py" in out[0], out[0][-300:])
+    out[0] = b""
+    os.write(f4, b"\x1b[B\r")  # second entry
+    check("picked file replaces the word", until(f4, "@src/parser.py "), out[0][-200:])
+    out[0] = b""
+    os.write(f4, b"\x15/und\t")
+    check("tab completes a unique /command", until(f4, "/undo"), out[0][-120:])
+    out[0] = b""
+    os.write(f4, b"\x15/co\t")
+    check("tab on /co opens the command picker", until(f4, "commands") and until(f4, "/compact"), out[0][-300:])
+    os.write(f4, b"\x1b")
+    time.sleep(0.2)
     os.write(f4, b"\x15!echo hi-from-shell\r")
     check("!cmd output shown", until(f4, "hi-from-shell\r\n"), out[0][-120:])
     os.write(f4, b"/model other-model\r")
@@ -433,10 +445,13 @@ def inputs():
     until(f4, " step")
     time.sleep(0.3)
     out[0] = b""
+    os.write(f4, b"/resume 99\r")
+    check("/resume with a bad number keeps awl running", until(f4, "no session 99") and until(f4, "› "), out[0][-200:])
+    out[0] = b""
     os.write(f4, b"/resume\r")
-    check("/resume lists this folder's sessions", until(f4, "/resume N") and b"second chat  (this one)" in out[0] and b"read @src/parser.py" in out[0], out[0][-300:])
-    os.write(f4, b"/resume 2\r")
-    check("/resume N opens it", until(f4, "resumed 4 messages"), out[0][-200:])
+    check("/resume opens a picker of this folder's sessions", until(f4, "resume a conversation") and until(f4, "read @src/parser.py") and b"second chat  (this one)" in out[0], out[0][-300:])
+    os.write(f4, b"\x1b[B\r")
+    check("picking a session resumes it", until(f4, "resumed 4 messages"), out[0][-200:])
     out[0] = b""
     os.write(f4, b"after resume\r")
     until(f4, " step")
@@ -479,7 +494,7 @@ def screens():
     open(colors, "w").write('accent = "#112233"\n')
     sp5 = os.path.join(d, "s.json")
     json.dump([{"content": "hi"}], open(sp5, "w"))
-    srv5 = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp5, "--ctx", "32000"], stdout=subprocess.PIPE)
+    srv5 = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp5, "--ctx", "32000", "--models", "big-model,small-model"], stdout=subprocess.PIPE)
     port5 = srv5.stdout.readline().decode().strip()
     env5 = dict(env, AWL_URL=f"http://127.0.0.1:{port5}", XDG_STATE_HOME=os.path.join(d, "state"), HOME=os.path.join(d, "home"))
     out = [b""]
@@ -519,14 +534,23 @@ def screens():
     out[0] = b""
     os.write(f5, b"hello\r")
     check("status line gone from the sent prompt", until(f5, " step") and b"of 32k \xc2\xb7 auto" not in out[0].split(b"hello")[1].split(b"hi")[0], out[0][:300])
+    out[0] = b""
+    os.write(f5, b"/model\r")
+    check("/model opens the model picker", until(f5, "switch model") and until(f5, "small-model  64k"), out[0][-300:])
+    out[0] = b""
+    os.write(f5, b"\x1b[B\r")
+    check("picked model is used, window from the list", until(f5, "model: big-model") and until(f5, "of 64k"), out[0][-300:])
     os.kill(p5, signal.SIGKILL)
     os.waitpid(p5, 0)
     out[0] = b""
-    p5, f5 = start({"AWL_STATUS": "off", "AWL_WELCOME": "off"})
+    p5, f5 = start({"AWL_STATUS": "off", "AWL_WELCOME": "off", "AWL_MODELS": "fake-model,small-model"})
     until(f5, "› ")
     time.sleep(0.3)
     plain = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", out[0])
     check("AWL_WELCOME=off: one line, AWL_STATUS=off: no status line", plain.count(b"fake-model") == 1 and b"Enter send" not in plain and b"auto" not in plain, plain)
+    out[0] = b""
+    os.write(f5, b"\x10")
+    check("Ctrl-P switches to the next model in AWL_MODELS", until(f5, "model: small-model"), out[0][-200:])
     os.kill(p5, signal.SIGKILL)
     os.waitpid(p5, 0)
     out[0] = b""

@@ -46,6 +46,10 @@ ghostty, alacritty, and over ssh).
   model and tools work: finished items fold into a count, the one in progress is highlighted.
 - Colors follow the active Omarchy theme and change with it (from the next prompt).
 - Prompt history is kept across sessions: ↑↓, and Ctrl-R finds older prompts containing what you typed.
+- Pickers: a list you filter by typing and choose from with ↑↓ and Enter (Esc cancels).
+  Tab after `@` picks from the project's files (fd) when the name is not unique; Tab after `/`
+  picks a command; `/resume` and `/model` without an argument pick a conversation or a model
+  from the server's list. Ctrl-P switches to the next model in `AWL_MODELS`, or opens the model picker.
 - `@path` attaches a small text file to the message (Tab completes names); `!cmd` runs a shell
   command yourself and passes its output to the model with your next message.
 - `/model NAME` switches model, `/compact` summarizes the conversation now, `/context` shows the
@@ -91,6 +95,7 @@ ghostty, alacritty, and over ssh).
 | `AWL_MODE` | `auto` | `auto`, `ask` (approve commands and edits) or `plan` (read-only) |
 | `AWL_STATUS` | `model,ctx,mode,branch` | items of the status line under the prompt, in order: `model`, `ctx`, `mode`, `branch`, `dir`, `session`; `off` hides it |
 | `AWL_WELCOME` | on | `off` shrinks the startup screen to one line |
+| `AWL_MODELS` | unset | comma-separated models that Ctrl-P cycles through |
 
 ## Arena (benchmark against pi, omp, grok)
 

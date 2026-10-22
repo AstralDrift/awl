@@ -168,12 +168,23 @@ pub const ModelInfo = struct { id: []const u8, ctx: u64 };
 
 /// First model from GET /v1/models: id (copied into `out`) and context length if reported.
 pub fn firstModel(cfg: Cfg, out: []u8) Error!ModelInfo {
+    var ids = Buf.init(64 << 10);
+    defer ids.free();
+    var one: [1]ModelInfo = undefined;
+    const l = try models(cfg, &ids, &one);
+    const n = @min(out.len, l[0].id.len);
+    @memcpy(out[0..n], l[0].id[0..n]);
+    return .{ .id = out[0..n], .ctx = l[0].ctx };
+}
+
+/// Every model GET /v1/models lists (at most out.len); ids are copied into `ids`.
+pub fn models(cfg: Cfg, ids: *Buf, out: []ModelInfo) Error![]ModelInfo {
     const fd = try http.connect(cfg.url);
     var r = http.Response{ .fd = fd };
     defer r.deinit();
     try http.send(fd, cfg.url, "GET", "/v1/models", cfg.key, &.{});
     try r.readHead();
-    var b = Buf.init(1 << 20);
+    var b = Buf.init(16 << 20); // OpenRouter lists hundreds, with descriptions
     defer b.free();
     while (try r.body()) |x| b.add(x);
     if (r.status != 200) return error.Status;
@@ -181,10 +192,13 @@ pub fn firstModel(cfg: Cfg, out: []u8) Error!ModelInfo {
     const M = struct { data: []const struct { id: Str, max_model_len: ?Int(u64) = null, context_length: ?Int(u64) = null } = &.{} };
     const m = std.json.parseFromSliceLeaky(M, fba.allocator(), b.items(), .{ .ignore_unknown_fields = true }) catch return error.Server;
     if (m.data.len == 0) return error.Server;
-    const d = m.data[0];
-    const n = @min(out.len, d.id.v.len);
-    @memcpy(out[0..n], d.id.v[0..n]);
-    return .{ .id = out[0..n], .ctx = if (d.max_model_len orelse d.context_length) |c| c.v else 0 };
+    const k = @min(out.len, m.data.len);
+    for (m.data[0..k], 0..) |d, i| {
+        const start = ids.len;
+        ids.add(d.id.v);
+        out[i] = .{ .id = ids.items()[start..ids.len], .ctx = if (d.max_model_len orelse d.context_length) |c| c.v else 0 };
+    }
+    return out[0..k];
 }
 
 test "event accumulates content and split tool calls" {
