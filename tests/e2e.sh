@@ -229,6 +229,75 @@ assert any(c.startswith("[old tool output elided") for c in tools[1:]), "nothing
 EOF
 stop
 
+# 8c. compaction: over 80% after elision -> summary request (no tools), history rebuilt
+python3 - "$W/cmp.json" <<'EOF'
+import json, sys
+items = [{"text": "port the parser", "status": "doing"}, {"text": "run tests", "status": "pending"}]
+t = [{"tool_calls": [{"name": "todo", "arguments": {"items": items}}], "usage": {"prompt_tokens": 500, "completion_tokens": 5}}]
+t += [{"tool_calls": [{"name": "read", "arguments": {"path": "big.txt"}}], "usage": {"prompt_tokens": p, "completion_tokens": 5}} for p in (1000, 1500, 2000, 2700)]
+t.append({"content": "SUMMARY: goal is X; parser half ported in src/p.zig; next run zig build test.", "usage": {"prompt_tokens": 2700, "completion_tokens": 30}})
+t.append({"content": "done"})
+json.dump(t, open(sys.argv[1], "w"))
+EOF
+serve "$W/cmp.json" --ctx 3000
+out=$(cd "$W" && "$AWL" -p "go port it" 2>"$W/o")
+python3 - "$LOG" <<'EOF' && ok "compaction rebuilds history" || bad "compaction" "$out $(tail -3 "$W/o")"
+import json, sys
+reqs = [json.loads(l) for l in open(sys.argv[1])]
+ask, last = reqs[-2], reqs[-1]
+assert ask.get("tool_choice") == "none", ask.get("tool_choice")
+assert "exceed the context window" in ask["messages"][-1]["content"]
+m = last["messages"]
+assert m[1] == {"role": "user", "content": "go port it"}, m[1]
+s = m[2]["content"]
+assert s.startswith("[Earlier work, summarized") and "SUMMARY: goal is X" in s and "Checklist (current):\n[>] port the parser" in s, s
+assert len(m) == 3 or m[3]["role"] == "assistant", [x["role"] for x in m]
+assert len(m) < len(reqs[-3]["messages"]), (len(m), len(reqs[-3]["messages"]))
+ids = {c["id"] for x in m if x["role"] == "assistant" for c in x.get("tool_calls") or []}
+assert all(x["tool_call_id"] in ids for x in m if x["role"] == "tool"), "orphan tool result"
+EOF
+[ "$out" = "done" ] && grep -q "compacted:" "$W/o" && ok "compaction transparent to -p" || bad "compaction -p" "$out"
+stop
+
+# 8c2. compaction with a bigger window keeps recent messages, starting at an assistant turn
+python3 - "$W/cmp2.json" <<'EOF'
+import json, sys
+# small outputs only, so elision cannot free room and compaction has to run
+t = [{"tool_calls": [{"name": "bash", "arguments": {"command": f"echo step {i}"}}, {"name": "bash", "arguments": {"command": "echo hi"}}], "usage": {"prompt_tokens": p, "completion_tokens": 5}} for i, p in enumerate((2000, 3000, 4000, 5000, 6000, 7000, 7600))]
+t.append({"content": "SUMMARY: ran seven steps of echo commands; next: finish.", "usage": {"prompt_tokens": 7600, "completion_tokens": 30}})
+t.append({"content": "done"})
+json.dump(t, open(sys.argv[1], "w"))
+EOF
+serve "$W/cmp2.json" --ctx 9000
+out=$(cd "$W" && "$AWL" -p "loop" 2>"$W/o")
+python3 - "$LOG" <<'EOF' && ok "compaction keeps a valid recent tail" || bad "compaction tail" "$out $(tail -3 "$W/o")"
+import json, sys
+reqs = [json.loads(l) for l in open(sys.argv[1])]
+m = reqs[-1]["messages"]
+roles = [x["role"] for x in m]
+assert roles[:3] == ["system", "user", "user"] and len(m) > 3 and roles[3] == "assistant", roles
+ids = {c["id"] for x in m if x["role"] == "assistant" for c in x.get("tool_calls") or []}
+assert ids and all(x["tool_call_id"] in ids for x in m if x["role"] == "tool"), "orphan tool result"
+for i, x in enumerate(m):  # every assistant tool call is answered
+    for c in x.get("tool_calls") or []:
+        assert any(y.get("tool_call_id") == c["id"] for y in m[i + 1:]), c["id"]
+EOF
+stop
+
+# 8d. a "too long" rejection forces one compaction and the run continues (window unknown)
+python3 - "$W/c400.json" <<'EOF'
+import json, sys
+t = [{"tool_calls": [{"name": "read", "arguments": {"path": "big.txt"}}]} for _ in range(3)]
+t.append({"status": 400, "content": "This model's maximum context length is 8192 tokens. Please reduce the length."})
+t.append({"content": "SUMMARY: read big.txt three times; nothing else to do."})
+t.append({"content": "recovered"})
+json.dump(t, open(sys.argv[1], "w"))
+EOF
+serve "$W/c400.json"
+out=$(cd "$W" && "$AWL" -p go 2>"$W/o")
+[ "$out" = "recovered" ] && grep -q "compacted:" "$W/o" && ok "400 too-long -> compact -> continue" || bad "400 too-long" "$out $(tail -3 "$W/o")"
+stop
+
 # 9. interactive TUI through a pty
 python3 "$HERE/tui.py" "$AWL" >"$W/tui.out" 2>&1 && ok "tui ($(grep -c '^ok' "$W/tui.out") checks)" || bad "tui" "$(grep FAIL "$W/tui.out")"
 

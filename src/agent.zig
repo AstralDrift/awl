@@ -178,7 +178,9 @@ fn elide() void {
     }
     msgs.free();
     msgs = nb;
-    ui.note("elided {d} old tool outputs (~{d}k tokens) to stay inside the context window", .{ count, ctx_tokens * saved / before / 1000 });
+    const freed = ctx_tokens * saved / before;
+    ui.note("elided {d} old tool outputs (~{d}k tokens) to stay inside the context window", .{ count, freed / 1000 });
+    ctx_tokens -|= freed;
 }
 
 pub fn user(text: []const u8) void {
@@ -194,10 +196,17 @@ pub const Outcome = enum { done, cancelled, failed, max_steps };
 
 pub fn run() Outcome {
     var step: usize = 0;
+    var forced = false; // one forced compaction per run after a "too long" rejection
     while (step < max_steps) : (step += 1) {
+        if (step > 0) _ = compact(false);
         const t0 = sys.nowNs();
-        streamRetrying() catch |e| {
+        streamRetrying("]}") catch |e| {
             ui.endMessage();
+            if (e == error.Status and llm.last_status == 400 and !forced and tooLong() and compact(true)) {
+                forced = true;
+                step -|= 1;
+                continue;
+            }
             switch (e) {
                 error.Cancel => {
                     ui.note("interrupted", .{});
@@ -241,11 +250,11 @@ pub var max_retries: u32 = 5;
 /// One model request, retried with backoff (1, 2, 4, 8, 16 s) on failures that are
 /// usually transient: connection loss, 408/425/429/5xx, provider error events. Only
 /// retried while nothing of the reply has arrived, so output is never duplicated.
-fn streamRetrying() llm.Error!void {
+fn streamRetrying(tail: []const u8) llm.Error!void {
     var attempt: u32 = 0;
     while (true) : (attempt += 1) {
         turn.reset();
-        llm.stream(cfg, &.{ head.items(), msgs.items(), "]}" }, &turn) catch |e| {
+        llm.stream(cfg, &.{ head.items(), msgs.items(), tail }, &turn) catch |e| {
             const transient = switch (e) {
                 error.Cancel => false,
                 error.Status => switch (llm.last_status) {
@@ -263,6 +272,128 @@ fn streamRetrying() llm.Error!void {
         };
         return;
     }
+}
+
+/// The server rejected the request for its length (wording differs per server).
+fn tooLong() bool {
+    const d = llm.detail[0..llm.detail_len];
+    for ([_][]const u8{ "context length", "context_length", "maximum context", "too long", "too many tokens", "exceeds" }) |k| {
+        if (std.ascii.indexOfIgnoreCase(d, k) != null) return true;
+    }
+    return false;
+}
+
+const compact_ask = ",{\"role\":\"user\",\"content\":\"The conversation is about to exceed the context window. " ++
+    "Write a summary for yourself to continue from: the goal, what is done (files changed and how), what you learned " ++
+    "(key facts, commands, errors), what remains, and the exact next step. Be concrete. Do not call tools.\"}" ++
+    "],\"tool_choice\":\"none\"}";
+
+/// When the prompt is still over 80% of the window after elision (or the server said it
+/// is too long: `force`), ask the model for a summary and rebuild the history as:
+/// first user message, summary + latest checklist, then the most recent messages from an
+/// assistant message on (so every tool result keeps its call). The session log keeps
+/// everything. Returns false and changes nothing if the summary fails.
+fn compact(force: bool) bool {
+    if (n_msgs < 4 or n_msgs > max_index) return false;
+    if (!force and (ctx_limit == 0 or ctx_tokens * 10 < ctx_limit * 8)) return false;
+    ui.note("context {d}k of {d}k: summarizing earlier work to continue", .{ ctx_tokens / 1000, ctx_limit / 1000 });
+    const was_quiet = ui.quiet;
+    ui.quiet = true;
+    streamRetrying(compact_ask) catch {
+        ui.endMessage();
+        ui.quiet = was_quiet;
+        ui.note("summary request failed; keeping the full history", .{});
+        return false;
+    };
+    ui.endMessage(); // close the hidden message so no stray newline reaches stdout
+    ui.quiet = was_quiet;
+    const summary = std.mem.trim(u8, turn.content.items(), " \t\r\n");
+    if (summary.len < 20 or turn.n > 0) {
+        ui.note("no usable summary; keeping the full history", .{});
+        return false;
+    }
+    const items = msgs.items();
+    const msgAt = struct {
+        fn f(it: []const u8, i: usize) []const u8 {
+            const end = if (i + 1 < n_msgs) offs[i + 1] else it.len;
+            return it[offs[i] + 1 .. end];
+        }
+    }.f;
+    // Latest checklist, unescaped from its tool message.
+    var region = Buf.init(64 << 20);
+    defer region.free();
+    _ = region.extend(0);
+    var fba = std.heap.FixedBufferAllocator.init(region.base.?[0..region.cap]);
+    var todo_text: []const u8 = "";
+    var i = n_msgs;
+    while (i > 0) {
+        i -= 1;
+        const m = msgAt(items, i);
+        if (std.mem.indexOf(u8, m[0..@min(m.len, 200)], "\"content\":\"" ++ tools.todo_marker) == null) continue;
+        const T = struct { content: []const u8 };
+        if (std.json.parseFromSliceLeaky(T, fba.allocator(), m, .{ .ignore_unknown_fields = true })) |t| todo_text = t.content else |_| {}
+        break;
+    }
+    // Keep the newest ~25% of the window (or of the current history when the window is unknown).
+    const keep_bytes: usize = if (ctx_limit > 0) @intCast(ctx_limit) else msgs.len / 4;
+    var k = n_msgs;
+    var kept: usize = 0;
+    while (k > 1) {
+        const m = msgAt(items, k - 1);
+        if (kept + m.len > keep_bytes) break;
+        kept += m.len + 1;
+        k -= 1;
+    }
+    while (k < n_msgs and !std.mem.startsWith(u8, msgAt(items, k), "{\"role\":\"assistant\"")) k += 1;
+    // Rebuild.
+    var nb = Buf.init(msgs.cap);
+    var noffs: usize = 0;
+    var sm = Buf.init(summary.len * 6 + todo_text.len * 6 + 512);
+    defer sm.free();
+    var text = Buf.init(summary.len + todo_text.len + 256);
+    defer text.free();
+    text.add("[Earlier work, summarized because the context filled up]\n");
+    text.add(summary);
+    if (todo_text.len > 0) {
+        text.add("\n\n");
+        text.add(todo_text);
+    }
+    sm.add("{\"role\":\"user\",\"content\":");
+    bufm.str(&sm, text.items());
+    sm.byte('}');
+    offs[noffs] = nb.len;
+    noffs += 1;
+    nb.byte(',');
+    nb.add(msgAt(items, 0));
+    offs[noffs] = nb.len;
+    noffs += 1;
+    nb.byte(',');
+    nb.add(sm.items());
+    // Copy the old messages and offsets first: offs is rewritten below.
+    var copy = Buf.init(msgs.len + 16);
+    defer copy.free();
+    copy.add(items);
+    var old_offs = Buf.init((n_msgs + 1) * @sizeOf(usize));
+    defer old_offs.free();
+    old_offs.add(std.mem.sliceAsBytes(offs[0..n_msgs]));
+    const oo = std.mem.bytesAsSlice(usize, @as([]align(1) u8, old_offs.items()));
+    var j = k;
+    while (j < n_msgs) : (j += 1) {
+        const start = oo[j];
+        const end = if (j + 1 < n_msgs) oo[j + 1] else copy.len;
+        offs[noffs] = nb.len;
+        noffs += 1;
+        nb.add(copy.items()[start..end]);
+    }
+    const dropped = k - 1;
+    const before = msgs.len;
+    msgs.free();
+    msgs = nb;
+    n_msgs = noffs;
+    ctx_tokens = if (before > 0) ctx_tokens * msgs.len / before else 0;
+    session.append(sm.items());
+    ui.note("compacted: {d} older messages replaced by a summary (~{d}k tokens now)", .{ dropped, ctx_tokens / 1000 });
+    return true;
 }
 
 fn callId(c: *const llm.Call, step: usize, i: usize, b: []u8) []const u8 {
