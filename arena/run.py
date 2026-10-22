@@ -5,6 +5,7 @@
   arena/run.py t1 [--h "awl pi" | --h all] [--repeat 1]   # default awl vs pi; all = + omp grok
   arena/run.py t2 [--h ...] [--repeat 2] [--timeout 300] [--tasks a,b]
   arena/run.py t3 [...]                 # real coding/build tasks, 600 s timeout
+  arena/run.py t4 [...]                 # long-horizon tasks (server, big log, migration, wrong fix, rules)
   arena/run.py t3 --upstream openrouter [--model deepseek/deepseek-v4.1-flash] [--provider P] [--budget 1.50]
 
 --upstream openrouter reads the key from ~/.local/state/awl-arena/openrouter.key (or
@@ -163,9 +164,11 @@ def run_one(h, task, rep, base, model, timeout, outdir, wd_root, env0):
             t, m = tree_rss(p.pid)
             peak_tree, peak_main = max(peak_tree, t), max(peak_main, m)
         # stall watchdog: no first request in 120 s, or none for 300 s -> stop now, not at the timeout
-        pf = os.path.join(outdir, "proxy", rid + ".jsonl")
-        idle = time.time() - (os.path.getmtime(pf) if os.path.exists(pf) else t0)
-        if idle > (300 if os.path.exists(pf) else 120):
+        # activity = a finished request (.jsonl) or bytes streaming in (.active heartbeat from the proxy)
+        acts = [os.path.getmtime(f) for f in (os.path.join(outdir, "proxy", rid + ".jsonl"),
+                                               os.path.join(outdir, "proxy", rid + ".active")) if os.path.exists(f)]
+        idle = time.time() - (max(acts) if acts else t0)
+        if idle > (300 if acts else 120):
             stalled = True
         if time.time() - t0 > timeout or stalled:
             timed_out = True
@@ -208,7 +211,8 @@ def run_one(h, task, rep, base, model, timeout, outdir, wd_root, env0):
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ("t0", "t1", "t2", "t3"):
+    known = {"t0"} | {l.split(":")[0].strip() for l in open(os.path.join(ROOT, "tiers.txt")) if ":" in l}
+    if len(sys.argv) < 2 or sys.argv[1] not in known:
         sys.exit(__doc__)
     tier = sys.argv[1]
     if tier == "t0":
@@ -220,7 +224,7 @@ def main():
     if harnesses == ["all"]:
         harnesses = "awl pi omp grok".split()
     repeat = int(arg("--repeat", "1" if tier == "t1" else "2"))
-    timeout = int(arg("--timeout", "600" if tier == "t3" else "300"))
+    timeout = int(arg("--timeout", "600" if tier in ("t3", "t4") else "300"))
     tasks = arg("--tasks", "").split(",") if "--tasks" in sys.argv else tier_tasks(tier)
     upstream = arg("--upstream", "http://127.0.0.1:12434")
     env0 = tool_env()

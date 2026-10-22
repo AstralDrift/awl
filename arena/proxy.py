@@ -181,6 +181,16 @@ class H(BaseHTTPRequestHandler):
         meter = Meter()
         status = 0
         retries = 0
+        beat_path = os.path.join(OUT, f"{run}.active")  # heartbeat for the runners' stall watchdogs
+        last_beat = 0.0
+
+        def beat():
+            nonlocal last_beat
+            if time.time() - last_beat >= 2:
+                last_beat = time.time()
+                with open(beat_path, "a"):
+                    os.utime(beat_path)
+        beat()
         try:
             while True:
                 if UP.scheme == "https":
@@ -210,6 +220,7 @@ class H(BaseHTTPRequestHandler):
                 if not chunk:
                     break
                 meter.feed(chunk)
+                beat()
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                 self.wfile.flush()
             self.wfile.write(b"0\r\n\r\n")

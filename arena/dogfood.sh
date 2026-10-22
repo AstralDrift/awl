@@ -53,7 +53,7 @@ run() { # harness
     start=$(date +%s)
     while kill -0 $proxy 2>/dev/null; do
       spent=$(cat "$out"/proxy/*.jsonl 2>/dev/null | python3 -c "import sys,json; print(sum(json.loads(l).get('cost',0) or 0 for l in sys.stdin))")
-      last=$(stat -c %Y "$out"/proxy/*.jsonl 2>/dev/null | sort -n | tail -1)
+      last=$(stat -c %Y "$out"/proxy/*.jsonl "$out"/proxy/*.active 2>/dev/null | sort -n | tail -1)
       now=$(date +%s)
       why=""
       python3 -c "import sys; sys.exit(0 if $spent >= $BUDGET else 1)" && why="hit the \$$BUDGET budget"
