@@ -200,7 +200,7 @@ pub fn run() Outcome {
     while (step < max_steps) : (step += 1) {
         if (step > 0) _ = compact(false);
         const t0 = sys.nowNs();
-        streamRetrying("]}") catch |e| {
+        streamRetrying(msgs.items(), "]}") catch |e| {
             ui.endMessage();
             if (e == error.Status and llm.last_status == 400 and !forced and tooLong() and compact(true)) {
                 forced = true;
@@ -250,11 +250,11 @@ pub var max_retries: u32 = 5;
 /// One model request, retried with backoff (1, 2, 4, 8, 16 s) on failures that are
 /// usually transient: connection loss, 408/425/429/5xx, provider error events. Only
 /// retried while nothing of the reply has arrived, so output is never duplicated.
-fn streamRetrying(tail: []const u8) llm.Error!void {
+fn streamRetrying(mid: []const u8, tail: []const u8) llm.Error!void {
     var attempt: u32 = 0;
     while (true) : (attempt += 1) {
         turn.reset();
-        llm.stream(cfg, &.{ head.items(), msgs.items(), tail }, &turn) catch |e| {
+        llm.stream(cfg, &.{ head.items(), mid, tail }, &turn) catch |e| {
             const transient = switch (e) {
                 error.Cancel => false,
                 error.Status => switch (llm.last_status) {
@@ -283,23 +283,113 @@ fn tooLong() bool {
     return false;
 }
 
-const compact_ask = ",{\"role\":\"user\",\"content\":\"The conversation is about to exceed the context window. " ++
-    "Write a summary for yourself to continue from: the goal, what is done (files changed and how), what you learned " ++
-    "(key facts, commands, errors), what remains, and the exact next step. Be concrete. Do not call tools.\"}" ++
-    "],\"tool_choice\":\"none\"}";
+const compact_instructions =
+    \\The conversation below is about to exceed the context window. Write a summary that lets you
+    \\continue the task without it. Use exactly these sections:
+    \\## Goal
+    \\## Constraints & Preferences
+    \\## Progress
+    \\### Done
+    \\### In Progress
+    \\### Blocked
+    \\## Key Decisions
+    \\## Next Steps
+    \\## Critical Context
+    \\Be concrete: file names, function names, commands, error messages, values. Do not call tools.
+    \\
+    \\<conversation>
+    \\
+;
+
+/// One message as plain text for the summary request: "[User]: …", "[Assistant]: …",
+/// "[Assistant tool calls]: name(args)", "[Tool result]: …". Long parts are cut.
+fn serialize(json: []const u8, fba: std.mem.Allocator, w: *Buf) void {
+    const M = struct {
+        role: []const u8,
+        content: ?[]const u8 = null,
+        tool_calls: ?[]const struct { function: struct { name: []const u8 = "", arguments: []const u8 = "" } } = null,
+    };
+    const m = std.json.parseFromSliceLeaky(M, fba, json, .{ .ignore_unknown_fields = true }) catch return;
+    const cap: usize = if (std.mem.eql(u8, m.role, "tool")) 1500 else 4000;
+    const label = if (std.mem.eql(u8, m.role, "user")) "[User]: " else if (std.mem.eql(u8, m.role, "tool")) "[Tool result]: " else "[Assistant]: ";
+    if (m.content) |c| if (std.mem.trim(u8, c, " \n").len > 0) {
+        w.add(label);
+        if (c.len <= cap) w.add(c) else {
+            w.add(c[0 .. cap * 2 / 3]);
+            w.print("\n[… {d} bytes cut …]\n", .{c.len - cap});
+            w.add(c[c.len - cap / 3 ..]);
+        }
+        w.byte('\n');
+    };
+    if (m.tool_calls) |calls| {
+        w.add("[Assistant tool calls]: ");
+        for (calls, 0..) |tc, k| {
+            if (k > 0) w.add("; ");
+            w.add(tc.function.name);
+            w.byte('(');
+            w.add(tc.function.arguments[0..@min(tc.function.arguments.len, 300)]);
+            w.byte(')');
+        }
+        w.byte('\n');
+    }
+}
 
 /// When the prompt is still over 80% of the window after elision (or the server said it
-/// is too long: `force`), ask the model for a summary and rebuild the history as:
-/// first user message, summary + latest checklist, then the most recent messages from an
-/// assistant message on (so every tool result keeps its call). The session log keeps
-/// everything. Returns false and changes nothing if the summary fails.
+/// is too long: `force`), summarize and rebuild the history as: first user message,
+/// summary + latest checklist + files read/changed, then the newest messages from an
+/// assistant message on (so every tool result keeps its call). The summary request is
+/// the conversation serialized to text with long tool results cut, so it fits even when
+/// the real history no longer does. The session log keeps everything.
 fn compact(force: bool) bool {
     if (n_msgs < 4 or n_msgs > max_index) return false;
     if (!force and (ctx_limit == 0 or ctx_tokens * 10 < ctx_limit * 8)) return false;
     ui.note("context {d}k of {d}k: summarizing earlier work to continue", .{ ctx_tokens / 1000, ctx_limit / 1000 });
+    const items = msgs.items();
+    const msgAt = struct {
+        fn f(it: []const u8, i: usize) []const u8 {
+            const end = if (i + 1 < n_msgs) offs[i + 1] else it.len;
+            return it[offs[i] + 1 .. end];
+        }
+    }.f;
+    var region = Buf.init(256 << 20);
+    defer region.free();
+    _ = region.extend(0);
+    var fba = std.heap.FixedBufferAllocator.init(region.base.?[0..region.cap]);
+
+    // Transcript: message 0 (the task), then as many of the newest messages as fit.
+    const budget: usize = if (ctx_limit > 0) @intCast(ctx_limit * 2) else msgs.len / 3; // ~half the window in chars
+    var tr = Buf.init(1 << 30);
+    defer tr.free();
+    var parts = Buf.init(1 << 30); // serialized messages 1.., newest first, sizes in `sizes`
+    defer parts.free();
+    var first = Buf.init(1 << 24);
+    defer first.free();
+    serialize(msgAt(items, 0), fba.allocator(), &first);
+    var start = n_msgs;
+    var used: usize = first.len;
+    var tmp = Buf.init(1 << 24);
+    defer tmp.free();
+    while (start > 1) {
+        tmp.reset();
+        serialize(msgAt(items, start - 1), fba.allocator(), &tmp);
+        if (used + tmp.len > budget) break;
+        used += tmp.len;
+        start -= 1;
+    }
+    tr.add(compact_instructions);
+    tr.add(first.items());
+    if (start > 1) tr.print("[… {d} earlier messages omitted …]\n", .{start - 1});
+    for (start..n_msgs) |i| serialize(msgAt(items, i), fba.allocator(), &tr);
+    tr.add("</conversation>");
+    var req = Buf.init(tr.len * 6 + 128);
+    defer req.free();
+    req.add(",{\"role\":\"user\",\"content\":");
+    bufm.str(&req, tr.items());
+    req.add("}],\"tool_choice\":\"none\"}");
+
     const was_quiet = ui.quiet;
     ui.quiet = true;
-    streamRetrying(compact_ask) catch {
+    streamRetrying("", req.items()) catch {
         ui.endMessage();
         ui.quiet = was_quiet;
         ui.note("summary request failed; keeping the full history", .{});
@@ -312,18 +402,7 @@ fn compact(force: bool) bool {
         ui.note("no usable summary; keeping the full history", .{});
         return false;
     }
-    const items = msgs.items();
-    const msgAt = struct {
-        fn f(it: []const u8, i: usize) []const u8 {
-            const end = if (i + 1 < n_msgs) offs[i + 1] else it.len;
-            return it[offs[i] + 1 .. end];
-        }
-    }.f;
     // Latest checklist, unescaped from its tool message.
-    var region = Buf.init(64 << 20);
-    defer region.free();
-    _ = region.extend(0);
-    var fba = std.heap.FixedBufferAllocator.init(region.base.?[0..region.cap]);
     var todo_text: []const u8 = "";
     var i = n_msgs;
     while (i > 0) {
@@ -345,12 +424,8 @@ fn compact(force: bool) bool {
         k -= 1;
     }
     while (k < n_msgs and !std.mem.startsWith(u8, msgAt(items, k), "{\"role\":\"assistant\"")) k += 1;
-    // Rebuild.
-    var nb = Buf.init(msgs.cap);
-    var noffs: usize = 0;
-    var sm = Buf.init(summary.len * 6 + todo_text.len * 6 + 512);
-    defer sm.free();
-    var text = Buf.init(summary.len + todo_text.len + 256);
+    // The summary message.
+    var text = Buf.init(summary.len + todo_text.len + 32 * 1024);
     defer text.free();
     text.add("[Earlier work, summarized because the context filled up]\n");
     text.add(summary);
@@ -358,18 +433,22 @@ fn compact(force: bool) bool {
         text.add("\n\n");
         text.add(todo_text);
     }
+    if (tools.files_read.n > 0) {
+        text.add("\n\n<read-files>\n");
+        tools.files_read.list(&text);
+        text.add("</read-files>");
+    }
+    if (tools.files_changed.n > 0) {
+        text.add("\n<modified-files>\n");
+        tools.files_changed.list(&text);
+        text.add("</modified-files>");
+    }
+    var sm = Buf.init(text.len * 6 + 64);
+    defer sm.free();
     sm.add("{\"role\":\"user\",\"content\":");
     bufm.str(&sm, text.items());
     sm.byte('}');
-    offs[noffs] = nb.len;
-    noffs += 1;
-    nb.byte(',');
-    nb.add(msgAt(items, 0));
-    offs[noffs] = nb.len;
-    noffs += 1;
-    nb.byte(',');
-    nb.add(sm.items());
-    // Copy the old messages and offsets first: offs is rewritten below.
+    // Rebuild: copy the old messages and offsets first, since offs is rewritten.
     var copy = Buf.init(msgs.len + 16);
     defer copy.free();
     copy.add(items);
@@ -377,13 +456,22 @@ fn compact(force: bool) bool {
     defer old_offs.free();
     old_offs.add(std.mem.sliceAsBytes(offs[0..n_msgs]));
     const oo = std.mem.bytesAsSlice(usize, @as([]align(1) u8, old_offs.items()));
+    var nb = Buf.init(msgs.cap);
+    var noffs: usize = 0;
+    offs[noffs] = nb.len;
+    noffs += 1;
+    nb.byte(',');
+    nb.add(copy.items()[oo[0] + 1 .. if (n_msgs > 1) oo[1] else copy.len]);
+    offs[noffs] = nb.len;
+    noffs += 1;
+    nb.byte(',');
+    nb.add(sm.items());
     var j = k;
     while (j < n_msgs) : (j += 1) {
-        const start = oo[j];
-        const end = if (j + 1 < n_msgs) oo[j + 1] else copy.len;
+        const e = if (j + 1 < n_msgs) oo[j + 1] else copy.len;
         offs[noffs] = nb.len;
         noffs += 1;
-        nb.add(copy.items()[start..end]);
+        nb.add(copy.items()[oo[j]..e]);
     }
     const dropped = k - 1;
     const before = msgs.len;

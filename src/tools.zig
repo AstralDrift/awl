@@ -82,10 +82,12 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         const p = std.json.parseFromSliceLeaky(struct { path: []const u8, offset: ?usize = null, limit: ?usize = null }, a, args, opts) catch return badArgs(out, name, &r);
         sum(&r, name, "{s}", .{p.path});
         r.ok = read(p.path, p.offset orelse 1, p.limit orelse 2000, out);
+        if (r.ok) files_read.note(p.path);
     } else if (eq(u8, name, "write")) {
         const p = std.json.parseFromSliceLeaky(struct { path: []const u8, content: []const u8 }, a, args, opts) catch return badArgs(out, name, &r);
         sum(&r, name, "{s} ({d} lines)", .{ p.path, std.mem.count(u8, p.content, "\n") + @intFromBool(p.content.len > 0 and p.content[p.content.len - 1] != '\n') });
         r.ok = write(p.path, &.{p.content}, out);
+        if (r.ok) files_changed.note(p.path);
         if (r.ok) out.print("wrote {d} bytes to {s}", .{ p.content.len, p.path });
     } else if (eq(u8, name, "edit")) {
         const E = struct { old_string: ?[]const u8 = null, new_string: ?[]const u8 = null, old: ?[]const u8 = null, new: ?[]const u8 = null };
@@ -108,6 +110,7 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         if (n == 0) return badArgs(out, name, &r);
         if (n == 1) sum(&r, name, "{s}", .{p.path}) else sum(&r, name, "{s} ({d} changes)", .{ p.path, n });
         r.ok = editFile(p.path, pairs[0..n], out);
+        if (r.ok) files_changed.note(p.path);
     } else if (eq(u8, name, "todo")) {
         const p = std.json.parseFromSliceLeaky(struct { items: []const struct { text: []const u8, status: []const u8 = "pending" } }, a, args, opts) catch return badArgs(out, name, &r);
         var done: usize = 0;
@@ -476,6 +479,29 @@ fn capLines(out: *Buf, max: usize, what: []const u8) void {
 }
 
 const Kind = enum { bash, grep, find };
+/// Paths the model read or changed this session (for compaction summaries). Up to 64 each.
+pub const PathSet = struct {
+    buf: [64][200]u8 = undefined,
+    len: [64]u8 = undefined,
+    n: usize = 0,
+    pub fn note(self: *PathSet, p: []const u8) void {
+        if (p.len == 0 or p.len > 200) return;
+        for (0..self.n) |i| if (std.mem.eql(u8, self.buf[i][0..self.len[i]], p)) return;
+        if (self.n == self.buf.len) return;
+        @memcpy(self.buf[self.n][0..p.len], p);
+        self.len[self.n] = @intCast(p.len);
+        self.n += 1;
+    }
+    pub fn list(self: *const PathSet, out: *Buf) void {
+        for (0..self.n) |i| {
+            out.add(self.buf[i][0..self.len[i]]);
+            out.byte('\n');
+        }
+    }
+};
+pub var files_read = PathSet{};
+pub var files_changed = PathSet{};
+
 // Background jobs (bash with background=true): own session, output in a log file.
 const Job = struct { pid: linux.pid_t = 0, id: usize = 0, log: [96]u8 = undefined, log_n: usize = 0, cmd: [60]u8 = undefined, cmd_n: usize = 0 };
 var jobs: [16]Job = [_]Job{.{}} ** 16;

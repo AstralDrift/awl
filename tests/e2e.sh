@@ -259,11 +259,15 @@ import json, sys
 reqs = [json.loads(l) for l in open(sys.argv[1])]
 ask, last = reqs[-2], reqs[-1]
 assert ask.get("tool_choice") == "none", ask.get("tool_choice")
-assert "exceed the context window" in ask["messages"][-1]["content"]
+assert [x["role"] for x in ask["messages"]] == ["system", "user"], [x["role"] for x in ask["messages"]]
+t = ask["messages"][-1]["content"]
+assert "exceed the context window" in t and "## Goal" in t and "<conversation>" in t, t[:300]
+assert "[User]: go port it" in t and "earlier messages omitted" in t and "[Assistant tool calls]: read(" in t, t[-600:]
 m = last["messages"]
 assert m[1] == {"role": "user", "content": "go port it"}, m[1]
 s = m[2]["content"]
 assert s.startswith("[Earlier work, summarized") and "SUMMARY: goal is X" in s and "Checklist (current):\n[>] port the parser" in s, s
+assert "<read-files>\nbig.txt\n</read-files>" in s, s
 assert len(m) == 3 or m[3]["role"] == "assistant", [x["role"] for x in m]
 assert len(m) < len(reqs[-3]["messages"]), (len(m), len(reqs[-3]["messages"]))
 ids = {c["id"] for x in m if x["role"] == "assistant" for c in x.get("tool_calls") or []}
@@ -309,6 +313,12 @@ EOF
 serve "$W/c400.json"
 out=$(cd "$W" && "$AWL" -p go 2>"$W/o")
 [ "$out" = "recovered" ] && grep -q "compacted:" "$W/o" && ok "400 too-long -> compact -> continue" || bad "400 too-long" "$out $(tail -3 "$W/o")"
+python3 - "$LOG" <<'EOF' && ok "forced summary request is smaller than the history" || bad "forced summary size" "see above"
+import json, sys
+reqs = [json.loads(l) for l in open(sys.argv[1])]
+too_long, ask = reqs[3], reqs[4]
+assert len(json.dumps(ask["messages"])) < len(json.dumps(too_long["messages"])), (len(json.dumps(ask["messages"])), len(json.dumps(too_long["messages"])))
+EOF
 stop
 
 # 9. interactive TUI through a pty
