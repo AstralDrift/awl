@@ -38,10 +38,13 @@ pub fn init(cwd: []const u8) void {
     head.add("{\"model\":");
     bufm.str(&head, cfg.model);
     head.add(",\"stream\":true,\"stream_options\":{\"include_usage\":true}");
-    // Optional reasoning level for servers that honor it (OpenAI-style; local Qwen ignores it).
-    if (sys.getenv("AWL_REASONING")) |r| {
+    // Reasoning level. Default medium, as pi sends: Local AI's Qwen defaults to xhigh,
+    // which wrote about twice the tokens per turn for the same work. AWL_REASONING=off
+    // sends nothing; a server that rejects the field gets the request again without it.
+    const effort = sys.getenv("AWL_REASONING") orelse "medium";
+    if (effort.len > 0 and !std.mem.eql(u8, effort, "off")) {
         head.add(",\"reasoning_effort\":");
-        bufm.str(&head, r);
+        bufm.str(&head, effort);
     }
     head.add(",\"tools\":[");
     tools.schema(&head);
@@ -310,6 +313,20 @@ pub fn run() Outcome {
 
 pub var max_retries: u32 = 5;
 
+/// The server refused the request because of reasoning_effort: stop sending it.
+fn dropReasoning() bool {
+    const d = llm.detail[0..llm.detail_len];
+    if (std.ascii.indexOfIgnoreCase(d, "reasoning") == null) return false;
+    const h = head.items();
+    const i = std.mem.indexOf(u8, h, ",\"reasoning_effort\":\"") orelse return false;
+    const end = std.mem.indexOfScalarPos(u8, h, i + 21, '"') orelse return false;
+    const n = end + 1 - i;
+    std.mem.copyForwards(u8, h[i .. h.len - n], h[end + 1 ..]);
+    head.len -= n;
+    ui.note("the server does not take reasoning_effort ({s}); continuing without it", .{d[0..@min(d.len, 120)]});
+    return true;
+}
+
 /// One model request, retried with backoff (1, 2, 4, 8, 16 s) on failures that are
 /// usually transient: connection loss, 408/425/429/5xx, provider error events. Only
 /// retried while nothing of the reply has arrived, so output is never duplicated.
@@ -326,6 +343,10 @@ fn streamRetrying(mid: []const u8, tail: []const u8) llm.Error!void {
                 },
                 else => true,
             };
+            if (e == error.Status and llm.last_status == 400 and dropReasoning()) {
+                attempt -|= 1;
+                continue;
+            }
             if (!transient or attempt >= max_retries or turn.content.len > 0 or turn.n > 0) return e;
             const secs = @as(u32, 1) << @intCast(@min(attempt, 4));
             ui.endMessage();

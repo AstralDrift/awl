@@ -79,7 +79,7 @@ ghostty, alacritty, and over ssh).
 | `AWL_KEY` | Local AI gateway key | bearer token |
 | `AWL_MAX_STEPS` | 200 | model calls per prompt |
 | `AWL_RETRIES` | 5 | retries for transient model errors |
-| `AWL_REASONING` | unset | `reasoning_effort` to send (hosted models; local Qwen ignores it) |
+| `AWL_REASONING` | `medium` | `reasoning_effort` to send (`low`, `medium`, `xhigh`, ...; `off` sends none). Local AI's Qwen defaults to xhigh, about twice the tokens per turn; dropped automatically if a server rejects it |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |
 | `AWL_MODE` | `auto` | `auto`, `ask` (approve commands and edits) or `plan` (read-only) |
 

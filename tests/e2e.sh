@@ -302,6 +302,18 @@ for i, x in enumerate(m):  # every assistant tool call is answered
 EOF
 stop
 
+# 8c2. reasoning_effort: medium by default; a server that rejects it gets the request again without it
+echo '[{"status": 400, "content": "Unexpected reasoning effort medium. Supported types are xhigh."}, {"content": "fine"}]' > "$W/re.json"
+serve "$W/re.json"
+out=$(cd "$W" && "$AWL" -p go 2>"$W/o")
+python3 - "$LOG" "$out" <<'EOF2' && ok "reasoning_effort dropped after a 400 about it" || bad "reasoning fallback" "$out $(tail -2 "$W/o")"
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "fine", sys.argv[2]
+assert r[0]["reasoning_effort"] == "medium" and "reasoning_effort" not in r[1], [x.get("reasoning_effort") for x in r]
+EOF2
+stop
+
 # 8d. a "too long" rejection forces one compaction and the run continues (window unknown)
 python3 - "$W/c400.json" <<'EOF'
 import json, sys
