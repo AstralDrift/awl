@@ -90,6 +90,8 @@ for t in tasks:
     print(f"{t:12}" + "".join(f"{c:>8}" for c in cells))
 if any(r.get("cost") for r in rows):
     print(f"\ntotal cost ${sum(r.get('cost', 0) or 0 for r in rows):.3f}, rate-limit retries {sum(r.get('retries', 0) for r in rows)}")
+    from collections import Counter
+    print("providers per run:", dict(Counter(",".join(r.get("providers", [])) or "?" for r in rows)))
 fails = [r for r in rows if not r["success"]]
 if fails:
     print("\nfailures")

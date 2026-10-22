@@ -58,6 +58,7 @@ class Meter:
         self.line = b""
         self.prompt = self.completion = self.cached = 0
         self.cost = 0.0
+        self.provider = ""
         self.tool_ids = set()
         self.tool_idx = set()
         self.raw = b""
@@ -76,6 +77,8 @@ class Meter:
 
     def event(self, obj):
         self.usage(obj.get("usage"))
+        if isinstance(obj.get("provider"), str):
+            self.provider = obj["provider"]
         if obj.get("type") == "response.completed":
             self.usage((obj.get("response") or {}).get("usage"))
         if obj.get("type") == "response.output_item.added" and (obj.get("item") or {}).get("type") == "function_call":
@@ -145,7 +148,8 @@ class H(BaseHTTPRequestHandler):
                 for k in ("reasoning_effort", "reasoning", "include_reasoning"):
                     req.pop(k, None)
             if opt["--provider"]:
-                req["provider"] = {"order": [opt["--provider"]], "allow_fallbacks": False}
+                # comma list = ordered set of allowed providers, nothing else
+                req["provider"] = {"order": opt["--provider"].split(","), "allow_fallbacks": False}
         return req
 
     def forward(self):
@@ -211,7 +215,7 @@ class H(BaseHTTPRequestHandler):
             return
         rec = {"t0": t0, "model_s": round(time.time() - t0, 3), "path": path, "status": status,
                "bytes_sent": len(body), "prompt_tokens": meter.prompt, "completion_tokens": meter.completion,
-               "cached_tokens": meter.cached, "tool_calls": meter.finish(), "cost": meter.cost, "retries": retries,
+               "cached_tokens": meter.cached, "tool_calls": meter.finish(), "cost": meter.cost, "retries": retries, "provider": meter.provider,
                "reasoning_chars": sum(map(len, meter.think)), "content_chars": meter.content_chars}
         with lock:
             with open(os.path.join(OUT, f"{run}.jsonl"), "a") as f:

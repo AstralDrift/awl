@@ -193,6 +193,7 @@ def run_one(h, task, rep, base, model, timeout, outdir, wd_root, env0):
         "first_prompt_bytes": reqs[0]["bytes_sent"] if reqs else 0,
         "peak_tree_kb": peak_tree, "peak_main_kb": peak_main,
         "cost": round(sum(r.get("cost", 0) or 0 for r in reqs), 5), "retries": sum(r.get("retries", 0) for r in reqs),
+        "providers": sorted({r["provider"] for r in reqs if r.get("provider")}),
     }
 
 
@@ -235,7 +236,7 @@ def main():
     base = f"http://127.0.0.1:{proxy.stdout.readline().decode().strip()}"
     results = os.path.join(ROOT, "results", ts + ".jsonl")
     meta = {"meta": True, "tier": tier, "model": model, "ts": ts, "upstream": upstream, "provider": provider,
-            "ctx": int(env0["ARENA_CTX"]), "budget": budget, "versions": {h: version(h) for h in harnesses}}
+            "ctx": int(env0["ARENA_CTX"]), "budget": budget, "total": repeat * len(tasks) * len(harnesses), "versions": {h: version(h) for h in harnesses}}
     with open(results, "w") as f:
         f.write(json.dumps(meta) + "\n")
     print(f"arena {tier}: {len(tasks)} tasks x {len(harnesses)} harnesses x {repeat} on {model}")
