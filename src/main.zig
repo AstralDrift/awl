@@ -164,4 +164,5 @@ test {
     _ = @import("skills.zig");
     _ = @import("tools.zig");
     _ = @import("undo.zig");
+    _ = @import("jint.zig");
 }

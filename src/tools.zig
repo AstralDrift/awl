@@ -7,6 +7,12 @@ const bufm = @import("buf.zig");
 const Buf = bufm.Buf;
 const ui = @import("ui.zig");
 const undo = @import("undo.zig");
+const Int = @import("jint.zig").Int;
+const Str = @import("jint.zig").Str;
+
+fn opt(x: ?Str) ?[]const u8 {
+    return if (x) |v| v.v else null;
+}
 
 /// auto: run every tool. ask: the user approves each command and file change.
 /// plan: files are read-only and commands need approval (look, then propose).
@@ -133,84 +139,91 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
     const opts: std.json.ParseOptions = .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed };
     const eq = std.mem.eql;
     if (eq(u8, name, "read")) {
-        const p = std.json.parseFromSliceLeaky(struct { path: []const u8, offset: ?usize = null, limit: ?usize = null }, a, args, opts) catch return badArgs(out, name, &r);
-        sum(&r, name, "{s}", .{p.path});
-        r.ok = read(p.path, p.offset orelse 1, p.limit orelse 2000, out);
-        if (r.ok) files_read.note(p.path);
+        const p = std.json.parseFromSliceLeaky(struct { path: Str, offset: ?Int(usize) = null, limit: ?Int(usize) = null }, a, args, opts) catch return badArgs(out, name, &r);
+        const path = p.path.v;
+        sum(&r, name, "{s}", .{path});
+        r.ok = read(path, if (p.offset) |o| o.v else 1, if (p.limit) |l| l.v else 2000, out);
+        if (r.ok) files_read.note(path);
     } else if (eq(u8, name, "write")) {
-        const p = std.json.parseFromSliceLeaky(struct { path: []const u8, content: []const u8 }, a, args, opts) catch return badArgs(out, name, &r);
-        sum(&r, name, "{s} ({d} lines)", .{ p.path, std.mem.count(u8, p.content, "\n") + @intFromBool(p.content.len > 0 and p.content[p.content.len - 1] != '\n') });
+        const p = std.json.parseFromSliceLeaky(struct { path: Str, content: Str }, a, args, opts) catch return badArgs(out, name, &r);
+        const path = p.path.v;
+        const content = p.content.v;
+        sum(&r, name, "{s} ({d} lines)", .{ path, std.mem.count(u8, content, "\n") + @intFromBool(content.len > 0 and content[content.len - 1] != '\n') });
         if (!try gate(name, true, out)) return r;
-        save(p.path);
-        r.ok = write(p.path, &.{p.content}, out);
-        if (r.ok) files_changed.note(p.path);
-        if (r.ok) out.print("wrote {d} bytes to {s}", .{ p.content.len, p.path });
+        save(path);
+        r.ok = write(path, &.{content}, out);
+        if (r.ok) files_changed.note(path);
+        if (r.ok) out.print("wrote {d} bytes to {s}", .{ content.len, path });
     } else if (eq(u8, name, "edit")) {
-        const E = struct { old_string: ?[]const u8 = null, new_string: ?[]const u8 = null, old: ?[]const u8 = null, new: ?[]const u8 = null };
-        const p = std.json.parseFromSliceLeaky(struct { path: []const u8, old_string: ?[]const u8 = null, new_string: ?[]const u8 = null, old: ?[]const u8 = null, new: ?[]const u8 = null, replace_all: bool = false, edits: ?[]const E = null }, a, args, opts) catch return badArgs(out, name, &r);
+        const E = struct { old_string: ?Str = null, new_string: ?Str = null, old: ?Str = null, new: ?Str = null };
+        const p = std.json.parseFromSliceLeaky(struct { path: Str, old_string: ?Str = null, new_string: ?Str = null, old: ?Str = null, new: ?Str = null, replace_all: bool = false, edits: ?[]const E = null }, a, args, opts) catch return badArgs(out, name, &r);
+        const path = p.path.v;
         var pairs: [max_edits]Pair = undefined;
         var n: usize = 0;
-        if (p.old_string orelse p.old) |old| {
-            pairs[0] = .{ .old = old, .new = p.new_string orelse p.new orelse return badArgs(out, name, &r) };
+        if (opt(p.old_string) orelse opt(p.old)) |old| {
+            pairs[0] = .{ .old = old, .new = opt(p.new_string) orelse opt(p.new) orelse return badArgs(out, name, &r) };
             n = 1;
         }
         for (p.edits orelse &.{}) |e| {
             if (n == max_edits) {
                 out.print("too many edits in one call (max {d}); split them", .{max_edits});
-                sum(&r, name, "{s}", .{p.path});
+                sum(&r, name, "{s}", .{path});
                 return r;
             }
-            pairs[n] = .{ .old = e.old_string orelse e.old orelse return badArgs(out, name, &r), .new = e.new_string orelse e.new orelse return badArgs(out, name, &r) };
+            pairs[n] = .{ .old = opt(e.old_string) orelse opt(e.old) orelse return badArgs(out, name, &r), .new = opt(e.new_string) orelse opt(e.new) orelse return badArgs(out, name, &r) };
             n += 1;
         }
         if (n == 0) return badArgs(out, name, &r);
         if (p.replace_all and n == 1) {
-            sum(&r, name, "{s} (all)", .{p.path});
+            sum(&r, name, "{s} (all)", .{path});
             const preview = mode != .auto;
             if (preview) ui.diff(pairs[0].old, pairs[0].new);
             if (!try gate(name, true, out)) return r;
-            save(p.path);
-            r.ok = replaceAll(p.path, pairs[0].old, pairs[0].new, out);
-            if (r.ok) files_changed.note(p.path);
+            save(path);
+            r.ok = replaceAll(path, pairs[0].old, pairs[0].new, out);
+            if (r.ok) files_changed.note(path);
             if (r.ok and !preview) ui.diff(pairs[0].old, pairs[0].new);
             return r;
         }
-        if (n == 1) sum(&r, name, "{s}", .{p.path}) else sum(&r, name, "{s} ({d} changes)", .{ p.path, n });
+        if (n == 1) sum(&r, name, "{s}", .{path}) else sum(&r, name, "{s} ({d} changes)", .{ path, n });
         const preview = mode != .auto; // show the change before asking
         if (preview) for (pairs[0..n]) |pp| ui.diff(pp.old, pp.new);
         if (!try gate(name, true, out)) return r;
-        save(p.path);
-        r.ok = editFile(p.path, pairs[0..n], out);
-        if (r.ok) files_changed.note(p.path);
+        save(path);
+        r.ok = editFile(path, pairs[0..n], out);
+        if (r.ok) files_changed.note(path);
         if (r.ok and !preview) for (pairs[0..n]) |pp| ui.diff(pp.old, pp.new);
     } else if (eq(u8, name, "todo")) {
-        const p = std.json.parseFromSliceLeaky(struct { items: []const struct { text: []const u8, status: []const u8 = "pending" } }, a, args, opts) catch return badArgs(out, name, &r);
+        const p = std.json.parseFromSliceLeaky(struct { items: []const struct { text: Str, status: Str = .{ .v = "pending" } } }, a, args, opts) catch return badArgs(out, name, &r);
         var done: usize = 0;
-        for (p.items) |it| done += @intFromBool(eq(u8, it.status, "done") or eq(u8, it.status, "skip"));
+        for (p.items) |it| done += @intFromBool(eq(u8, it.status.v, "done") or eq(u8, it.status.v, "skip"));
         sum(&r, name, "{d}/{d} done", .{ done, p.items.len });
         r.ok = todo(p.items, out);
     } else if (eq(u8, name, "bash")) {
-        const p = std.json.parseFromSliceLeaky(struct { command: []const u8, timeout: ?u32 = null, background: bool = false }, a, args, opts) catch return badArgs(out, name, &r);
-        if (p.background) sum(&r, name, "&{s}", .{p.command}) else sum(&r, name, "{s}", .{p.command});
+        const p = std.json.parseFromSliceLeaky(struct { command: Str, timeout: ?Int(u32) = null, background: bool = false }, a, args, opts) catch return badArgs(out, name, &r);
+        if (p.background) sum(&r, name, "&{s}", .{p.command.v}) else sum(&r, name, "{s}", .{p.command.v});
         if (!try gate(name, false, out)) return r;
-        const cmd = a.dupeZ(u8, p.command) catch return badArgs(out, name, &r);
+        const cmd = a.dupeZ(u8, p.command.v) catch return badArgs(out, name, &r);
         if (p.background) {
             r.ok = startJob(cmd, out);
             return r;
         }
         const argv = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
-        r.ok = try spawn(&argv, @as(u64, p.timeout orelse 120) * 1000, out, .bash);
+        r.ok = try spawn(&argv, @as(u64, if (p.timeout) |x| x.v else 120) * 1000, out, .bash);
     } else if (eq(u8, name, "grep") and have_rg) {
-        const p = std.json.parseFromSliceLeaky(struct { pattern: []const u8, path: ?[]const u8 = null, glob: ?[]const u8 = null, context: ?u8 = null, ignore_case: bool = false, limit: ?usize = null }, a, args, opts) catch return badArgs(out, name, &r);
-        sum(&r, name, "{s} {s}", .{ p.pattern, p.path orelse "." });
+        const p = std.json.parseFromSliceLeaky(struct { pattern: Str, path: ?Str = null, glob: ?Str = null, context: ?Int(u8) = null, ignore_case: bool = false, limit: ?Int(usize) = null }, a, args, opts) catch return badArgs(out, name, &r);
+        const pattern = p.pattern.v;
+        const path = opt(p.path) orelse ".";
+        sum(&r, name, "{s} {s}", .{ pattern, path });
         var argv: [24:null]?[*:0]const u8 = .{ rg_path, "-n", "--no-heading", "--color", "never", "--smart-case", "--max-columns", "300", "--max-columns-preview" } ++ .{null} ** 15;
         var n: usize = 9;
         if (p.glob) |g| {
             argv[n] = "-g";
-            argv[n + 1] = a.dupeZ(u8, g) catch return badArgs(out, name, &r);
+            argv[n + 1] = a.dupeZ(u8, g.v) catch return badArgs(out, name, &r);
             n += 2;
         }
-        if (p.context) |c| if (c > 0) {
+        if (p.context) |cx| if (cx.v > 0) {
+            const c = cx.v;
             var cb: [8]u8 = undefined;
             argv[n] = "-C";
             argv[n + 1] = a.dupeZ(u8, std.fmt.bufPrint(&cb, "{d}", .{@min(c, 20)}) catch "2") catch return badArgs(out, name, &r);
@@ -221,13 +234,14 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
             n += 1;
         }
         argv[n] = "-e";
-        argv[n + 1] = a.dupeZ(u8, p.pattern) catch return badArgs(out, name, &r);
+        argv[n + 1] = a.dupeZ(u8, pattern) catch return badArgs(out, name, &r);
         argv[n + 2] = "--";
-        argv[n + 3] = a.dupeZ(u8, p.path orelse ".") catch return badArgs(out, name, &r);
+        argv[n + 3] = a.dupeZ(u8, path) catch return badArgs(out, name, &r);
         r.ok = try spawn(&argv, 30_000, out, .grep);
-        capLines(out, @min(p.limit orelse 200, 1000), "lines");
+        capLines(out, @min(if (p.limit) |l| l.v else 200, 1000), "lines");
     } else if (eq(u8, name, "find") and have_fd) {
-        const p = std.json.parseFromSliceLeaky(struct { pattern: ?[]const u8 = null, path: ?[]const u8 = null }, a, args, opts) catch return badArgs(out, name, &r);
+        const q = std.json.parseFromSliceLeaky(struct { pattern: ?Str = null, path: ?Str = null }, a, args, opts) catch return badArgs(out, name, &r);
+        const p = .{ .pattern = opt(q.pattern), .path = opt(q.path) };
         sum(&r, name, "{s} {s}", .{ p.pattern orelse "*", p.path orelse "." });
         var argv: [8:null]?[*:0]const u8 = .{ fd_path, "--color", "never", "--max-results", "501" } ++ .{null} ** 3;
         argv[5] = a.dupeZ(u8, p.pattern orelse "") catch return badArgs(out, name, &r);
@@ -362,10 +376,10 @@ fn todo(items: anytype, out: *Buf) bool {
     }
     for (items) |it| {
         const known = for ([_][]const u8{ "pending", "doing", "done", "skip" }) |k| {
-            if (std.mem.eql(u8, it.status, k)) break true;
+            if (std.mem.eql(u8, it.status.v, k)) break true;
         } else false;
         if (!known) {
-            out.print("unknown status \"{s}\" for \"{s}\"; use pending, doing, done or skip", .{ it.status, it.text });
+            out.print("unknown status \"{s}\" for \"{s}\"; use pending, doing, done or skip", .{ it.status.v, it.text.v });
             return false;
         }
     }
@@ -373,9 +387,9 @@ fn todo(items: anytype, out: *Buf) bool {
     var done: usize = 0;
     for (items) |it| {
         const eq = std.mem.eql;
-        const mark: []const u8 = if (eq(u8, it.status, "done")) "[x]" else if (eq(u8, it.status, "doing")) "[>]" else if (eq(u8, it.status, "skip")) "[-]" else "[ ]";
-        done += @intFromBool(eq(u8, it.status, "done") or eq(u8, it.status, "skip"));
-        out.print("\n{s} {s}", .{ mark, it.text });
+        const mark: []const u8 = if (eq(u8, it.status.v, "done")) "[x]" else if (eq(u8, it.status.v, "doing")) "[>]" else if (eq(u8, it.status.v, "skip")) "[-]" else "[ ]";
+        done += @intFromBool(eq(u8, it.status.v, "done") or eq(u8, it.status.v, "skip"));
+        out.print("\n{s} {s}", .{ mark, it.text.v });
     }
     out.print("\n({d}/{d} done)", .{ done, items.len });
     return true;
@@ -1125,4 +1139,26 @@ test "spawn: output, exit code, truncation, timeout kills grandchild" {
     try t.expect(!try spawn(&a3, 300, &out, .bash));
     try t.expect(sys.nowNs() - t0 < 2 * std.time.ns_per_s);
     try t.expect(std.mem.indexOf(u8, out.items(), "timed out") != null);
+}
+
+test "number arguments: plain, quoted and 1.0" {
+    ui.quiet = true;
+    var db: [64]u8 = undefined;
+    const d = tmpdir(&db);
+    var pb: [128]u8 = undefined;
+    const f = try std.fmt.bufPrint(&pb, "{s}/num.txt", .{d});
+    var out = Buf.init(1 << 20);
+    try t.expect(write(f, &.{"a\nb\nc\nd\n"}, &out));
+    out.reset();
+    var ab: [256]u8 = undefined;
+    const r = try run("read", try std.fmt.bufPrint(&ab, "{{\"path\":\"{s}\",\"offset\":2,\"limit\":\"2\"}}", .{f}), &out);
+    try t.expect(r.ok);
+    try t.expectEqualStrings("2→b\nc\n[lines 2-3 of 4; use offset=4 to continue]", out.items());
+    out.reset();
+    const b = try run("bash", "{\"command\":\"sleep 3\",\"timeout\":1.0}", &out);
+    try t.expect(!b.ok);
+    try t.expect(std.mem.endsWith(u8, out.items(), "[timed out after 1 s; process group killed]"));
+    out.reset();
+    _ = try run("read", try std.fmt.bufPrint(&ab, "{{\"path\":\"{s}\",\"offset\":1.5}}", .{f}), &out);
+    try t.expect(std.mem.startsWith(u8, out.items(), "invalid arguments for read"));
 }

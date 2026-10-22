@@ -6,9 +6,9 @@ fail() { echo "CHECK FAIL: $*"; exit 1; }
 ok() { echo "ok  $*"; }
 
 size=$(stat -c %s "$B")
-# 200 KB until 2026-10-22; the TUI basics (sessions, history search, completion, undo,
-# modes, copy) took it to ~217 KB. A goal, not a cap: raise it only for features people use.
-[ "$size" -le 229376 ] || fail "size $size > 224 KB"
+# A goal, not a cap: raise it only for features people use. (The TUI basics took it to
+# 224 KB; dropping std.json's float fallback, see src/jint.zig, brought it back to 199 KB.)
+[ "$size" -le 204800 ] || fail "size $size > 200 KB"
 ok "size $size B"
 
 file "$B" | grep -q 'statically linked' || fail "not static"

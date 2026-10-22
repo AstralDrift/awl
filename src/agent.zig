@@ -10,6 +10,7 @@ const ui = @import("ui.zig");
 const session = @import("session.zig");
 const skills = @import("skills.zig");
 const undo = @import("undo.zig");
+const Str = @import("jint.zig").Str;
 const bufm = @import("buf.zig");
 const Buf = bufm.Buf;
 
@@ -394,14 +395,16 @@ const compact_instructions =
 /// "[Assistant tool calls]: name(args)", "[Tool result]: …". Long parts are cut.
 fn serialize(json: []const u8, fba: std.mem.Allocator, w: *Buf) void {
     const M = struct {
-        role: []const u8,
-        content: ?[]const u8 = null,
-        tool_calls: ?[]const struct { function: struct { name: []const u8 = "", arguments: []const u8 = "" } } = null,
+        role: Str,
+        content: ?Str = null,
+        tool_calls: ?[]const struct { function: struct { name: Str = .{ .v = "" }, arguments: Str = .{ .v = "" } } } = null,
     };
     const m = std.json.parseFromSliceLeaky(M, fba, json, .{ .ignore_unknown_fields = true }) catch return;
-    const cap: usize = if (std.mem.eql(u8, m.role, "tool")) 1500 else 4000;
-    const label = if (std.mem.eql(u8, m.role, "user")) "[User]: " else if (std.mem.eql(u8, m.role, "tool")) "[Tool result]: " else "[Assistant]: ";
-    if (m.content) |c| if (std.mem.trim(u8, c, " \n").len > 0) {
+    const role = m.role.v;
+    const cap: usize = if (std.mem.eql(u8, role, "tool")) 1500 else 4000;
+    const label = if (std.mem.eql(u8, role, "user")) "[User]: " else if (std.mem.eql(u8, role, "tool")) "[Tool result]: " else "[Assistant]: ";
+    if (m.content) |cs| if (std.mem.trim(u8, cs.v, " \n").len > 0) {
+        const c = cs.v;
         w.add(label);
         if (c.len <= cap) w.add(c) else {
             w.add(c[0 .. cap * 2 / 3]);
@@ -414,9 +417,10 @@ fn serialize(json: []const u8, fba: std.mem.Allocator, w: *Buf) void {
         w.add("[Assistant tool calls]: ");
         for (calls, 0..) |tc, k| {
             if (k > 0) w.add("; ");
-            w.add(tc.function.name);
+            w.add(tc.function.name.v);
             w.byte('(');
-            w.add(tc.function.arguments[0..@min(tc.function.arguments.len, 300)]);
+            const args = tc.function.arguments.v;
+            w.add(args[0..@min(args.len, 300)]);
             w.byte(')');
         }
         w.byte('\n');
@@ -498,8 +502,8 @@ fn compact(force: bool) bool {
         i -= 1;
         const m = msgAt(items, i);
         if (std.mem.indexOf(u8, m[0..@min(m.len, 200)], "\"content\":\"" ++ tools.todo_marker) == null) continue;
-        const T = struct { content: []const u8 };
-        if (std.json.parseFromSliceLeaky(T, fba.allocator(), m, .{ .ignore_unknown_fields = true })) |t| todo_text = t.content else |_| {}
+        const T = struct { content: Str };
+        if (std.json.parseFromSliceLeaky(T, fba.allocator(), m, .{ .ignore_unknown_fields = true })) |t| todo_text = t.content.v else |_| {}
         break;
     }
     // Keep the newest ~25% of the window (or of the current history when the window is unknown).

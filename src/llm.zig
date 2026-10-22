@@ -1,5 +1,7 @@
 //! OpenAI-compatible chat streaming: SSE events → content, reasoning, tool calls.
 const std = @import("std");
+const Int = @import("jint.zig").Int;
+const Str = @import("jint.zig").Str;
 const http = @import("http.zig");
 const sys = @import("sys.zig");
 const ui = @import("ui.zig");
@@ -57,25 +59,25 @@ pub const Turn = struct {
 const Chunk = struct {
     choices: []const struct {
         delta: struct {
-            content: ?[]const u8 = null,
-            reasoning_content: ?[]const u8 = null,
-            reasoning: ?[]const u8 = null,
+            content: ?Str = null,
+            reasoning_content: ?Str = null,
+            reasoning: ?Str = null,
             tool_calls: ?[]const struct {
-                index: ?usize = null,
-                id: ?[]const u8 = null,
+                index: ?Int(usize) = null,
+                id: ?Str = null,
                 function: ?struct {
-                    name: ?[]const u8 = null,
-                    arguments: ?[]const u8 = null,
+                    name: ?Str = null,
+                    arguments: ?Str = null,
                 } = null,
             } = null,
         } = .{},
-        finish_reason: ?[]const u8 = null,
+        finish_reason: ?Str = null,
     } = &.{},
     usage: ?struct {
-        prompt_tokens: u64 = 0,
-        completion_tokens: u64 = 0,
+        prompt_tokens: Int(u64) = .{ .v = 0 },
+        completion_tokens: Int(u64) = .{ .v = 0 },
     } = null,
-    @"error": ?struct { message: ?[]const u8 = null } = null,
+    @"error": ?struct { message: ?Str = null } = null,
 };
 
 var scratch: [256 * 1024]u8 = undefined;
@@ -126,35 +128,37 @@ fn event(data: []const u8, t: *Turn) Error!void {
         return error.Server;
     };
     if (c.@"error") |e| {
-        setDetail(e.message orelse data);
+        setDetail(if (e.message) |x| x.v else data);
         return error.Server;
     }
     if (c.usage) |u| {
-        t.prompt_tokens = u.prompt_tokens;
-        t.completion_tokens = u.completion_tokens;
+        t.prompt_tokens = u.prompt_tokens.v;
+        t.completion_tokens = u.completion_tokens.v;
     }
     for (c.choices) |ch| {
         const d = ch.delta;
-        if (d.reasoning_content orelse d.reasoning) |s| {
+        if (d.reasoning_content orelse d.reasoning) |rs| {
+            const s = rs.v;
             t.reasoning_bytes += s.len;
             ui.reasoning(s);
         }
-        if (d.content) |s| if (s.len > 0) {
+        if (d.content) |cs| if (cs.v.len > 0) {
+            const s = cs.v;
             t.content.add(s);
             ui.content(s);
         };
         if (d.tool_calls) |tcs| for (tcs) |tc| {
-            const i = tc.index orelse (if (t.n > 0) t.n - 1 else 0);
+            const i = if (tc.index) |x| x.v else (if (t.n > 0) t.n - 1 else 0);
             if (i >= max_calls) continue;
             if (i >= t.n) t.n = i + 1;
             const call = &t.calls[i];
-            if (tc.id) |id| if (call.id.n == 0) call.id.add(id);
+            if (tc.id) |id| if (call.id.n == 0) call.id.add(id.v);
             if (tc.function) |f| {
-                if (f.name) |n| call.name.add(n);
-                if (f.arguments) |a| call.args.add(a);
+                if (f.name) |n| call.name.add(n.v);
+                if (f.arguments) |a| call.args.add(a.v);
             }
         };
-        if (ch.finish_reason) |f| if (std.mem.eql(u8, f, "length")) {
+        if (ch.finish_reason) |f| if (std.mem.eql(u8, f.v, "length")) {
             t.length_cut = true;
         };
     }
@@ -174,13 +178,13 @@ pub fn firstModel(cfg: Cfg, out: []u8) Error!ModelInfo {
     while (try r.body()) |x| b.add(x);
     if (r.status != 200) return error.Status;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
-    const M = struct { data: []const struct { id: []const u8, max_model_len: ?u64 = null, context_length: ?u64 = null } = &.{} };
+    const M = struct { data: []const struct { id: Str, max_model_len: ?Int(u64) = null, context_length: ?Int(u64) = null } = &.{} };
     const m = std.json.parseFromSliceLeaky(M, fba.allocator(), b.items(), .{ .ignore_unknown_fields = true }) catch return error.Server;
     if (m.data.len == 0) return error.Server;
     const d = m.data[0];
-    const n = @min(out.len, d.id.len);
-    @memcpy(out[0..n], d.id[0..n]);
-    return .{ .id = out[0..n], .ctx = d.max_model_len orelse d.context_length orelse 0 };
+    const n = @min(out.len, d.id.v.len);
+    @memcpy(out[0..n], d.id.v[0..n]);
+    return .{ .id = out[0..n], .ctx = if (d.max_model_len orelse d.context_length) |c| c.v else 0 };
 }
 
 test "event accumulates content and split tool calls" {
