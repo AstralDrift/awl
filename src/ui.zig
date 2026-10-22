@@ -103,9 +103,11 @@ var ob: [8192]u8 = undefined;
 var on: usize = 0;
 pub var capture: ?*@import("buf.zig").Buf = null; // tests: collect output here instead
 fn put(s: []const u8) void {
-    if (live) { // a live status line is on screen: clear it before real output
+    if (live) { // the live area is on screen: clear it before real output
         live = false;
-        put("\r\x1b[K");
+        var cb: [16]u8 = undefined;
+        put(if (live_rows > 1) std.fmt.bufPrint(&cb, "\x1b[{d}A\r\x1b[J", .{live_rows - 1}) catch "\r\x1b[J" else "\r\x1b[K");
+        live_rows = 0;
     }
     if (s.len > ob.len - on) flushTo(if (oneshot) sys.stderr else sys.stdout);
     if (s.len > ob.len) {
@@ -156,7 +158,8 @@ pub fn reasoning(s: []const u8) void {
         tail[tail_n] = c;
         tail_n += 1;
     }
-    if (draft.len > 0 or queued > 0 or held.len > 0) return drawLive();
+    if (draft.len > 0 or queued > 0 or held.len > 0 or panelRows() > 0) return drawLive();
+    if (live and live_rows > 1) put(""); // a panel was up: clear it first
     const w = @min(@as(usize, sys.termCols()) -| 6, tail_n);
     var start = tail_n - w;
     while (start < tail_n and (tail[start] & 0xC0) == 0x80) start += 1; // utf-8 boundary
@@ -168,9 +171,11 @@ pub fn reasoning(s: []const u8) void {
     flush();
 }
 
-// Live line: while the model or a tool works and nothing else is printing, one dim
-// line shows the elapsed time and whatever the user is typing (sent at the next step).
+// Live area: while the model or a tool works and nothing else is printing, the
+// model's checklist (if it keeps one) and one dim line with the elapsed time and
+// whatever the user is typing (sent at the next step).
 var live = false;
+var live_rows: usize = 0; // rows the live area takes (the cursor is on the last)
 var live_t0: u64 = 0;
 pub var draft: []const u8 = ""; // text typed while the agent works (owned by tui)
 pub var queued: usize = 0; // messages waiting for the next step
@@ -186,7 +191,7 @@ pub fn liveStart() void {
 pub fn tick() void {
     if (!color or oneshot or quiet or capture != null) return;
     if (thinking) {
-        if (draft.len > 0 or queued > 0 or held.len > 0) drawLive();
+        if (draft.len > 0 or queued > 0 or held.len > 0 or panel_rows > 0) drawLive();
         return;
     }
     if (!bol or on > 0) return;
@@ -200,13 +205,27 @@ pub fn tick() void {
 }
 
 fn drawLive() void {
-    var b: [1024]u8 = undefined;
+    var b: [4096]u8 = undefined;
     var n: usize = 0;
     const secs = (sys.nowNs() - live_t0) / std.time.ns_per_s;
     const w = @as(usize, sys.termCols()) -| 1;
-    const head = std.fmt.bufPrint(&b, "\r\x1b[K{s}{s} {d}s", .{ muted(), if (thinking) "∴" else "⋯", secs }) catch return;
-    n = head.len;
+    // back to the top of the area drawn last time, then the checklist
+    const top = if (live and live_rows > 1) (std.fmt.bufPrint(&b, "\x1b[{d}A\r\x1b[J", .{live_rows - 1}) catch return) else (std.fmt.bufPrint(&b, "\r\x1b[K", .{}) catch return);
+    n = top.len;
+    const rows = panel(b[n .. b.len - 1024], w);
+    n += rows.len;
+    const head = std.fmt.bufPrint(b[n..], "{s}{s} {d}s", .{ muted(), if (thinking) "∴" else "⋯", secs }) catch return;
+    n += head.len;
     var cols: usize = 4 + std.fmt.count("{d}", .{secs});
+    if (thinking and draft.len == 0 and queued == 0 and held.len == 0) { // the reasoning tail
+        const room = @min(w -| (cols + 1), tail_n);
+        var start = tail_n - room;
+        while (start < tail_n and (tail[start] & 0xC0) == 0x80) start += 1;
+        b[n] = ' ';
+        n += 1;
+        @memcpy(b[n .. n + (tail_n - start)], tail[start..tail_n]);
+        n += tail_n - start;
+    }
     if (queued > 0) {
         const q = std.fmt.bufPrint(b[n..], " · {d} queued", .{queued}) catch "";
         n += q.len;
@@ -235,6 +254,87 @@ fn drawLive() void {
     n += r.len;
     sys.writeAll(sys.stdout, b[0..n]) catch {};
     live = true;
+    live_rows = panel_rows + 1;
+}
+
+// The model's checklist, from its latest todo call: one line per item, "[x] text".
+var plan_b: [4096]u8 = undefined;
+var plan_n: usize = 0;
+var panel_rows: usize = 0; // rows the last panel() wrote
+
+/// Forget the checklist (a new conversation).
+pub fn clearPlan() void {
+    plan_n = 0;
+}
+
+fn setPlan(text: []const u8) void {
+    const body = std.mem.trimStart(u8, text[@import("tools.zig").todo_marker.len..], "\n");
+    const end = std.mem.lastIndexOf(u8, body, "\n(") orelse body.len; // drop "(3/7 done)"
+    plan_n = @min(end, plan_b.len);
+    @memcpy(plan_b[0..plan_n], body[0..plan_n]);
+}
+
+/// The whole checklist after a todo call: ✓ done, ▸ in progress, ○ to do, – skipped.
+fn checklist() void {
+    const w = @as(usize, sys.termCols()) -| 4;
+    var it = std.mem.splitScalar(u8, plan_b[0..plan_n], '\n');
+    while (it.next()) |l| {
+        if (l.len < 4) continue;
+        const st: struct { []const u8, []const u8 } = switch (l[1]) {
+            'x' => .{ sgr(&th.green), "✓" },
+            '>' => .{ sgr(&th.accent), "▸" },
+            '-' => .{ muted(), "–" },
+            else => .{ muted(), "○" },
+        };
+        print("  {s}{s}{s} {s}{s}{s}\n", .{ st[0], st[1], reset(), if (l[1] == '>') sgr(&th.fg) else muted(), cut(l[4..], w), reset() });
+    }
+    flush();
+}
+
+fn panelRows() usize {
+    var b: [4096]u8 = undefined;
+    _ = panel(&b, 80);
+    return panel_rows;
+}
+
+/// The checklist as it stands, compact: finished items folded into one count, then
+/// the item in progress and the next few. Nothing once every item is finished.
+fn panel(b: []u8, w: usize) []const u8 {
+    panel_rows = 0;
+    if (plan_n == 0 or !color or oneshot) return b[0..0];
+    var done: usize = 0;
+    var open: usize = 0;
+    var it = std.mem.splitScalar(u8, plan_b[0..plan_n], '\n');
+    while (it.next()) |l| {
+        if (l.len < 4) continue;
+        if (l[1] == 'x' or l[1] == '-') done += 1 else open += 1;
+    }
+    if (open == 0) return b[0..0];
+    const max_open = @min(@as(usize, 4), @as(usize, sys.termRows()) -| 6);
+    var n: usize = 0;
+    if (done > 0) {
+        const s = std.fmt.bufPrint(b[n..], "{s}  ✓ {d} done{s}\r\n", .{ sgr(&th.green), done, reset() }) catch return b[0..0];
+        n += s.len;
+        panel_rows += 1;
+    }
+    var shown: usize = 0;
+    it = std.mem.splitScalar(u8, plan_b[0..plan_n], '\n');
+    while (it.next()) |l| {
+        if (l.len < 4 or l[1] == 'x' or l[1] == '-') continue;
+        if (shown == max_open) {
+            const s = std.fmt.bufPrint(b[n..], "{s}    … {d} more{s}\r\n", .{ muted(), open - shown, reset() }) catch break;
+            n += s.len;
+            panel_rows += 1;
+            break;
+        }
+        const doing = l[1] == '>';
+        const text = cut(l[4..], w -| 4);
+        const s = std.fmt.bufPrint(b[n..], "{s}  {s} {s}{s}\r\n", .{ if (doing) sgr(&th.accent) else muted(), if (doing) "▸" else "○", text, reset() }) catch break;
+        n += s.len;
+        panel_rows += 1;
+        shown += 1;
+    }
+    return b[0..n];
 }
 
 fn endThinking() void {
@@ -491,6 +591,12 @@ fn lines(s: []const u8, out: [][]const u8) []const []const u8 {
 /// Show at most 8 lines of tool output, dimmed.
 pub fn toolOutput(text: []const u8, ok: bool) void {
     if (oneshot) return;
+    if (ok and std.mem.startsWith(u8, text, @import("tools.zig").todo_marker)) {
+        setPlan(text);
+        last_tool.reset();
+        last_tool.add(text);
+        return checklist();
+    }
     last_tool.reset();
     last_tool.add(text);
     if (ok and diffed) {

@@ -42,6 +42,8 @@ ghostty, alacritty, and over ssh).
   AGENTS.md files and skills it loaded, and the last conversation held in this folder.
 - A status line under the prompt shows the model, context use (amber from 60%, when old tool
   output starts being trimmed; red from 80%, near summarizing), the mode and the git branch.
+- When the model keeps a checklist (the todo tool), it stays pinned above the timer while the
+  model and tools work: finished items fold into a count, the one in progress is highlighted.
 - Colors follow the active Omarchy theme and change with it (from the next prompt).
 - Prompt history is kept across sessions: ↑↓, and Ctrl-R finds older prompts containing what you typed.
 - `@path` attaches a small text file to the message (Tab completes names); `!cmd` runs a shell

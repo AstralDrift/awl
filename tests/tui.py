@@ -540,5 +540,47 @@ def screens():
 
 
 screens()
+
+
+def todo_panel():
+    """The model's checklist stays pinned above the live line while a tool runs."""
+    d = tempfile.mkdtemp()
+    items = lambda st: [{"text": "read the parser", "status": st[0]}, {"text": "fix tokenize", "status": st[1]}, {"text": "add a test", "status": st[2]}]
+    turns = [
+        {"tool_calls": [{"name": "todo", "arguments": {"items": items(["done", "doing", "pending"])}}]},
+        {"tool_calls": [{"name": "bash", "arguments": {"command": "sleep 2"}}]},
+        {"tool_calls": [{"name": "todo", "arguments": {"items": items(["done", "done", "done"])}}]},
+        {"content": "panel done"},
+    ]
+    sp6 = os.path.join(d, "s.json")
+    json.dump(turns, open(sp6, "w"))
+    srv6 = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp6], stdout=subprocess.PIPE)
+    port6 = srv6.stdout.readline().decode().strip()
+    p6, f6 = pty.fork()
+    if p6 == 0:
+        os.chdir(d)
+        os.execve(AWL, [AWL], dict(env, AWL_URL=f"http://127.0.0.1:{port6}", XDG_STATE_HOME=os.path.join(d, "state")))
+    fcntl.ioctl(f6, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    out = b""
+    end = time.time() + 1
+    while time.time() < end:
+        if select.select([f6], [], [], 0.05)[0]:
+            out += os.read(f6, 65536)
+    os.write(f6, b"go\r")
+    out = b""
+    end = time.time() + 4
+    while b"panel done" not in out and time.time() < end:
+        if select.select([f6], [], [], 0.05)[0]:
+            out += os.read(f6, 65536)
+    during = out.split(b"sleep 2")[1].split(b"(no output)")[0] if b"(no output)" in out else out
+    check("todo output drawn as a checklist", "  ✓ read the parser".encode() in re.sub(rb"\x1b\[[0-9;]*m", b"", out), out[:300])
+    check("checklist pinned while a tool runs", b"1 done" in during and "▸ fix tokenize".encode() in re.sub(rb"\x1b\[[0-9;]*m", b"", during) and b"\xe2\x8b\xaf 1s" in during, during[-300:])
+    check("pinned checklist cleared before output", b"\x1b[3A\r\x1b[J" in out and b"panel done" in out, out[-300:])
+    os.kill(p6, signal.SIGKILL)
+    os.waitpid(p6, 0)
+    srv6.kill()
+
+
+todo_panel()
 print(f"tui: {'all passed' if not fails else f'{fails} failed'}")
 sys.exit(1 if fails else 0)

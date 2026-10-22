@@ -534,6 +534,7 @@ fn command(text: []const u8) ?bool {
     if (eq(u8, text, "/quit") or eq(u8, text, "/exit")) return true;
     if (eq(u8, text, "/clear") or eq(u8, text, "/new")) {
         agent.clear();
+        ui.clearPlan();
         session.restart();
         ui.note("new conversation", .{});
     } else if (eq(u8, text, "/resume") or std.mem.startsWith(u8, text, "/resume ")) {
@@ -553,6 +554,7 @@ fn command(text: []const u8) ?bool {
             var pb: [512]u8 = undefined;
             const p = session.pathOf(&l[k - 1], &pb) orelse return false;
             agent.clear();
+            ui.clearPlan();
             session.close();
             const n = agent.resume_(p) catch {
                 ui.err("cannot read {s}", .{p});
