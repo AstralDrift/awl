@@ -369,7 +369,8 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
         _ = linux.dup2(p[1], 1);
         _ = linux.dup2(p[1], 2);
         sys.unblockAll();
-        _ = linux.execve(argv[0].?, argv, sys.envp_raw);
+        var env: [1024]?[*:0]const u8 = undefined; // this desktop already has ~220 vars
+        _ = linux.execve(argv[0].?, argv, sys.childEnvp(sys.envp, &env));
         linux.exit_group(127);
     }
     _ = linux.setpgid(pid, pid);

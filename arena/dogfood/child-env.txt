@@ -1,0 +1,9 @@
+Security fix in awl: commands that awl runs for the model (the bash tool, and rg/fd for grep/find) currently inherit awl's whole environment, including AWL_KEY (the API key) and the other AWL_* settings. Any command the model runs can read the key, and AWL_* settings leak into nested programs (for example the repo's own test suite).
+
+Change it so child processes get awl's environment minus every variable whose name starts with "AWL_". Everything else (PATH, HOME, etc.) must be passed through unchanged.
+
+Constraints: no heap allocation (use a fixed-size buffer of pointers; if there are more entries than fit, drop the extra ones rather than failing), keep the change small and in the style of the surrounding code (see how spawn() in src/tools.zig calls execve and where the env comes from in src/sys.zig).
+
+Tests: add a unit test for the filtering function using a fake env list (AWL_KEY and AWL_URL removed, PATH and HOME kept, a variable merely containing "AWL_" in its value kept, e.g. "X=AWL_Y"). Also add one check to tests/e2e.sh: with AWL_KEY=secret123 set when running awl, a bash tool call running `env` must not show secret123 in the tool output the model receives (fake_sse logs requests; see the existing tool-loop check for how to inspect them).
+
+Then run from the repo root: zig build test, zig build e2e, zig build check. All must pass. Do not commit.

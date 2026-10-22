@@ -148,7 +148,7 @@ def run_one(h, task, rep, base, model, timeout, outdir, wd_root, env0):
     p = subprocess.Popen([os.path.join(ROOT, "adapters", h + ".sh"), wd, prompt, f"{base}/run/{rid}", model],
                          stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True, env=env)
     peak_tree = peak_main = 0
-    timed_out = False
+    timed_out = stalled = False
     while p.poll() is None:
         try:  # skip samples taken before the adapter script has exec'd the harness
             wrapper = open(f"/proc/{p.pid}/comm").read().strip().endswith(".sh")
@@ -157,7 +157,12 @@ def run_one(h, task, rep, base, model, timeout, outdir, wd_root, env0):
         if not wrapper:
             t, m = tree_rss(p.pid)
             peak_tree, peak_main = max(peak_tree, t), max(peak_main, m)
-        if time.time() - t0 > timeout:
+        # stall watchdog: no first request in 120 s, or none for 300 s -> stop now, not at the timeout
+        pf = os.path.join(outdir, "proxy", rid + ".jsonl")
+        idle = time.time() - (os.path.getmtime(pf) if os.path.exists(pf) else t0)
+        if idle > (300 if os.path.exists(pf) else 120):
+            stalled = True
+        if time.time() - t0 > timeout or stalled:
             timed_out = True
             os.killpg(p.pid, signal.SIGKILL)
             p.wait()
@@ -168,7 +173,7 @@ def run_one(h, task, rep, base, model, timeout, outdir, wd_root, env0):
         os.killpg(p.pid, signal.SIGKILL)  # stray children
     except ProcessLookupError:
         pass
-    ok, why = False, "timeout"
+    ok, why = False, "stalled (no model request)" if stalled else "timeout"
     if not timed_out:
         try:
             c = subprocess.run(["sh", os.path.join(tdir, "check.sh")], cwd=wd, env=env, capture_output=True,

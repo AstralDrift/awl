@@ -47,13 +47,23 @@ run() { # harness
   local proxy=$!
   for _ in $(seq 100); do [ -s "$out/port" ] && break; sleep 0.05; done
   local url=http://127.0.0.1:$(cat "$out/port")
-  # Budget guard: interrupt the harness if the logged cost passes the budget.
+  # Guard: stop the harness when it passes the budget, or stalls (no first request within 120 s,
+  # or no new request for 300 s). Nothing may sit silently.
   (
+    start=$(date +%s)
     while kill -0 $proxy 2>/dev/null; do
       spent=$(cat "$out"/proxy/*.jsonl 2>/dev/null | python3 -c "import sys,json; print(sum(json.loads(l).get('cost',0) or 0 for l in sys.stdin))")
-      if python3 -c "import sys; sys.exit(0 if $spent >= $BUDGET else 1)"; then
-        echo "dogfood: $h hit the \$$BUDGET budget, stopping it" >&2
+      last=$(stat -c %Y "$out"/proxy/*.jsonl 2>/dev/null | sort -n | tail -1)
+      now=$(date +%s)
+      why=""
+      python3 -c "import sys; sys.exit(0 if $spent >= $BUDGET else 1)" && why="hit the \$$BUDGET budget"
+      [ -z "$last" ] && [ $((now - start)) -gt 120 ] && why="STALLED: no request in 120 s"
+      [ -n "$last" ] && [ $((now - last)) -gt 300 ] && why="STALLED: no request for 300 s"
+      if [ -n "$why" ]; then
+        echo "dogfood: $h $why, stopping it" | tee -a "$out/summary.txt" >&2
         pkill -INT -f "^$REPO/zig-out/bin/awl -p|^pi --provider omarchy-local" || true
+        sleep 5
+        pkill -KILL -f "^$REPO/zig-out/bin/awl -p|^pi --provider omarchy-local" || true
         break
       fi
       sleep 5
@@ -64,9 +74,9 @@ run() { # harness
   set +e
   if [ "$h" = awl ]; then
     (cd "$wd" && XDG_STATE_HOME=$out/state AWL_URL=$url AWL_KEY=dogfood AWL_MODEL=$MODEL \
-      timeout 1800 "$REPO/zig-out/bin/awl" -p "$(cat "$PROMPT_FILE")" >"$out/answer.md" 2>"$out/log.txt")
+      timeout 1800 "$REPO/zig-out/bin/awl" -p "$(cat "$PROMPT_FILE")" >"$out/answer.md" 2>"$out/log.txt" </dev/null)
   else
-    ARENA_CTX=262144 timeout 1800 "$HERE/adapters/$h.sh" "$wd" "$PROMPT_FILE" "$url" "$MODEL" >"$out/answer.md" 2>"$out/log.txt"
+    ARENA_CTX=262144 timeout 1800 "$HERE/adapters/$h.sh" "$wd" "$PROMPT_FILE" "$url" "$MODEL" >"$out/answer.md" 2>"$out/log.txt" </dev/null
   fi
   rc=$?
   set -e

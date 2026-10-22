@@ -73,6 +73,24 @@ assert names[:4] == ["read", "write", "edit", "bash"], names
 EOF
 stop
 
+# 2b. child processes get awl's env minus AWL_*: a bash `env` must not leak the key
+cat >"$W/env.json" <<'EOF'
+[{"tool_calls":[{"name":"bash","arguments":{"command":"env"}}]},
+ {"content":"done"}]
+EOF
+serve "$W/env.json"
+(cd "$W" && AWL_KEY=secret123 "$AWL" -p go >/dev/null 2>"$W/err")
+python3 - "$LOG" <<'EOF' && ok "AWL_* not passed to child" || bad "AWL_* not passed to child" "secret123 leaked into tool output"
+import json, sys
+reqs = [json.loads(l) for l in open(sys.argv[1])]
+assert len(reqs) == 2, len(reqs)
+tool = reqs[-1]["messages"][-1]
+assert tool["role"] == "tool", tool["role"]
+assert "secret123" not in tool["content"], tool["content"]
+assert "PATH=" in tool["content"], tool["content"]
+EOF
+stop
+
 # 3. server error is reported, exit 1
 echo '[{"status":500,"content":"model exploded"}]' >"$W/err.json"
 serve "$W/err.json"

@@ -39,7 +39,6 @@ fn die(comptime f: []const u8, a: anytype) noreturn {
 
 pub fn main(init: std.process.Init.Minimal) u8 {
     sys.envp = @ptrCast(init.environ.block.slice);
-    sys.envp_raw = init.environ.block.slice.ptr;
     const argv = init.args.vector;
 
     var prompt: ?[]const u8 = null;
@@ -144,5 +143,6 @@ test {
     _ = @import("buf.zig");
     _ = @import("http.zig");
     _ = @import("llm.zig");
+    _ = @import("sys.zig");
     _ = @import("tools.zig");
 }

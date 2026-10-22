@@ -88,13 +88,27 @@ pub fn termCols() u16 {
 
 /// Environment, set once from main.
 pub var envp: []const [*:0]const u8 = &.{};
-pub var envp_raw: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{};
 pub fn getenv(name: []const u8) ?[]const u8 {
     for (envp) |e| {
         const s = std.mem.span(e);
         if (s.len > name.len and s[name.len] == '=' and std.mem.eql(u8, s[0..name.len], name)) return s[name.len + 1 ..];
     }
     return null;
+}
+
+/// Build a child environment in `buf` from `src`: every variable whose name
+/// starts with "AWL_" is dropped, the rest is passed through. Entries that do
+/// not fit `buf` are dropped. No allocation.
+pub fn childEnvp(src: []const [*:0]const u8, buf: []?[*:0]const u8) [*:null]const ?[*:0]const u8 {
+    var n: usize = 0;
+    for (src) |e| {
+        if (n + 1 >= buf.len) break;
+        if (std.mem.startsWith(u8, std.mem.span(e), "AWL_")) continue;
+        buf[n] = e;
+        n += 1;
+    }
+    buf[n] = null;
+    return @ptrCast(buf.ptr);
 }
 
 /// Read a whole small file into `buf`. Returns the filled slice.
@@ -150,4 +164,14 @@ pub fn drainSignals() void {
 pub fn unblockAll() void {
     const empty = linux.sigemptyset();
     _ = linux.sigprocmask(linux.SIG.SETMASK, &empty, null);
+}
+
+test "childEnvp drops AWL_* but keeps the rest" {
+    const src = [_][*:0]const u8{ "AWL_KEY=secret", "PATH=/bin", "AWL_URL=http://x", "HOME=/home/u", "X=AWL_Y" };
+    var buf: [8]?[*:0]const u8 = undefined;
+    const env = childEnvp(&src, &buf);
+    const want = [_][]const u8{ "PATH=/bin", "HOME=/home/u", "X=AWL_Y" };
+    var i: usize = 0;
+    while (env[i]) |e| : (i += 1) try std.testing.expectEqualStrings(want[i], std.mem.span(e));
+    try std.testing.expectEqual(want.len, i);
 }
