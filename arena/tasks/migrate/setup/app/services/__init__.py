@@ -1,0 +1,1 @@
+NAMES = ['billing', 'shipping', 'search', 'auth', 'audit', 'export', 'import_', 'cache', 'queue', 'email', 'report', 'refund', 'tax', 'stock', 'price', 'promo', 'review', 'session', 'token', 'address', 'coupon', 'invoice', 'cart', 'order']

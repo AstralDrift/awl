@@ -1,0 +1,1 @@
+Customers are complaining that their statements show a negative closing balance even though they never overdrew. Example: python3 -m bank statement A-17. Fix it.

@@ -1,0 +1,10 @@
+account,date,kind,amount
+A-17,2026-09-01,deposit,500.00
+A-17,2026-09-03,withdrawal,120.00
+A-17,2026-09-10,refund,40.00
+A-17,2026-09-12,withdrawal,400.00
+A-17,2026-09-20,refund,25.50
+B-02,2026-09-02,deposit,100.00
+B-02,2026-09-05,withdrawal,150.00
+C-31,2026-09-01,deposit,80.00
+C-31,2026-09-04,refund,10.00

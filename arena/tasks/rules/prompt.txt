@@ -1,0 +1,1 @@
+Add an `archive` command to the journal: it moves entries older than N days (default 30, given as an optional argument) from entries.json into archive.json (appending to what is already archived) and prints how many it moved. Add a test.

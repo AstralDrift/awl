@@ -1,0 +1,1 @@
+Since the caching change, GET /stats on our order service returns a 500. Start the service (python3 -m svc --port 8099), reproduce the error with curl, fix the cause, and confirm with curl that /stats now returns the right numbers. Stop the server when you are done; nothing should be left running on port 8099.

@@ -1,0 +1,1 @@
+python3 tests/run.py fails (it checks parse_amount against ~2500 recorded amounts). Find what is wrong and fix it so the whole run passes.

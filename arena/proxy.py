@@ -129,9 +129,9 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         self.forward()
 
-    def models(self):
-        body = json.dumps({"object": "list", "data": [{"id": opt["--model"], "object": "model",
-                                                       "max_model_len": int(opt["--ctx"])}]}).encode()
+    def models(self, model=None, ctx=None):
+        body = json.dumps({"object": "list", "data": [{"id": model or opt["--model"], "object": "model",
+                                                       "max_model_len": int(ctx or opt["--ctx"])}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -158,8 +158,13 @@ class H(BaseHTTPRequestHandler):
         if len(parts) > 3 and parts[1] == "run":
             run, path = parts[2], "/" + "/".join(parts[3:])
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
-        if HOSTED and path.rstrip("/").endswith("/models"):
-            return self.models()
+        if path.rstrip("/").endswith("/models"):
+            cf = os.path.join(OUT, f"{run}.ctx")  # task-specific window written by run.py
+            if os.path.exists(cf):
+                model, ctx = open(cf).read().split()[:2]
+                return self.models(model, ctx)
+            if HOSTED:
+                return self.models()
         if path.endswith("/chat/completions") and body:
             try:
                 body = json.dumps(self.rewrite(json.loads(body))).encode()

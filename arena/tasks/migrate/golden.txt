@@ -1,0 +1,24 @@
+billing: db=postgres://db.internal/app timeout=12s
+shipping: region=eu-west tries=4
+search: fast_path=on flags=2
+auth: budget=36s in eu-west
+audit: db=postgres://db.internal/app timeout=24s
+export: region=eu-west tries=4
+import_: fast_path=on flags=2
+cache: budget=36s in eu-west
+queue: db=postgres://db.internal/app timeout=36s
+email: region=eu-west tries=4
+report: fast_path=on flags=2
+refund: budget=36s in eu-west
+tax: db=postgres://db.internal/app timeout=12s
+stock: region=eu-west tries=4
+price: fast_path=on flags=2
+promo: budget=36s in eu-west
+review: db=postgres://db.internal/app timeout=24s
+session: region=eu-west tries=4
+token: fast_path=on flags=2
+address: budget=36s in eu-west
+coupon: db=postgres://db.internal/app timeout=36s
+invoice: region=eu-west tries=4
+cart: fast_path=on flags=2
+order: budget=36s in eu-west

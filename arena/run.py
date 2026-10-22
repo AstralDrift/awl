@@ -140,6 +140,11 @@ def run_one(h, task, rep, base, model, timeout, outdir, wd_root, env0):
     tdir = os.path.join(ROOT, "tasks", task)
     shutil.copytree(os.path.join(tdir, "setup"), wd)
     env = dict(env0, SETUP=os.path.join(tdir, "setup"), TASK=tdir)
+    if os.path.exists(os.path.join(tdir, "ctx")):  # task-specific context window (forces compaction)
+        env["ARENA_CTX"] = open(os.path.join(tdir, "ctx")).read().strip()
+        os.makedirs(os.path.join(outdir, "proxy"), exist_ok=True)  # the proxy answers /v1/models with it for this run
+        with open(os.path.join(outdir, "proxy", rid + ".ctx"), "w") as f:
+            f.write(f"{model}\n{env['ARENA_CTX']}\n")
     if os.path.exists(os.path.join(tdir, "setup.sh")):
         subprocess.run(["sh", os.path.join(tdir, "setup.sh")], cwd=wd, env=env, check=True, capture_output=True)
     prompt = os.path.join(ROOT, "tasks", task, "prompt.txt")
