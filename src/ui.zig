@@ -120,8 +120,69 @@ fn put(s: []const u8) void {
 var last_out: u64 = 0;
 fn flushTo(fd: sys.fd_t) void {
     if (on > 0) last_out = sys.nowNs();
-    if (capture) |c| c.add(ob[0..on]) else if (!quiet) sys.writeAll(fd, ob[0..on]) catch {};
+    if (capture) |c| c.add(ob[0..on]) else if (screen.on) {
+        screen.feed(ob[0..on]);
+        on = 0;
+        return requestDraw();
+    } else if (!quiet) sys.writeAll(fd, ob[0..on]) catch {};
     on = 0;
+}
+
+const screen = @import("screen.zig");
+/// Full-screen mode: draws the whole screen (set by tui).
+pub var redraw: ?*const fn () void = null;
+pub var busy = false; // a turn is running: full-screen mode shows the live area
+var last_draw: u64 = 0;
+var draw_pending = false;
+
+/// Redraw now, or at the next tick when the last frame was under 30 ms ago.
+fn requestDraw() void {
+    const now = sys.nowNs();
+    if (now -| last_draw < 30 * std.time.ns_per_ms) {
+        draw_pending = true;
+        return;
+    }
+    drawNow();
+}
+
+pub fn drawNow() void {
+    const f = redraw orelse return;
+    last_draw = sys.nowNs();
+    draw_pending = false;
+    f();
+}
+
+/// Full-screen mode: the live area as rows (separated by '\n'): the checklist and the
+/// timer line with the reasoning tail and queue counts (the draft is in the input box).
+pub fn liveRows(b: *@import("buf.zig").Buf, w: usize) void {
+    var pb: [4096]u8 = undefined;
+    const p = panel(&pb, w);
+    var it = std.mem.splitSequence(u8, p, "\r\n");
+    while (it.next()) |r| if (r.len > 0) {
+        b.add(r);
+        b.byte('\n');
+    };
+    const secs = (sys.nowNs() - live_t0) / std.time.ns_per_s;
+    const start = b.len;
+    b.print("{s}{s} {d}s", .{ muted(), if (thinking) "∴" else "⋯", secs });
+    var cols: usize = 4 + std.fmt.count("{d}", .{secs});
+    if (queued > 0) {
+        b.print(" · {d} queued", .{queued});
+        cols += 11;
+    }
+    if (held.len > 0) {
+        b.print(" · then {s}", .{held[0..@min(held.len, 40)]});
+        cols += 8 + @min(held.len, 40);
+    }
+    if (thinking) {
+        const room = @min(w -| (cols + 1), tail_n);
+        var st = tail_n - room;
+        while (st < tail_n and (tail[st] & 0xC0) == 0x80) st += 1;
+        b.byte(' ');
+        b.add(tail[st..tail_n]);
+    }
+    b.add(reset());
+    _ = start;
 }
 fn flush() void {
     flushTo(if (oneshot) sys.stderr else sys.stdout);
@@ -149,6 +210,7 @@ pub fn reasoning(s: []const u8) void {
         think_start = sys.nowNs();
         tail_n = 0;
     }
+    defer if (screen.on) requestDraw();
     for (s) |c0| {
         const c = if (c0 == '\n' or c0 == '\t') ' ' else c0;
         if (tail_n == tail.len) {
@@ -158,6 +220,7 @@ pub fn reasoning(s: []const u8) void {
         tail[tail_n] = c;
         tail_n += 1;
     }
+    if (screen.on) return;
     if (draft.len > 0 or queued > 0 or held.len > 0 or panelRows() > 0) return drawLive();
     if (live and live_rows > 1) put(""); // a panel was up: clear it first
     const w = @min(@as(usize, sys.termCols()) -| 6, tail_n);
@@ -190,6 +253,7 @@ pub fn liveStart() void {
 /// Called every ~200 ms while waiting. Redraws only at the start of a line.
 pub fn tick() void {
     if (!color or oneshot or quiet or capture != null) return;
+    if (screen.on) return drawNow(); // the timer, the draft, any output held back
     if (thinking) {
         if (draft.len > 0 or queued > 0 or held.len > 0 or panel_rows > 0) drawLive();
         return;
@@ -341,7 +405,7 @@ fn endThinking() void {
     if (!thinking) return;
     thinking = false;
     const secs = @as(f64, @floatFromInt(sys.nowNs() - think_start)) / 1e9;
-    put("\r\x1b[K");
+    if (!screen.on) put("\r\x1b[K");
     print("{s}∴ thought {d:.1}s{s}\n", .{ muted(), secs, reset() });
 }
 

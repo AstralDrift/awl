@@ -606,5 +606,71 @@ def todo_panel():
 
 
 todo_panel()
+
+
+def full_screen():
+    """--full: alternate screen, conversation drawn above the input, PgUp scrolls,
+    the transcript is printed on the normal screen at exit; /full toggles."""
+    d = tempfile.mkdtemp()
+    long = "\n".join(f"row {i}" for i in range(1, 61))
+    turns = [{"content": "short reply"}, {"content": long}, {"content": "after toggle"}]
+    sp7 = os.path.join(d, "s.json")
+    json.dump(turns, open(sp7, "w"))
+    srv7 = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp7], stdout=subprocess.PIPE)
+    port7 = srv7.stdout.readline().decode().strip()
+    p7, f7 = pty.fork()
+    if p7 == 0:
+        os.chdir(d)
+        os.execve(AWL, [AWL, "--full"], dict(env, AWL_URL=f"http://127.0.0.1:{port7}", XDG_STATE_HOME=os.path.join(d, "state")))
+    fcntl.ioctl(f7, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    out = [b""]
+
+    def until(pat, t=3.0):
+        end = time.time() + t
+        while pat.encode() not in out[0] and time.time() < end:
+            if select.select([f7], [], [], 0.05)[0]:
+                try:
+                    out[0] += os.read(f7, 65536)
+                except OSError:
+                    break
+        return pat.encode() in out[0]
+
+    check("--full enters the alternate screen with wheel reports", until("\x1b[?1049h\x1b[?1000h\x1b[?1006h"), out[0][:120])
+    until("fake-model \xc2\xb7 ".encode().decode("latin-1"), 1)
+    until("\x1b[?2026l")
+    check("--full: status line on the last row", re.search(rb"\x1b\[24;1H\x1b\[0m\x1b\[[0-9;]*mfake-model", out[0]) is not None, out[0][-300:])
+    out[0] = b""
+    os.write(f7, b"hi\r")
+    check("--full: reply drawn in the view", until("short reply") and until(" step"), out[0][-300:])
+    out[0] = b""
+    os.write(f7, b"long one\r")
+    until(" step")
+    time.sleep(0.3)
+    out[0] = b""
+    os.write(f7, b"\x1b[5~")
+    check("PgUp scrolls the view up", until("rows \xc2\xb7 PgDn".encode().decode("latin-1")) or until("rows · PgDn"), out[0][-300:])
+    out[0] = b""
+    os.write(f7, b"\x1b[<65;10;5M" * 10)  # wheel down to the bottom
+    time.sleep(0.4)
+    check("wheel down returns to the bottom", until("row 60") and b"PgDn" not in out[0].split(b"row 60")[-1], out[0][-200:])
+    out[0] = b""
+    os.write(f7, b"/full\r")
+    check("/full leaves: transcript printed on the normal screen", until("\x1b[?1049l") and until("row 60") and b"short reply" in out[0], out[0][-200:])
+    out[0] = b""
+    os.write(f7, b"/full\r")
+    check("/full enters again", until("\x1b[?1049h"), out[0][-100:])
+    os.write(f7, b"x\r")
+    until("after toggle")
+    out[0] = b""
+    os.write(f7, b"\x04")  # Ctrl-D quits
+    check("quitting prints the transcript and restores the screen", until("\x1b[?1049l") and until("after toggle"), out[0][-200:])
+    try:
+        os.waitpid(p7, 0)
+    except ChildProcessError:
+        pass
+    srv7.kill()
+
+
+full_screen()
 print(f"tui: {'all passed' if not fails else f'{fails} failed'}")
 sys.exit(1 if fails else 0)

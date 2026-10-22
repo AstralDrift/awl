@@ -11,6 +11,7 @@ const http = @import("http.zig");
 const Buf = @import("buf.zig").Buf;
 const tools = @import("tools.zig");
 const llm = @import("llm.zig");
+const screen = @import("screen.zig");
 
 var orig: linux.termios = undefined;
 var have_orig = false;
@@ -35,6 +36,7 @@ fn setMode(signals: bool) void {
 /// Put the terminal back the way we found it (also called on panic).
 pub fn restore() void {
     if (!have_orig) return;
+    leaveFull();
     _ = linux.ioctl(sys.stdin, linux.T.CSETSW, @intFromPtr(&orig));
     out("\x1b[?2004l\x1b[?1004l\x1b[0m");
 }
@@ -43,11 +45,127 @@ fn out(s: []const u8) void {
     sys.writeAll(sys.stdout, s) catch {};
 }
 
+pub var start_full = false; // awl --full / AWL_FULL=1
+
+/// Full-screen mode on: the alternate screen, mouse wheel reports (SGR encoding).
+fn enterFull() void {
+    if (screen.on) return;
+    out("\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[H\x1b[2J");
+    screen.on = true;
+    ui.redraw = &fullDraw;
+}
+
+/// Back to the normal screen, and print there what was shown, so it stays in the scrollback.
+fn leaveFull() void {
+    if (!screen.on) return;
+    screen.on = false;
+    ui.redraw = null;
+    out("\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l");
+    const t = screen.all();
+    out(t);
+    if (t.len > 0 and t[t.len - 1] != '\n') out("\r\n");
+    screen.reset();
+}
+
+/// Full-screen mode: compose the rows under the conversation (live area while a turn
+/// runs, the input, the status line) and draw.
+fn fullDraw() void {
+    const w: usize = sys.termCols();
+    const h: usize = sys.termRows();
+    var b = Buf.init(1 << 20);
+    defer b.free();
+    var rows: [128][]const u8 = undefined;
+    var n: usize = 0;
+    var ends: [128]usize = undefined;
+    const S = struct {
+        fn cut(bb: *Buf, e: *[128]usize, nn: *usize) void {
+            if (nn.* < e.len) {
+                e[nn.*] = bb.len;
+                nn.* += 1;
+            }
+        }
+    };
+    if (ui.busy) {
+        var lb = Buf.init(16 << 10);
+        defer lb.free();
+        ui.liveRows(&lb, w -| 1);
+        var it = std.mem.splitScalar(u8, lb.items(), '\n');
+        while (it.next()) |r| {
+            b.add(r);
+            S.cut(&b, &ends, &n);
+        }
+    }
+    var cursor: ?[2]usize = null;
+    const ed = editor;
+    const typing = ed != null and !ui.busy and ed.?.foot;
+    if (typing) {
+        const e = ed.?;
+        const max_rows = @max(h / 3, 3);
+        var lb = Buf.init(e.len * 2 + 4096);
+        defer lb.free();
+        const all_ = e.layout(w, 0, 0, null);
+        var lo: usize = 0;
+        var hi: usize = all_.rows;
+        if (all_.rows > max_rows) {
+            hi = @min(all_.rows, @max(all_.cur_row + 1, max_rows));
+            lo = hi - max_rows;
+        }
+        const r = e.layout(w, lo, hi, &lb);
+        var it = std.mem.splitSequence(u8, lb.items(), "\r\n");
+        const first = n;
+        while (it.next()) |row| {
+            b.add(row);
+            S.cut(&b, &ends, &n);
+        }
+        cursor = .{ first + r.cur_row - lo, r.cur_col };
+    } else {
+        b.add(ui.accent());
+        b.add(prompt);
+        b.add(ui.plain());
+        if (ui.busy) { // type-ahead: the end of the draft, on one row
+            const d = ui.draft;
+            var st = d.len -| (w -| 4);
+            while (st < d.len and (d[st] & 0xC0) == 0x80) st += 1;
+            for (d[st..]) |c| b.byte(if (c == '\n') ' ' else c);
+            cursor = .{ n, 2 + (std.unicode.utf8CountCodepoints(d[st..]) catch d.len - st) };
+        }
+        S.cut(&b, &ends, &n);
+    }
+    if (statusOn()) {
+        footer(&b, w -| 1);
+        S.cut(&b, &ends, &n);
+    }
+    var start: usize = 0;
+    for (ends[0..n], 0..) |e, k| {
+        rows[k] = b.items()[start..e];
+        start = e;
+    }
+    screen.draw(rows[0..n], cursor);
+}
+
+/// PgUp/PgDn and the mouse wheel scroll the full-screen view. `s` is a CSI sequence's
+/// body ("5~", "<64;10;3M"); true when it was one of these.
+fn scrollKey(s: []const u8) bool {
+    if (!screen.on) return false;
+    const page: isize = @intCast(@max(@as(usize, sys.termRows()) / 2, 1));
+    if (std.mem.eql(u8, s, "5~")) {
+        screen.scrollBy(page);
+    } else if (std.mem.eql(u8, s, "6~")) {
+        screen.scrollBy(-page);
+    } else if (s.len > 0 and s[0] == '<') { // mouse: wheel up 64, down 65; clicks ignored
+        if (std.mem.startsWith(u8, s, "<64;")) screen.scrollBy(3);
+        if (std.mem.startsWith(u8, s, "<65;")) screen.scrollBy(-3);
+    } else return false;
+    ui.drawNow();
+    return true;
+}
+
 pub fn repl() u8 {
     if (!sys.isatty(sys.stdin) or !sys.isatty(sys.stdout)) return plain();
     have_orig = linux.errno(linux.ioctl(sys.stdin, linux.T.CGETS, @intFromPtr(&orig))) == .SUCCESS;
     defer restore();
     out("\x1b[?2004h\x1b[?1004h"); // bracketed paste; focus in/out reports
+    if (start_full) enterFull();
     welcome();
     var ed = Editor{};
     editor = &ed;
@@ -72,7 +190,7 @@ pub fn repl() u8 {
         attach(text, &msg);
         agent.user(msg.items());
         runAgent(&ed);
-        out("\n");
+        if (screen.on) ui.raw("") else out("\n");
     }
 }
 
@@ -221,6 +339,8 @@ fn footer(b: *Buf, w: usize) void {
 /// unsent draft in the editor.
 fn runAgent(ed: *Editor) void {
     hist = &ed.hist;
+    ui.busy = true;
+    defer ui.busy = false;
     tools.ask = &askUser;
     defer tools.ask = null;
     sys.tick = &pump;
@@ -315,7 +435,7 @@ var q_mem: [16384]u8 = undefined;
 var q_n: usize = 0;
 var q_count: usize = 0;
 var esc: enum { none, esc, seq } = .none;
-var ta_seq: [8]u8 = undefined;
+var ta_seq: [16]u8 = undefined;
 var seq_n: usize = 0;
 var ta_paste = false;
 
@@ -325,6 +445,7 @@ var hist: ?*Buf = null; // the editor's history: queued messages are added to it
 fn askUser() tools.Answer {
     pump(); // keys typed before the question belong to the draft, not the answer
     ui.ask("  allow? y/n, a = always ");
+    ui.drawNow();
     while (true) {
         var p = [2]linux.pollfd{
             .{ .fd = sys.stdin, .events = linux.POLL.IN, .revents = 0 },
@@ -416,6 +537,8 @@ fn key(c: u8) void {
                     ta_paste = true;
                 } else if (std.mem.eql(u8, s, "201~")) {
                     ta_paste = false;
+                } else if (scrollKey(s) or s[0] == '<') {
+                    // scrolled (or a mouse click): not for the editor
                 } else {
                     replayAdd("\x1b[");
                     replayAdd(s);
@@ -638,13 +761,18 @@ fn command(text: []const u8) ?bool {
             for (0..tools.files_read.n) |i| o.print("{s}{s}", .{ if (i > 0) ", " else "", tools.files_read.buf[i][0..tools.files_read.len[i]] });
         }
         ui.note("{s}", .{o.items()});
+    } else if (eq(u8, text, "/full")) {
+        if (screen.on) leaveFull() else {
+            enterFull();
+            ui.note("full screen · PgUp/PgDn or the wheel scroll · Shift-drag selects · /full again to leave", .{});
+        }
     } else if (eq(u8, text, "/expand")) {
         ui.expand();
     } else if (eq(u8, text, "/theme")) {
         ui.loadTheme();
         ui.note("theme reloaded", .{});
     } else if (eq(u8, text, "/help")) {
-        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-R search history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\nWhile it works: type and Enter to queue a message for the next step · Esc or Ctrl-C to stop\n/new (or /clear) starts over · /resume lists this folder's sessions\nCtrl-O: show all of a long draft, or (empty prompt) the last tool output\n!cmd runs a shell command (output goes to the model too) · @file attaches a file\nTab: complete, or pick from the project's files after @ or from the commands after / · Ctrl-P next model (AWL_MODELS) or pick one\n/undo  /mode auto|ask|plan  /copy  /copy code  /expand  /context  /compact  /model  /new  /resume  /theme  /quit\nsession: {s}", .{session.path});
+        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-R search history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\nWhile it works: type and Enter to queue a message for the next step · Esc or Ctrl-C to stop\n/new (or /clear) starts over · /resume lists this folder's sessions\nCtrl-O: show all of a long draft, or (empty prompt) the last tool output\n!cmd runs a shell command (output goes to the model too) · @file attaches a file\nTab: complete, or pick from the project's files after @ or from the commands after / · Ctrl-P next model (AWL_MODELS) or pick one\n/undo  /mode auto|ask|plan  /copy  /copy code  /expand  /context  /compact  /model  /new  /resume  /full  /theme  /quit\nsession: {s}", .{session.path});
     } else return null;
     return false;
 }
@@ -691,6 +819,11 @@ fn pick(title: []const u8, items: []const []const u8, query: []const u8) ?usize 
     var drawn = false;
     var b = Buf.init(64 << 10);
     defer b.free();
+    if (screen.on) { // room at the foot of the screen
+        const top_row = @as(usize, sys.termRows()) -| @min(@as(usize, 12), @as(usize, sys.termRows()) -| 2);
+        b.print("\x1b[{d};1H\x1b[J\x1b[?25h", .{top_row});
+        out(b.items());
+    }
     while (true) {
         // filter: name matches first, then path matches, then in-order letter matches
         var n: usize = 0;
@@ -853,7 +986,7 @@ test "picker ranking" {
 }
 
 const commands = [_][]const u8{
-    "/help", "/new", "/resume", "/model", "/mode", "/undo", "/copy", "/copy code", "/expand", "/context", "/compact", "/theme", "/quit",
+    "/help", "/new", "/resume", "/model", "/mode", "/undo", "/copy", "/copy code", "/expand", "/context", "/compact", "/full", "/theme", "/quit",
 };
 
 /// Piped stdin: one prompt per line.
@@ -908,7 +1041,16 @@ const Editor = struct {
     fn byte(self: *Editor) ?u8 {
         if (self.in_i == self.in_n) {
             // A Ctrl-C pressed just as a turn ended arrives as SIGINT: treat it as the key.
-            _ = http.wait(sys.stdin, -1) catch return 3;
+            if (screen.on) { // full screen: redraw when the window changes size
+                var size = [2]u16{ sys.termRows(), sys.termCols() };
+                while (!(http.wait(sys.stdin, 250) catch return 3)) {
+                    const now = [2]u16{ sys.termRows(), sys.termCols() };
+                    if (now[0] != size[0] or now[1] != size[1]) {
+                        size = now;
+                        fullDraw();
+                    }
+                }
+            } else _ = http.wait(sys.stdin, -1) catch return 3;
             const n = sys.read(sys.stdin, self.in) catch 0;
             if (n == 0) return null;
             self.in_n = n;
@@ -949,7 +1091,7 @@ const Editor = struct {
                         continue;
                     }
                     self.cur = self.len;
-                    if (self.layout(sys.termCols(), 0, 0, null).rows > @max(@as(usize, sys.termRows()) -| 3, 3)) {
+                    if (!screen.on and self.layout(sys.termCols(), 0, 0, null).rows > @max(@as(usize, sys.termRows()) -| 3, 3)) {
                         self.showAll(false);
                     } else self.leave();
                     const t = self.text[0..self.len];
@@ -1003,6 +1145,9 @@ const Editor = struct {
                     out("\r\x1b[J");
                     ui.expand();
                     self.row = 0;
+                } else if (screen.on) {
+                    ui.note("{s}", .{self.text[0..self.len]});
+                    ui.note("── end of draft ──", .{});
                 } else self.showAll(true),
                 12 => { // Ctrl-L
                     out("\x1b[H\x1b[2J");
@@ -1038,6 +1183,7 @@ const Editor = struct {
         }
         const s = seq[0..@min(n, seq.len)];
         const eq = std.mem.eql;
+        if (scrollKey(s)) return;
         if (eq(u8, s, "200~")) self.pasting = true //
         else if (eq(u8, s, "201~")) self.pasting = false //
         else if (eq(u8, s, "D")) self.cur = self.prev(self.cur) //
@@ -1287,6 +1433,7 @@ const Editor = struct {
     /// Take the prompt off the screen so something can print in its place; the next
     /// render draws it again below.
     fn aside(self: *Editor) void {
+        if (screen.on) return; // the picker places itself; notes go to the conversation
         var b: [16]u8 = undefined;
         if (self.row > 0) out(std.fmt.bufPrint(&b, "\x1b[{d}A", .{self.row}) catch "");
         out("\r\x1b[J");
@@ -1295,6 +1442,12 @@ const Editor = struct {
 
     /// Done with this prompt: redraw it without the status line, move below it.
     fn leave(self: *Editor) void {
+        if (screen.on) { // the message joins the conversation; the input box empties
+            self.foot = false;
+            if (std.mem.trim(u8, self.text[0..self.len], " \n").len > 0) ui.userEcho(self.text[0..self.len]);
+            ui.drawNow();
+            return;
+        }
         self.foot = false;
         self.render();
         out("\r\n");
@@ -1302,6 +1455,7 @@ const Editor = struct {
     }
 
     fn render(self: *Editor) void {
+        if (screen.on) return fullDraw();
         const w: usize = sys.termCols();
         const foot = self.foot and statusOn();
         const max_rows: usize = @max(@as(usize, sys.termRows()) -| (3 + @as(usize, @intFromBool(foot))), 3);

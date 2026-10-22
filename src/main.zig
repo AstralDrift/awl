@@ -24,10 +24,11 @@ fn shortPanic(msg: []const u8, _: ?usize) noreturn {
 }
 
 const usage =
-    \\usage: awl [-p PROMPT] [-c | -r FILE]
+    \\usage: awl [-p PROMPT] [-c | -r FILE] [--full]
     \\  -p PROMPT   run once and print the reply (no TUI)
     \\  -c          continue the latest session
     \\  -r FILE     resume a session file
+    \\  --full      full-screen mode (also AWL_FULL=1, or /full)
     \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MAX_STEPS AWL_SYSTEM AWL_REASONING AWL_RETRIES AWL_MODE
     \\     AWL_STATUS (model,ctx,mode,branch,dir,session or off) AWL_WELCOME (off: one line) AWL_MODELS (Ctrl-P cycles)
     \\
@@ -61,6 +62,8 @@ pub fn main(init: std.process.Init.Minimal) u8 {
             resume_path = std.mem.span(argv[i]);
         } else if (eq(u8, a, "-c")) {
             cont = true;
+        } else if (eq(u8, a, "--full")) {
+            tui.start_full = true;
         } else if (eq(u8, a, "--idle-rss")) {
             idle = true;
         } else {
@@ -84,6 +87,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     agent.cfg.key = sys.getenv("AWL_KEY") orelse gatewayKey(&key_b);
     if (sys.getenv("AWL_MAX_STEPS")) |s| agent.max_steps = std.fmt.parseInt(usize, s, 10) catch 200;
     if (sys.getenv("AWL_RETRIES")) |s| agent.max_retries = std.fmt.parseInt(u32, s, 10) catch 5;
+    if (sys.getenv("AWL_FULL")) |s| tui.start_full = tui.start_full or std.mem.eql(u8, s, "1");
     if (sys.getenv("AWL_MODE")) |s| tools.mode = std.meta.stringToEnum(tools.Mode, s) orelse die("AWL_MODE must be auto, ask or plan", .{});
 
     if (idle) { // budget probe: full startup minus the network
@@ -168,4 +172,5 @@ test {
     _ = @import("jint.zig");
     _ = @import("session.zig");
     _ = @import("tui.zig");
+    _ = @import("screen.zig");
 }

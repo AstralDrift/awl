@@ -44,6 +44,10 @@ ghostty, alacritty, and over ssh).
   output starts being trimmed; red from 80%, near summarizing), the mode and the git branch.
 - When the model keeps a checklist (the todo tool), it stays pinned above the timer while the
   model and tools work: finished items fold into a count, the one in progress is highlighted.
+- Full-screen mode (`awl --full`, `AWL_FULL=1`, or `/full` to switch either way): the
+  conversation scrolls above a fixed input and status line (PgUp/PgDn or the mouse wheel; an
+  arrow at the top right says how far up you are; Shift-drag selects text). Leaving it prints
+  the conversation on the normal screen, so it stays in the scrollback.
 - Colors follow the active Omarchy theme and change with it (from the next prompt).
 - Prompt history is kept across sessions: ↑↓, and Ctrl-R finds older prompts containing what you typed.
 - Pickers: a list you filter by typing and choose from with ↑↓ and Enter (Esc cancels).
@@ -96,6 +100,7 @@ ghostty, alacritty, and over ssh).
 | `AWL_STATUS` | `model,ctx,mode,branch` | items of the status line under the prompt, in order: `model`, `ctx`, `mode`, `branch`, `dir`, `session`; `off` hides it |
 | `AWL_WELCOME` | on | `off` shrinks the startup screen to one line |
 | `AWL_MODELS` | unset | comma-separated models that Ctrl-P cycles through |
+| `AWL_FULL` | unset | `1` starts in full-screen mode (same as `--full`) |
 
 ## Arena (benchmark against pi, omp, grok)
 
