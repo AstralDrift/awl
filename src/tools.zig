@@ -21,7 +21,7 @@ pub fn detect() void {
 const schema_core =
     \\{"type":"function","function":{"name":"read","description":"Read a text file. Returns numbered lines. For large files, grep for what you need first, then read with offset/limit (1-based).","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}},
     \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file with the given content. Creates parent directories.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
-    \\{"type":"function","function":{"name":"edit","description":"Replace one exact, unique occurrence of old_string with new_string in a file. Read the file first. Include enough context to make old_string unique.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}}},
+    \\{"type":"function","function":{"name":"edit","description":"Replace exact text in a file. One change: old_string + new_string. Several changes in one file: edits, a list of {old_string, new_string}, each matched against the file as it was before this call; all apply or none do. Each old_string must occur exactly once; include enough context. Read the file first.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["old_string","new_string"]}}},"required":["path"]}}},
     \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"}},"required":["command"]}}}
 ;
 const schema_grep =
@@ -86,11 +86,26 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         r.ok = write(p.path, &.{p.content}, out);
         if (r.ok) out.print("wrote {d} bytes to {s}", .{ p.content.len, p.path });
     } else if (eq(u8, name, "edit")) {
-        const p = std.json.parseFromSliceLeaky(struct { path: []const u8, old_string: ?[]const u8 = null, new_string: ?[]const u8 = null, old: ?[]const u8 = null, new: ?[]const u8 = null }, a, args, opts) catch return badArgs(out, name, &r);
-        sum(&r, name, "{s}", .{p.path});
-        const old = p.old_string orelse p.old orelse return badArgs(out, name, &r);
-        const new = p.new_string orelse p.new orelse return badArgs(out, name, &r);
-        r.ok = edit(p.path, old, new, out);
+        const E = struct { old_string: ?[]const u8 = null, new_string: ?[]const u8 = null, old: ?[]const u8 = null, new: ?[]const u8 = null };
+        const p = std.json.parseFromSliceLeaky(struct { path: []const u8, old_string: ?[]const u8 = null, new_string: ?[]const u8 = null, old: ?[]const u8 = null, new: ?[]const u8 = null, edits: ?[]const E = null }, a, args, opts) catch return badArgs(out, name, &r);
+        var pairs: [max_edits]Pair = undefined;
+        var n: usize = 0;
+        if (p.old_string orelse p.old) |old| {
+            pairs[0] = .{ .old = old, .new = p.new_string orelse p.new orelse return badArgs(out, name, &r) };
+            n = 1;
+        }
+        for (p.edits orelse &.{}) |e| {
+            if (n == max_edits) {
+                out.print("too many edits in one call (max {d}); split them", .{max_edits});
+                sum(&r, name, "{s}", .{p.path});
+                return r;
+            }
+            pairs[n] = .{ .old = e.old_string orelse e.old orelse return badArgs(out, name, &r), .new = e.new_string orelse e.new orelse return badArgs(out, name, &r) };
+            n += 1;
+        }
+        if (n == 0) return badArgs(out, name, &r);
+        if (n == 1) sum(&r, name, "{s}", .{p.path}) else sum(&r, name, "{s} ({d} changes)", .{ p.path, n });
+        r.ok = editFile(p.path, pairs[0..n], out);
     } else if (eq(u8, name, "bash")) {
         const p = std.json.parseFromSliceLeaky(struct { command: []const u8, timeout: ?u32 = null }, a, args, opts) catch return badArgs(out, name, &r);
         sum(&r, name, "{s}", .{p.command});
@@ -239,24 +254,37 @@ fn write(path: []const u8, parts: []const []const u8, out: *Buf) bool {
     return true;
 }
 
+const max_edits = 64;
+const Pair = struct { old: []const u8, new: []const u8 };
+
 fn edit(path: []const u8, old: []const u8, new: []const u8, out: *Buf) bool {
-    if (old.len == 0) {
+    return editFile(path, &.{.{ .old = old, .new = new }}, out);
+}
+
+fn editFile(path: []const u8, pairs: []const Pair, out: *Buf) bool {
+    for (pairs, 0..) |p, k| if (p.old.len == 0) {
+        editLabel(k, pairs.len, out);
         out.add("old_string is empty; use write to create a file");
         return false;
-    }
+    };
     const m = mapFile(path) catch |e| return errMsg(out, "edit", path, e);
     defer m.deinit();
     // CRLF files: models write \n; match and replace in the file's own line endings.
-    var old_b = Buf.init(old.len * 2 + 16);
-    var new_b = Buf.init(new.len * 2 + 16);
-    defer old_b.free();
-    defer new_b.free();
-    if (std.mem.indexOf(u8, m.bytes, old) == null and std.mem.indexOf(u8, m.bytes, "\r\n") != null) {
-        toCrlf(old, &old_b);
-        toCrlf(new, &new_b);
-        return editIn(path, m.bytes, old_b.items(), new_b.items(), out);
+    var conv = Buf.init(1 << 30);
+    defer conv.free();
+    var fixed: [max_edits]Pair = undefined;
+    const crlf = std.mem.indexOf(u8, m.bytes, "\r\n") != null;
+    for (pairs, 0..) |p, k| {
+        fixed[k] = p;
+        if (crlf and std.mem.indexOf(u8, m.bytes, p.old) == null) {
+            const o0 = conv.len;
+            toCrlf(p.old, &conv);
+            const n0 = conv.len;
+            toCrlf(p.new, &conv);
+            fixed[k] = .{ .old = conv.items()[o0..n0], .new = conv.items()[n0..] };
+        }
     }
-    return editIn(path, m.bytes, old, new, out);
+    return editIn(path, m.bytes, fixed[0..pairs.len], out);
 }
 
 fn toCrlf(s: []const u8, out: *Buf) void {
@@ -266,20 +294,69 @@ fn toCrlf(s: []const u8, out: *Buf) void {
     }
 }
 
-fn editIn(path: []const u8, bytes: []const u8, old: []const u8, new: []const u8, out: *Buf) bool {
-    const m = struct { bytes: []const u8 }{ .bytes = bytes };
-    const i = std.mem.indexOf(u8, m.bytes, old) orelse {
-        out.print("old_string not found in {s}.", .{path});
-        if (!closestLine(m.bytes, old, out)) out.add(" Read the file and copy the text exactly, including whitespace.");
-        return false;
-    };
-    if (std.mem.indexOfPos(u8, m.bytes, i + 1, old) != null) {
-        out.print("old_string matches {d} places in {s}. Add surrounding lines to make it unique.", .{ std.mem.count(u8, m.bytes, old), path });
-        return false;
+fn editLabel(k: usize, n: usize, out: *Buf) void {
+    if (n > 1) out.print("edit {d} of {d}: ", .{ k + 1, n });
+}
+
+/// Apply every pair to `bytes` (each matched in the original text) and write the file once.
+/// All or nothing: a missing, ambiguous or overlapping old_string writes nothing.
+fn editIn(path: []const u8, bytes: []const u8, pairs: []const Pair, out: *Buf) bool {
+    var at: [max_edits]usize = undefined; // match offset per pair
+    for (pairs, 0..) |p, k| {
+        const i = std.mem.indexOf(u8, bytes, p.old) orelse {
+            editLabel(k, pairs.len, out);
+            out.print("old_string not found in {s}.", .{path});
+            if (!closestLine(bytes, p.old, out)) out.add(" Read the file and copy the text exactly, including whitespace.");
+            if (pairs.len > 1) out.add(" No changes were made.");
+            return false;
+        };
+        if (std.mem.indexOfPos(u8, bytes, i + 1, p.old) != null) {
+            editLabel(k, pairs.len, out);
+            out.print("old_string matches {d} places in {s}. Add surrounding lines to make it unique.", .{ std.mem.count(u8, bytes, p.old), path });
+            if (pairs.len > 1) out.add(" No changes were made.");
+            return false;
+        }
+        at[k] = i;
     }
-    if (!write(path, &.{ m.bytes[0..i], new, m.bytes[i + old.len ..] }, out)) return false;
-    const line = std.mem.count(u8, m.bytes[0..i], "\n") + 1;
-    out.print("edited {s} at line {d} (-{d} +{d} lines)", .{ path, line, std.mem.count(u8, old, "\n") + 1, std.mem.count(u8, new, "\n") + 1 });
+    // Order by position (insertion sort; n <= 64) and reject overlaps.
+    var ord: [max_edits]usize = undefined;
+    for (0..pairs.len) |k| {
+        var j = k;
+        while (j > 0 and at[ord[j - 1]] > at[k]) : (j -= 1) ord[j] = ord[j - 1];
+        ord[j] = k;
+    }
+    for (1..pairs.len) |j| {
+        const a = ord[j - 1];
+        const b = ord[j];
+        if (at[a] + pairs[a].old.len > at[b]) {
+            out.print("edits {d} and {d} overlap in {s}; merge them into one edit. No changes were made.", .{ @min(a, b) + 1, @max(a, b) + 1, path });
+            return false;
+        }
+    }
+    var segs: [2 * max_edits + 1][]const u8 = undefined;
+    var ns: usize = 0;
+    var pos: usize = 0;
+    for (ord[0..pairs.len]) |k| {
+        segs[ns] = bytes[pos..at[k]];
+        segs[ns + 1] = pairs[k].new;
+        ns += 2;
+        pos = at[k] + pairs[k].old.len;
+    }
+    segs[ns] = bytes[pos..];
+    if (!write(path, segs[0 .. ns + 1], out)) return false;
+    var minus: usize = 0;
+    var plus: usize = 0;
+    for (pairs) |p| {
+        minus += std.mem.count(u8, p.old, "\n") + 1;
+        plus += std.mem.count(u8, p.new, "\n") + 1;
+    }
+    if (pairs.len == 1) {
+        out.print("edited {s} at line {d} (-{d} +{d} lines)", .{ path, std.mem.count(u8, bytes[0..at[0]], "\n") + 1, minus, plus });
+        return true;
+    }
+    out.print("edited {s}: {d} changes at lines ", .{ path, pairs.len });
+    for (ord[0..pairs.len], 0..) |k, j| out.print("{s}{d}", .{ if (j == 0) "" else ", ", std.mem.count(u8, bytes[0..at[k]], "\n") + 1 });
+    out.print(" (-{d} +{d} lines)", .{ minus, plus });
     return true;
 }
 
@@ -516,9 +593,71 @@ test "write, read, edit" {
     try t.expectEqualStrings("read /nonexistent/x: no such file or directory", out.items());
 }
 
+test "edit: several changes in one call, all or nothing" {
+    var db: [64]u8 = undefined;
+    const d = tmpdir(&db);
+    var pb: [128]u8 = undefined;
+    const f = try std.fmt.bufPrint(&pb, "{s}/multi.txt", .{d});
+    var out = Buf.init(1 << 20);
+    var fb: [256]u8 = undefined;
+    try t.expect(write(f, &.{"a = 1\nb = 2\nc = 3\nd = 4\n"}, &out));
+    // matched against the original text, applied in file order whatever the list order
+    out.reset();
+    try t.expect(editFile(f, &.{ .{ .old = "d = 4", .new = "d = 40" }, .{ .old = "a = 1", .new = "a = 10\na2 = 11" } }, &out));
+    try t.expect(std.mem.startsWith(u8, out.items(), "edited /tmp/awl-test-"));
+    try t.expect(std.mem.endsWith(u8, out.items(), ": 2 changes at lines 1, 4 (-2 +3 lines)"));
+    try t.expectEqualStrings("a = 10\na2 = 11\nb = 2\nc = 3\nd = 40\n", try sys.readFile(f, &fb));
+    // one missing old_string: nothing is written
+    out.reset();
+    try t.expect(!editFile(f, &.{ .{ .old = "b = 2", .new = "B" }, .{ .old = "zzzzzzzz", .new = "Z" } }, &out));
+    try t.expect(std.mem.startsWith(u8, out.items(), "edit 2 of 2: old_string not found in "));
+    try t.expect(std.mem.endsWith(u8, out.items(), "No changes were made."));
+    try t.expectEqualStrings("a = 10\na2 = 11\nb = 2\nc = 3\nd = 40\n", try sys.readFile(f, &fb));
+    // overlapping old_strings are refused
+    out.reset();
+    try t.expect(!editFile(f, &.{ .{ .old = "b = 2\nc", .new = "x" }, .{ .old = "c = 3", .new = "y" } }, &out));
+    try t.expect(std.mem.startsWith(u8, out.items(), "edits 1 and 2 overlap in "));
+    // ambiguous old_string names the edit
+    out.reset();
+    try t.expect(!editFile(f, &.{ .{ .old = "c = 3", .new = "C" }, .{ .old = " = ", .new = "=" } }, &out));
+    try t.expect(std.mem.startsWith(u8, out.items(), "edit 2 of 2: old_string matches 5 places"));
+    try t.expectEqualStrings("a = 10\na2 = 11\nb = 2\nc = 3\nd = 40\n", try sys.readFile(f, &fb));
+}
+
+test "edit: several changes on a CRLF file" {
+    var db: [64]u8 = undefined;
+    const d = tmpdir(&db);
+    var pb: [128]u8 = undefined;
+    const f = try std.fmt.bufPrint(&pb, "{s}/multi_crlf.py", .{d});
+    var out = Buf.init(1 << 20);
+    var fb: [128]u8 = undefined;
+    try t.expect(write(f, &.{"def f():\r\n    return 1\r\n\r\ndef g():\r\n    return 2\r\n"}, &out));
+    out.reset();
+    try t.expect(editFile(f, &.{ .{ .old = "def f():\n    return 1", .new = "def f():\n    return 10" }, .{ .old = "return 2", .new = "return 20" } }, &out));
+    try t.expectEqualStrings("def f():\r\n    return 10\r\n\r\ndef g():\r\n    return 20\r\n", try sys.readFile(f, &fb));
+}
+
+test "edit tool call with an edits list" {
+    ui.quiet = true;
+    var db: [64]u8 = undefined;
+    const d = tmpdir(&db);
+    var pb: [128]u8 = undefined;
+    const f = try std.fmt.bufPrint(&pb, "{s}/call.txt", .{d});
+    var out = Buf.init(1 << 20);
+    var fb: [64]u8 = undefined;
+    try t.expect(write(f, &.{"x\ny\n"}, &out));
+    out.reset();
+    var ab: [256]u8 = undefined;
+    const args = try std.fmt.bufPrint(&ab, "{{\"path\":\"{s}\",\"edits\":[{{\"old_string\":\"x\",\"new_string\":\"X\"}},{{\"old_string\":\"y\",\"new_string\":\"Y\"}}]}}", .{f});
+    const r = try run("edit", args, &out);
+    try t.expect(r.ok);
+    try t.expectEqualStrings("X\nY\n", try sys.readFile(f, &fb));
+    try t.expect(std.mem.endsWith(u8, out.items(), ": 2 changes at lines 1, 2 (-2 +2 lines)"));
+}
+
 test "edit: not-found hint when only whitespace differs" {
     var out = Buf.init(1 << 20);
-    try t.expect(!editIn("src/a.zig", "fn main() {\n    const x = foo(1);\n}\n", "\tconst x = foo(1);", "", &out));
+    try t.expect(!editIn("src/a.zig", "fn main() {\n    const x = foo(1);\n}\n", &.{.{ .old = "\tconst x = foo(1);", .new = "" }}, &out));
     try t.expectEqualStrings(
         "old_string not found in src/a.zig. Closest line 2: `    const x = foo(1);` (whitespace differs)",
         out.items(),
@@ -527,7 +666,7 @@ test "edit: not-found hint when only whitespace differs" {
 
 test "edit: not-found hint on a near miss" {
     var out = Buf.init(1 << 20);
-    try t.expect(!editIn("src/a.zig", "pub fn readFile(path: []const u8) void\n", "pub fn readFile(path: []const u8, n: usize) void", "", &out));
+    try t.expect(!editIn("src/a.zig", "pub fn readFile(path: []const u8) void\n", &.{.{ .old = "pub fn readFile(path: []const u8, n: usize) void", .new = "" }}, &out));
     try t.expectEqualStrings(
         "old_string not found in src/a.zig. Closest line 1: `pub fn readFile(path: []const u8) void`",
         out.items(),
@@ -537,13 +676,13 @@ test "edit: not-found hint on a near miss" {
 test "edit: long closest line is cut on a utf-8 boundary" {
     var out = Buf.init(1 << 20);
     const line = "x" ** 159 ++ "é and more";
-    try t.expect(!editIn("a", line ++ "\n", "x" ** 20 ++ "y", "", &out));
+    try t.expect(!editIn("a", line ++ "\n", &.{.{ .old = "x" ** 20 ++ "y", .new = "" }}, &out));
     try t.expectEqualStrings("old_string not found in a. Closest line 1: `" ++ "x" ** 159 ++ "`", out.items());
 }
 
 test "edit: no hint without a useful match" {
     var out = Buf.init(1 << 20);
-    try t.expect(!editIn("src/a.zig", "const a = 1;\nconst b = 2;\n", "zzzzzzzzzzzz", "", &out));
+    try t.expect(!editIn("src/a.zig", "const a = 1;\nconst b = 2;\n", &.{.{ .old = "zzzzzzzzzzzz", .new = "" }}, &out));
     try t.expectEqualStrings(
         "old_string not found in src/a.zig. Read the file and copy the text exactly, including whitespace.",
         out.items(),
