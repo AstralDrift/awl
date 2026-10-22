@@ -6,6 +6,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 W=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$W"' EXIT
 export XDG_STATE_HOME=$W/state
+# The caller's awl settings must not leak in (e.g. running inside an awl session).
+unset AWL_URL AWL_MODEL AWL_KEY AWL_SYSTEM AWL_MAX_STEPS AWL_RSS
 pass=0
 fail=0
 ok() { echo "ok   $1"; pass=$((pass + 1)); }

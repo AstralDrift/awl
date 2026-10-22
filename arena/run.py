@@ -2,7 +2,7 @@
 """Arena runner: same model, same tasks, different harnesses.
 
   arena/run.py t0                       # awl only, no GPU: budgets + e2e (seconds)
-  arena/run.py t1 [--h "awl pi omp grok"] [--repeat 1]
+  arena/run.py t1 [--h "awl pi" | --h all] [--repeat 1]   # default awl vs pi; all = + omp grok
   arena/run.py t2 [--h ...] [--repeat 2] [--timeout 300] [--tasks a,b]
   arena/run.py t3 [...]                 # real coding/build tasks, 600 s timeout
   arena/run.py t3 --upstream openrouter [--model deepseek/deepseek-v4.1-flash] [--provider P] [--budget 1.50]
@@ -205,7 +205,10 @@ def main():
         zig = ["mise", "exec", "--", "zig", "build"]
         rc = subprocess.run(zig + ["check", "e2e", "--summary", "none"], cwd=REPO).returncode
         sys.exit(rc)
-    harnesses = arg("--h", "awl pi omp grok").split()
+    # Default: awl vs pi, the closest rival (cheapest comparison). --h all for a full baseline per new tier.
+    harnesses = arg("--h", "awl pi").split()
+    if harnesses == ["all"]:
+        harnesses = "awl pi omp grok".split()
     repeat = int(arg("--repeat", "1" if tier == "t1" else "2"))
     timeout = int(arg("--timeout", "600" if tier == "t3" else "300"))
     tasks = arg("--tasks", "").split(",") if "--tasks" in sys.argv else tier_tasks(tier)

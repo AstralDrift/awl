@@ -1,0 +1,11 @@
+Improve the edit tool's "not found" error in src/tools.zig (function editIn).
+
+Today, when old_string is not in the file, it only says: "old_string not found in PATH. Read the file and copy the text exactly, including whitespace." The model then spends a whole turn re-reading the file.
+
+Change it so the error also shows the file line that best matches the first non-blank line of old_string, with its line number, for example:
+  old_string not found in src/a.zig. Closest line 42: `    const x = foo(1);`
+Pick the best line by comparing trimmed text (ignore leading/trailing whitespace); a line that matches exactly after trimming wins (that means only whitespace differs, so say "(whitespace differs)"). Otherwise choose the line with the longest common prefix after trimming, and only show it if that prefix is at least 8 bytes. Cap the shown line at 160 bytes. One pass over the file, no heap allocation.
+
+Add unit tests next to the existing edit tests in src/tools.zig: whitespace-only difference, a near miss, and no useful match (no "Closest line" text).
+
+Then run, from the repo root: zig build test, zig build e2e, zig build check. All must pass. Keep the change small and in the style of the surrounding code. Do not commit.

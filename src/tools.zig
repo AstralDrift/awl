@@ -269,7 +269,8 @@ fn toCrlf(s: []const u8, out: *Buf) void {
 fn editIn(path: []const u8, bytes: []const u8, old: []const u8, new: []const u8, out: *Buf) bool {
     const m = struct { bytes: []const u8 }{ .bytes = bytes };
     const i = std.mem.indexOf(u8, m.bytes, old) orelse {
-        out.print("old_string not found in {s}. Read the file and copy the text exactly, including whitespace.", .{path});
+        out.print("old_string not found in {s}.", .{path});
+        if (!closestLine(m.bytes, old, out)) out.add(" Read the file and copy the text exactly, including whitespace.");
         return false;
     };
     if (std.mem.indexOfPos(u8, m.bytes, i + 1, old) != null) {
@@ -280,6 +281,54 @@ fn editIn(path: []const u8, bytes: []const u8, old: []const u8, new: []const u8,
     const line = std.mem.count(u8, m.bytes[0..i], "\n") + 1;
     out.print("edited {s} at line {d} (-{d} +{d} lines)", .{ path, line, std.mem.count(u8, old, "\n") + 1, std.mem.count(u8, new, "\n") + 1 });
     return true;
+}
+
+/// Point out the file line that best matches the first non-blank line of `old`:
+/// trimmed equality wins, else the longest common prefix of at least 8 bytes.
+/// One pass over `bytes`, no allocation. False when nothing useful was found.
+fn closestLine(bytes: []const u8, old: []const u8, out: *Buf) bool {
+    const want = blk: {
+        var it = std.mem.splitScalar(u8, old, '\n');
+        while (it.next()) |l| {
+            const s = std.mem.trim(u8, l, " \t\r");
+            if (s.len != 0) break :blk s;
+        }
+        break :blk null;
+    } orelse return false;
+    var best: []const u8 = &.{};
+    var best_line: usize = 0;
+    var best_prefix: usize = 0;
+    var exact = false;
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |raw| {
+        n += 1;
+        const s = std.mem.trim(u8, raw, " \t\r");
+        if (std.mem.eql(u8, s, want)) { // only whitespace differs
+            best = std.mem.trimEnd(u8, raw, "\r");
+            best_line = n;
+            exact = true;
+            break;
+        }
+        const p = commonPrefix(s, want);
+        if (p >= 8 and p > best_prefix) {
+            best = std.mem.trimEnd(u8, raw, "\r");
+            best_line = n;
+            best_prefix = p;
+        }
+    }
+    if (!exact and best_prefix < 8) return false;
+    var cut = @min(best.len, 160);
+    while (cut < best.len and cut > 0 and (best[cut] & 0xC0) == 0x80) cut -= 1; // keep utf-8 whole
+    out.print(" Closest line {d}: `{s}`{s}", .{ best_line, best[0..cut], if (exact) " (whitespace differs)" else "" });
+    return true;
+}
+
+fn commonPrefix(a: []const u8, b: []const u8) usize {
+    const n = @min(a.len, b.len);
+    var i: usize = 0;
+    while (i < n and a[i] == b[i]) i += 1;
+    return i;
 }
 
 /// Keep the first `max` lines of `out`, noting how many were dropped.
@@ -464,6 +513,40 @@ test "write, read, edit" {
     out.reset();
     try t.expect(!read("/nonexistent/x", 1, 10, &out));
     try t.expectEqualStrings("read /nonexistent/x: no such file or directory", out.items());
+}
+
+test "edit: not-found hint when only whitespace differs" {
+    var out = Buf.init(1 << 20);
+    try t.expect(!editIn("src/a.zig", "fn main() {\n    const x = foo(1);\n}\n", "\tconst x = foo(1);", "", &out));
+    try t.expectEqualStrings(
+        "old_string not found in src/a.zig. Closest line 2: `    const x = foo(1);` (whitespace differs)",
+        out.items(),
+    );
+}
+
+test "edit: not-found hint on a near miss" {
+    var out = Buf.init(1 << 20);
+    try t.expect(!editIn("src/a.zig", "pub fn readFile(path: []const u8) void\n", "pub fn readFile(path: []const u8, n: usize) void", "", &out));
+    try t.expectEqualStrings(
+        "old_string not found in src/a.zig. Closest line 1: `pub fn readFile(path: []const u8) void`",
+        out.items(),
+    );
+}
+
+test "edit: long closest line is cut on a utf-8 boundary" {
+    var out = Buf.init(1 << 20);
+    const line = "x" ** 159 ++ "é and more";
+    try t.expect(!editIn("a", line ++ "\n", "x" ** 20 ++ "y", "", &out));
+    try t.expectEqualStrings("old_string not found in a. Closest line 1: `" ++ "x" ** 159 ++ "`", out.items());
+}
+
+test "edit: no hint without a useful match" {
+    var out = Buf.init(1 << 20);
+    try t.expect(!editIn("src/a.zig", "const a = 1;\nconst b = 2;\n", "zzzzzzzzzzzz", "", &out));
+    try t.expectEqualStrings(
+        "old_string not found in src/a.zig. Read the file and copy the text exactly, including whitespace.",
+        out.items(),
+    );
 }
 
 test "spawn returns when the command exits even if a background job holds the pipe" {
