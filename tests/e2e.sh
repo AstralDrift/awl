@@ -62,7 +62,7 @@ assert len(reqs) == 3, len(reqs)
 m = reqs[-1]["messages"]
 roles = [x["role"] for x in m]
 assert roles == ["system", "user", "assistant", "tool", "assistant", "tool", "tool"], roles
-assert m[3]["content"] == "     1\thello world\n", repr(m[3]["content"])
+assert m[3]["content"] == "1→hello world\n", repr(m[3]["content"])
 assert m[2]["tool_calls"][0]["function"]["name"] == "read"
 assert json.loads(m[4]["tool_calls"][0]["function"]["arguments"])["new_string"] == "awl"
 assert m[5]["tool_call_id"] == "call_0" and m[6]["tool_call_id"] == "call_1"
@@ -262,7 +262,8 @@ assert ask.get("tool_choice") == "none", ask.get("tool_choice")
 assert [x["role"] for x in ask["messages"]] == ["system", "user"], [x["role"] for x in ask["messages"]]
 t = ask["messages"][-1]["content"]
 assert "exceed the context window" in t and "## Goal" in t and "<conversation>" in t, t[:300]
-assert "[User]: go port it" in t and "earlier messages omitted" in t and "[Assistant tool calls]: read(" in t, t[-600:]
+assert "[User]: go port it" in t and "[Assistant tool calls]: read(" in t, t[-600:]
+assert "earlier messages omitted" in t or "[Assistant tool calls]: todo(" in t, t[-600:]  # all of it, or the newest that fit
 m = last["messages"]
 assert m[1] == {"role": "user", "content": "go port it"}, m[1]
 s = m[2]["content"]

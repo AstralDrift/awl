@@ -19,9 +19,9 @@ pub fn detect() void {
 }
 
 const schema_core =
-    \\{"type":"function","function":{"name":"read","description":"Read a text file. Returns numbered lines. For large files, grep for what you need first, then read with offset/limit (1-based).","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}},
+    \\{"type":"function","function":{"name":"read","description":"Read a text file. The first line shown and every 10th line start with their number and an arrow (10→); the markers are not part of the file. For large files, grep for what you need first, then read with offset/limit (1-based).","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}},
     \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file with the given content. Creates parent directories.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
-    \\{"type":"function","function":{"name":"edit","description":"Replace exact text in a file. One change: old_string + new_string. Several changes in one file: edits, a list of {old_string, new_string}, each matched against the file as it was before this call; all apply or none do. Each old_string must occur exactly once; include enough context. Read the file first.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["old_string","new_string"]}}},"required":["path"]}}},
+    \\{"type":"function","function":{"name":"edit","description":"Replace exact text in a file. One change: old_string + new_string. Several changes in one file: edits, a list of {old_string, new_string}, each matched against the file as it was before this call; all apply or none do. Each old_string must occur exactly once; include enough context. Read the file first; leave out read's N→ line markers.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","description":"with old_string: replace every occurrence (renames)"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["old_string","new_string"]}}},"required":["path"]}}},
     \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"},"background":{"type":"boolean","description":"start it and return at once (servers, watchers, long test runs); output goes to a log file"}},"required":["command"]}}},
     \\{"type":"function","function":{"name":"todo","description":"Checklist for long tasks with several distinct steps; skip it for quick fixes. Send the whole list every time. status: pending, doing, done or skip (put the reason in text). Keep exactly one item doing. The latest list always stays in context.","parameters":{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"status":{"type":"string","enum":["pending","doing","done","skip"]}},"required":["text","status"]}}},"required":["items"]}}}
 ;
@@ -91,7 +91,7 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         if (r.ok) out.print("wrote {d} bytes to {s}", .{ p.content.len, p.path });
     } else if (eq(u8, name, "edit")) {
         const E = struct { old_string: ?[]const u8 = null, new_string: ?[]const u8 = null, old: ?[]const u8 = null, new: ?[]const u8 = null };
-        const p = std.json.parseFromSliceLeaky(struct { path: []const u8, old_string: ?[]const u8 = null, new_string: ?[]const u8 = null, old: ?[]const u8 = null, new: ?[]const u8 = null, edits: ?[]const E = null }, a, args, opts) catch return badArgs(out, name, &r);
+        const p = std.json.parseFromSliceLeaky(struct { path: []const u8, old_string: ?[]const u8 = null, new_string: ?[]const u8 = null, old: ?[]const u8 = null, new: ?[]const u8 = null, replace_all: bool = false, edits: ?[]const E = null }, a, args, opts) catch return badArgs(out, name, &r);
         var pairs: [max_edits]Pair = undefined;
         var n: usize = 0;
         if (p.old_string orelse p.old) |old| {
@@ -108,6 +108,12 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
             n += 1;
         }
         if (n == 0) return badArgs(out, name, &r);
+        if (p.replace_all and n == 1) {
+            sum(&r, name, "{s} (all)", .{p.path});
+            r.ok = replaceAll(p.path, pairs[0].old, pairs[0].new, out);
+            if (r.ok) files_changed.note(p.path);
+            return r;
+        }
         if (n == 1) sum(&r, name, "{s}", .{p.path}) else sum(&r, name, "{s} ({d} changes)", .{ p.path, n });
         r.ok = editFile(p.path, pairs[0..n], out);
         if (r.ok) files_changed.note(p.path);
@@ -228,7 +234,7 @@ fn read(path: []const u8, offset: usize, limit: usize, out: *Buf) bool {
         }
         if (ln < start) continue;
         if (shown == max or out.len + line0.len + 16 > out_cap) continue;
-        out.print("{d:>6}\t", .{ln});
+        if (shown == 0 or ln % 10 == 0) out.print("{d}→", .{ln});
         const line = std.mem.trimEnd(u8, line0, "\r");
         if (line.len > 2000) {
             out.add(line[0..2000]);
@@ -339,6 +345,46 @@ fn editFile(path: []const u8, pairs: []const Pair, out: *Buf) bool {
         }
     }
     return editIn(path, m.bytes, fixed[0..pairs.len], out);
+}
+
+/// Replace every occurrence of `old` (exact text; CRLF files are matched like edit does).
+fn replaceAll(path: []const u8, old: []const u8, new: []const u8, out: *Buf) bool {
+    if (old.len == 0) {
+        out.add("old_string is empty");
+        return false;
+    }
+    const m = mapFile(path) catch |e| return errMsg(out, "edit", path, e);
+    defer m.deinit();
+    var ob = Buf.init(old.len * 2 + 16);
+    var nb_ = Buf.init(new.len * 2 + 16);
+    defer ob.free();
+    defer nb_.free();
+    var o = old;
+    var nw = new;
+    if (std.mem.indexOf(u8, m.bytes, old) == null and std.mem.indexOf(u8, m.bytes, "\r\n") != null) {
+        toCrlf(old, &ob);
+        toCrlf(new, &nb_);
+        o = ob.items();
+        nw = nb_.items();
+    }
+    const count = std.mem.count(u8, m.bytes, o);
+    if (count == 0) {
+        out.print("old_string not found in {s}.", .{path});
+        if (!closestLine(m.bytes, o, out)) out.add(" Read the file and copy the text exactly, including whitespace.");
+        return false;
+    }
+    var body = Buf.init(m.bytes.len + count * (nw.len + 1) + 16);
+    defer body.free();
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, m.bytes, pos, o)) |i| {
+        body.add(m.bytes[pos..i]);
+        body.add(nw);
+        pos = i + o.len;
+    }
+    body.add(m.bytes[pos..]);
+    if (!write(path, &.{body.items()}, out)) return false;
+    out.print("replaced {d} occurrences in {s}", .{ count, path });
+    return true;
 }
 
 fn toCrlf(s: []const u8, out: *Buf) void {
@@ -746,7 +792,7 @@ test "edit and read on a CRLF file" {
     try t.expect(edit(f, "def f():\n    return 1", "def f():\n    return 2", &out));
     out.reset();
     try t.expect(read(f, 1, 10, &out));
-    try t.expectEqualStrings("     1\tdef f():\n     2\t    return 2\n", out.items());
+    try t.expectEqualStrings("1→def f():\n    return 2\n", out.items());
     var fb: [64]u8 = undefined;
     try t.expectEqualStrings("def f():\r\n    return 2\r\n", try sys.readFile(f, &fb));
 }
@@ -760,7 +806,7 @@ test "write, read, edit" {
     try t.expect(write(f, &.{"one\ntwo\ntwo\nthree\n"}, &out));
     out.reset();
     try t.expect(read(f, 2, 2, &out));
-    try t.expectEqualStrings("     2\ttwo\n     3\ttwo\n[lines 2-3 of 4; use offset=4 to continue]", out.items());
+    try t.expectEqualStrings("2→two\ntwo\n[lines 2-3 of 4; use offset=4 to continue]", out.items());
     out.reset();
     try t.expect(!edit(f, "two", "2", &out));
     try t.expect(std.mem.indexOf(u8, out.items(), "matches 2 places") != null);
@@ -770,7 +816,7 @@ test "write, read, edit" {
     try t.expect(edit(f, "two\nthree", "3", &out));
     out.reset();
     try t.expect(read(f, 1, 2000, &out));
-    try t.expectEqualStrings("     1\tone\n     2\ttwo\n     3\t3\n", out.items());
+    try t.expectEqualStrings("1→one\ntwo\n3\n", out.items());
     out.reset();
     try t.expect(!read("/nonexistent/x", 1, 10, &out));
     try t.expectEqualStrings("read /nonexistent/x: no such file or directory", out.items());
@@ -836,6 +882,35 @@ test "edit tool call with an edits list" {
     try t.expect(r.ok);
     try t.expectEqualStrings("X\nY\n", try sys.readFile(f, &fb));
     try t.expect(std.mem.endsWith(u8, out.items(), ": 2 changes at lines 1, 2 (-2 +2 lines)"));
+}
+
+test "read marks the first line and every 10th line" {
+    var db: [64]u8 = undefined;
+    const d = tmpdir(&db);
+    var pb: [128]u8 = undefined;
+    const f = try std.fmt.bufPrint(&pb, "{s}/n.txt", .{d});
+    var out = Buf.init(1 << 20);
+    try t.expect(write(f, &.{"a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n"}, &out));
+    out.reset();
+    try t.expect(read(f, 8, 4, &out));
+    try t.expectEqualStrings("8→h\ni\n10→j\nk\n[lines 8-11 of 12; use offset=12 to continue]", out.items());
+}
+
+test "edit replace_all" {
+    ui.quiet = true;
+    var db: [64]u8 = undefined;
+    const d = tmpdir(&db);
+    var pb: [128]u8 = undefined;
+    const f = try std.fmt.bufPrint(&pb, "{s}/ra.txt", .{d});
+    var out = Buf.init(1 << 20);
+    var fb: [128]u8 = undefined;
+    try t.expect(write(f, &.{"foo(1); foo(2);\nbar(foo);\n"}, &out));
+    var ab: [256]u8 = undefined;
+    out.reset();
+    const r = try run("edit", try std.fmt.bufPrint(&ab, "{{\"path\":\"{s}\",\"old_string\":\"foo\",\"new_string\":\"baz\",\"replace_all\":true}}", .{f}), &out);
+    try t.expect(r.ok);
+    try t.expect(std.mem.startsWith(u8, out.items(), "replaced 3 occurrences in "));
+    try t.expectEqualStrings("baz(1); baz(2);\nbar(baz);\n", try sys.readFile(f, &fb));
 }
 
 test "todo renders the checklist and rejects unknown statuses" {
