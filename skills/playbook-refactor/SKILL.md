@@ -1,6 +1,6 @@
 ---
 name: playbook-refactor
-description: Steps for behavior-preserving changes: rename, move, extract, inline, change a signature across callers. Use for "rename / refactor / clean up X" tasks.
+description: Steps for a behavior-preserving change across many call sites (rename, move, signature change). Skip it for a change in one place.
 ---
 
 # Refactor

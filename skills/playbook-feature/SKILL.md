@@ -1,6 +1,6 @@
 ---
 name: playbook-feature
-description: Steps for adding or changing behavior (a new option, command, endpoint, field or format). Use for "add / support / implement X" tasks.
+description: Steps for a feature that touches several files or needs tests and docs. Skip it for a small, single-file change.
 ---
 
 # Feature

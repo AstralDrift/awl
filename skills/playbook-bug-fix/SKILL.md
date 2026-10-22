@@ -1,6 +1,6 @@
 ---
 name: playbook-bug-fix
-description: Steps for fixing a reported bug, failing test, crash or wrong output. Use for any "X is broken / wrong / failing" task.
+description: Steps for a bug whose cause is unclear or spans several files (reproduce, root-cause, prove). Skip it for an obvious one-line fix.
 ---
 
 # Bug fix
