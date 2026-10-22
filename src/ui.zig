@@ -122,7 +122,7 @@ pub fn reasoning(s: []const u8) void {
         tail[tail_n] = c;
         tail_n += 1;
     }
-    if (draft.len > 0) return drawLive();
+    if (draft.len > 0 or queued > 0 or held.len > 0) return drawLive();
     const w = @min(@as(usize, sys.termCols()) -| 6, tail_n);
     var start = tail_n - w;
     while (start < tail_n and (tail[start] & 0xC0) == 0x80) start += 1; // utf-8 boundary
@@ -152,7 +152,7 @@ pub fn liveStart() void {
 pub fn tick() void {
     if (!color or oneshot or quiet or capture != null) return;
     if (thinking) {
-        if (draft.len > 0) drawLive();
+        if (draft.len > 0 or queued > 0 or held.len > 0) drawLive();
         return;
     }
     if (!bol or on > 0) return;
@@ -550,6 +550,35 @@ pub fn expand() void {
     flush();
 }
 
+/// The project directory: shown as relative paths in tool lines and notes.
+pub var cwd: []const u8 = "";
+
+/// `s` with every "<cwd>/" removed (and a bare "<cwd>" shown as "."), into `out`.
+pub fn shorten(s: []const u8, out: []u8) []const u8 {
+    if (cwd.len < 2) return s[0..@min(s.len, out.len)];
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len and n < out.len) {
+        if (std.mem.startsWith(u8, s[i..], cwd)) {
+            const after = i + cwd.len;
+            if (after < s.len and s[after] == '/') {
+                i = after + 1;
+                continue;
+            }
+            if (after == s.len or s[after] == ' ' or s[after] == '\n' or s[after] == '"' or s[after] == '\'') {
+                out[n] = '.';
+                n += 1;
+                i = after;
+                continue;
+            }
+        }
+        out[n] = s[i];
+        n += 1;
+        i += 1;
+    }
+    return out[0..n];
+}
+
 /// An approval question; the answer replaces it on the same line.
 pub fn ask(q: []const u8) void {
     endMessage();
@@ -586,9 +615,18 @@ pub fn userEcho(text: []const u8) void {
 }
 
 pub fn note(comptime f: []const u8, a: anytype) void {
+    noteAs(true, f, a);
+}
+
+/// `short`: project paths read as relative (not for the banner, which names the project).
+pub fn noteAs(short: bool, comptime f: []const u8, a: anytype) void {
     endMessage();
     put(muted());
-    print(f, a);
+    print_buf.truncate(0);
+    print_buf.print(f, a);
+    var sb = @import("buf.zig").Buf.init(print_buf.len + 16);
+    defer sb.free();
+    put(if (short) shorten(print_buf.items(), sb.extend(print_buf.len)) else print_buf.items());
     put(reset());
     put("\n");
     flush();
@@ -651,6 +689,14 @@ test "copy: last code block and OSC 52" {
     try tt.expectEqualStrings("b = 2\n", lastCodeBlock("x\n```py\na = 1\n```\ntext\n```\nb = 2\n```\n").?);
     try tt.expect(lastCodeBlock("no code\n```\nunclosed") == null);
     try tt.expectEqualStrings("\x1b]52;c;aGk=\x07", try render(clipboard, .{"hi"}));
+}
+
+test "paths under the project are shown relative" {
+    cwd = "/home/u/proj";
+    defer cwd = "";
+    var b: [128]u8 = undefined;
+    try tt.expectEqualStrings("src/a.zig and cd . && ls", shorten("/home/u/proj/src/a.zig and cd /home/u/proj && ls", &b));
+    try tt.expectEqualStrings("/home/u/project/x", shorten("/home/u/project/x", &b)); // not a prefix match
 }
 
 test "long notes are printed whole" {

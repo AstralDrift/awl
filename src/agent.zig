@@ -218,6 +218,11 @@ pub var mode_note: []const u8 = ""; // the latest /mode change, said once
 
 pub fn user(text: []const u8) void {
     undo.newTurn();
+    addUser(text);
+}
+
+/// A message steered in mid-run: same /undo group as the turn it joins.
+fn addUser(text: []const u8) void {
     var m = Buf.init(text.len * 6 + pending_note.len * 6 + 64);
     defer m.free();
     m.add("{\"role\":\"user\",\"content\":");
@@ -259,7 +264,7 @@ pub fn run() Outcome {
         if (step > 0) {
             if (steer) |f| if (f()) |text| {
                 ui.userEcho(text);
-                user(text);
+                addUser(text);
             };
             _ = compact(false);
         }

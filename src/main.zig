@@ -100,6 +100,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (info) |m| agent.ctx_limit = m.ctx;
     agent.init(cwd);
     defer tools.killJobs(); // background jobs never outlive awl
+    ui.cwd = cwd; // main's buffer lives as long as the program
 
     {
         var w = bufm.Buf.init(8192);

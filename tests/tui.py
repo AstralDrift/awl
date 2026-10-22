@@ -287,6 +287,10 @@ def safety():
         {"content": "noted"},
         {"tool_calls": [{"name": "write", "arguments": {"path": "h.txt", "content": "x"}}]},
         {"content": "planned"},
+        {"tool_calls": [{"name": "edit", "arguments": {"path": "g.txt", "old_string": "one", "new_string": "TWO"}}]},
+        {"tool_calls": [{"name": "bash", "arguments": {"command": "sleep 1.2"}}]},
+        {"tool_calls": [{"name": "write", "arguments": {"path": "k.txt", "content": "k"}}]},
+        {"content": "both done"},
     ]
     sp3 = os.path.join(d, "s.json")
     json.dump(turns, open(sp3, "w"))
@@ -343,6 +347,20 @@ def safety():
     check("plan: write refused", until("planned") and not os.path.exists(os.path.join(d, "h.txt")), out[0][-200:])
     m = reqs()[-1]["messages"]
     check("plan: model told files are read-only", m[-1]["content"].startswith("Plan mode") and m[-3]["content"].startswith("[Plan mode is on"), [x.get("content", "")[:30] for x in m[-3:]])
+    # a message steered in mid-turn joins that turn: one /undo reverts all of it
+    time.sleep(0.3)
+    os.write(fd3, b"/mode auto\r")
+    until("mode: auto")
+    os.write(fd3, b"two changes\r")
+    until("sleep 1.2")
+    os.write(fd3, b"and k too\r")
+    check("steered turn finishes", until("both done", 5) and os.path.exists(os.path.join(d, "k.txt")), out[0][-200:])
+    time.sleep(0.3)
+    out[0] = b""
+    os.write(fd3, b"/undo\r")
+    check("one /undo reverts the steered turn", until("removed k.txt") and until("restored g.txt") and open(g).read() == "one\n" and not os.path.exists(os.path.join(d, "k.txt")), out[0][-300:])
+    os.write(fd3, b"/undo\r")
+    check("then nothing is left to undo", until("nothing to undo"), out[0][-200:])
     os.kill(pid3, signal.SIGKILL)
     os.waitpid(pid3, 0)
     srv3.kill()

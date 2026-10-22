@@ -111,7 +111,12 @@ pub const Result = struct { ok: bool, summary: [160]u8 = undefined, summary_n: u
 
 /// Record a one-line summary of the call and show it before the tool runs.
 fn sum(r: *Result, name: []const u8, comptime f: []const u8, a: anytype) void {
-    const s = std.fmt.bufPrint(&r.summary, f, a) catch r.summary[0..];
+    var full: [1024]u8 = undefined;
+    const s0 = std.fmt.bufPrint(&full, f, a) catch full[0..];
+    var sb: [1024]u8 = undefined;
+    const short = ui.shorten(s0, &sb); // paths under the project read as relative
+    const s = r.summary[0..@min(short.len, r.summary.len)];
+    @memcpy(s, short[0..s.len]);
     r.summary_n = s.len;
     for (r.summary[0..r.summary_n]) |*c| if (c.* == '\n') {
         c.* = ' ';

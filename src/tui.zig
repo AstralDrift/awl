@@ -53,7 +53,7 @@ pub fn repl() u8 {
     const home = sys.getenv("HOME") orelse "";
     var tb: [4096]u8 = undefined;
     if (home.len > 1 and std.mem.startsWith(u8, dir, home)) dir = std.fmt.bufPrint(&tb, "~{s}", .{dir[home.len..]}) catch dir;
-    ui.note("awl · {s} · {s}{s}{s} · /help", .{ agent.cfg.model, dir, if (tools.mode != .auto) " · mode " else "", if (tools.mode != .auto) @tagName(tools.mode) else "" });
+    ui.noteAs(false, "awl · {s} · {s}{s}{s} · /help", .{ agent.cfg.model, dir, if (tools.mode != .auto) " · mode " else "", if (tools.mode != .auto) @tagName(tools.mode) else "" });
     var ed = Editor{};
     session.loadHistory(&ed.hist);
     while (true) {
