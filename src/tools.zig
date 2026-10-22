@@ -26,7 +26,7 @@ const schema_core =
     \\{"type":"function","function":{"name":"todo","description":"Checklist for long tasks with several distinct steps; skip it for quick fixes. Send the whole list every time. status: pending, doing, done or skip (put the reason in text). Keep exactly one item doing. The latest list always stays in context.","parameters":{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"status":{"type":"string","enum":["pending","doing","done","skip"]}},"required":["text","status"]}}},"required":["items"]}}}
 ;
 const schema_grep =
-    \\,{"type":"function","function":{"name":"grep","description":"Search file contents with ripgrep (regex, smart case, respects .gitignore). Returns path:line:text.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string","description":"e.g. *.zig"}},"required":["pattern"]}}}
+    \\,{"type":"function","function":{"name":"grep","description":"Search file contents with ripgrep (regex, smart case, respects .gitignore). Returns path:line:text, with path-line-text for context lines. Find several names in one call with alternatives (a|b|c), and set context to see the surrounding lines instead of reading the file separately.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string","description":"e.g. *.zig"},"context":{"type":"integer","description":"lines before and after each match (0-20)"},"ignore_case":{"type":"boolean"},"limit":{"type":"integer","description":"max output lines (default 200)"}},"required":["pattern"]}}}
 ;
 const schema_find =
     \\,{"type":"function","function":{"name":"find","description":"List files with fd (regex on file name, respects .gitignore). No pattern lists everything.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}}}}}
@@ -120,21 +120,31 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         const argv = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
         r.ok = try spawn(&argv, @as(u64, p.timeout orelse 120) * 1000, out, .bash);
     } else if (eq(u8, name, "grep") and have_rg) {
-        const p = std.json.parseFromSliceLeaky(struct { pattern: []const u8, path: ?[]const u8 = null, glob: ?[]const u8 = null }, a, args, opts) catch return badArgs(out, name, &r);
+        const p = std.json.parseFromSliceLeaky(struct { pattern: []const u8, path: ?[]const u8 = null, glob: ?[]const u8 = null, context: ?u8 = null, ignore_case: bool = false, limit: ?usize = null }, a, args, opts) catch return badArgs(out, name, &r);
         sum(&r, name, "{s} {s}", .{ p.pattern, p.path orelse "." });
-        var argv: [16:null]?[*:0]const u8 = .{ rg_path, "-n", "--no-heading", "--color", "never", "--smart-case", "--max-columns", "300", "--max-columns-preview" } ++ .{null} ** 7;
+        var argv: [24:null]?[*:0]const u8 = .{ rg_path, "-n", "--no-heading", "--color", "never", "--smart-case", "--max-columns", "300", "--max-columns-preview" } ++ .{null} ** 15;
         var n: usize = 9;
         if (p.glob) |g| {
             argv[n] = "-g";
             argv[n + 1] = a.dupeZ(u8, g) catch return badArgs(out, name, &r);
             n += 2;
         }
+        if (p.context) |c| if (c > 0) {
+            var cb: [8]u8 = undefined;
+            argv[n] = "-C";
+            argv[n + 1] = a.dupeZ(u8, std.fmt.bufPrint(&cb, "{d}", .{@min(c, 20)}) catch "2") catch return badArgs(out, name, &r);
+            n += 2;
+        };
+        if (p.ignore_case) {
+            argv[n] = "-i";
+            n += 1;
+        }
         argv[n] = "-e";
         argv[n + 1] = a.dupeZ(u8, p.pattern) catch return badArgs(out, name, &r);
         argv[n + 2] = "--";
         argv[n + 3] = a.dupeZ(u8, p.path orelse ".") catch return badArgs(out, name, &r);
         r.ok = try spawn(&argv, 30_000, out, .grep);
-        capLines(out, 200, "matches");
+        capLines(out, @min(p.limit orelse 200, 1000), "lines");
     } else if (eq(u8, name, "find") and have_fd) {
         const p = std.json.parseFromSliceLeaky(struct { pattern: ?[]const u8 = null, path: ?[]const u8 = null }, a, args, opts) catch return badArgs(out, name, &r);
         sum(&r, name, "{s} {s}", .{ p.pattern orelse "*", p.path orelse "." });
@@ -462,9 +472,11 @@ fn capLines(out: *Buf, max: usize, what: []const u8) void {
 
 const Kind = enum { bash, grep, find };
 var tail_ring: [out_cap / 2]u8 = undefined;
+var log_seq: usize = 0;
 
 /// fork+execve `argv` in its own process group with stdout+stderr on one pipe.
-/// Keeps the first and last 32 KB. Timeout or Ctrl-C kills the whole group.
+/// Keeps the first and last 32 KB (bash: 8 KB + 12 KB, with the full output saved to a log
+/// file whose path is reported when anything was cut). Timeout or Ctrl-C kills the whole group.
 fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: Kind) error{Cancel}!bool {
     var p: [2]i32 = undefined;
     if (linux.errno(linux.pipe2(&p, .{ .CLOEXEC = true })) != .SUCCESS) return errMsg(out, "spawn", "pipe", error.Sys);
@@ -490,8 +502,19 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
     sys.close(p[1]);
     defer sys.close(p[0]);
 
-    const half = out_cap / 2;
+    const head_cap: usize = if (kind == .bash) 8 * 1024 else out_cap / 2;
+    const tail_cap: usize = if (kind == .bash) 12 * 1024 else tail_ring.len;
     const base = out.len;
+    // bash: tee everything into a log file; kept only if the output gets cut.
+    var log_b: [96]u8 = undefined;
+    var log_path: []const u8 = "";
+    var log_fd: sys.fd_t = -1;
+    if (kind == .bash) {
+        log_seq += 1;
+        log_path = std.fmt.bufPrint(&log_b, "/tmp/awl-{d}-{d}.log", .{ linux.getpid(), log_seq }) catch "";
+        if (log_path.len > 0) log_fd = sys.open(log_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600) catch -1;
+    }
+    var total: usize = 0;
     var dropped: usize = 0;
     var tn: usize = 0; // bytes written into tail ring (monotonic)
     const deadline = sys.nowNs() + timeout_ms * std.time.ns_per_ms;
@@ -534,27 +557,38 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
         const n = sys.read(p[0], &chunk) catch 0;
         if (n == 0) break;
         var c = chunk[0..n];
-        const room = half -| (out.len - base);
+        total += n;
+        if (log_fd >= 0) sys.writeAll(log_fd, c) catch {};
+        const room = head_cap -| (out.len - base);
         if (room > 0) {
             const k = @min(room, c.len);
             out.add(c[0..k]);
             c = c[k..];
         }
         for (c) |byte| {
-            if (tn >= tail_ring.len) dropped += 1;
-            tail_ring[tn % tail_ring.len] = byte;
+            if (tn >= tail_cap) dropped += 1;
+            tail_ring[tn % tail_cap] = byte;
             tn += 1;
         }
     }
     if (timed_out or cancelled) _ = linux.kill(-pid, .KILL);
     var status: u32 = 0;
     while (linux.errno(linux.wait4(pid, &status, 0, null)) == .INTR) {}
+    if (log_fd >= 0) sys.close(log_fd);
     if (tn > 0) {
-        if (dropped > 0) out.print("\n[… {d} bytes omitted …]\n", .{dropped});
-        const len = @min(tn, tail_ring.len);
+        if (dropped > 0) {
+            if (log_fd >= 0) {
+                out.print("\n[… {d} bytes omitted; full output ({d} bytes) in {s} …]\n", .{ dropped, total, log_path });
+            } else out.print("\n[… {d} bytes omitted …]\n", .{dropped});
+        }
+        const len = @min(tn, tail_cap);
         const start = tn - len;
         var i: usize = 0;
-        while (i < len) : (i += 1) out.byte(tail_ring[(start + i) % tail_ring.len]);
+        while (i < len) : (i += 1) out.byte(tail_ring[(start + i) % tail_cap]);
+    }
+    if (log_fd >= 0 and dropped == 0) {
+        var zb: [96]u8 = undefined;
+        _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&zb, log_path), 0);
     }
     if (cancelled) {
         out.add("\n[interrupted by user]");
@@ -704,6 +738,26 @@ test "todo renders the checklist and rejects unknown statuses" {
     try t.expectEqualStrings("unknown status \"maybe\" for \"x\"; use pending, doing, done or skip", out.items());
 }
 
+test "grep: alternation, context, ignore_case, limit" {
+    ui.quiet = true;
+    detect();
+    if (!have_rg) return error.SkipZigTest;
+    var db: [64]u8 = undefined;
+    const d = tmpdir(&db);
+    var pb: [128]u8 = undefined;
+    const f = try std.fmt.bufPrint(&pb, "{s}/g/a.txt", .{d});
+    var out = Buf.init(1 << 20);
+    try t.expect(write(f, &.{"one\nAlpha\ntwo\nthree\nbeta\nfour\n"}, &out));
+    var ab: [512]u8 = undefined;
+    out.reset();
+    var r = try run("grep", try std.fmt.bufPrint(&ab, "{{\"pattern\":\"alpha|beta\",\"path\":\"{s}\",\"context\":1,\"ignore_case\":true}}", .{f}), &out);
+    try t.expect(r.ok);
+    try t.expectEqualStrings("1-one\n2:Alpha\n3-two\n4-three\n5:beta\n6-four\n", out.items());
+    out.reset();
+    r = try run("grep", try std.fmt.bufPrint(&ab, "{{\"pattern\":\"o\",\"path\":\"{s}\",\"limit\":2}}", .{f}), &out);
+    try t.expectEqualStrings("1:one\n3:two\n[1 more lines; narrow the search]", out.items());
+}
+
 test "edit: not-found hint when only whitespace differs" {
     var out = Buf.init(1 << 20);
     try t.expect(!editIn("src/a.zig", "fn main() {\n    const x = foo(1);\n}\n", &.{.{ .old = "\tconst x = foo(1);", .new = "" }}, &out));
@@ -755,8 +809,18 @@ test "spawn: output, exit code, truncation, timeout kills grandchild" {
     out.reset();
     const a2 = [_:null]?[*:0]const u8{ "/bin/bash", "-c", "head -c 200000 /dev/zero | tr '\\0' x" };
     try t.expect(try spawn(&a2, 5000, &out, .bash));
-    try t.expect(out.len < out_cap + 64);
-    try t.expect(std.mem.indexOf(u8, out.items(), "bytes omitted") != null);
+    try t.expect(out.len < 21 * 1024 + 200);
+    const omit = std.mem.indexOf(u8, out.items(), "bytes omitted; full output (200000 bytes) in /tmp/awl-") orelse return error.TestUnexpectedResult;
+    const pstart = std.mem.indexOfPos(u8, out.items(), omit, "/tmp/awl-").?;
+    const pend = std.mem.indexOfPos(u8, out.items(), pstart, " …]").?;
+    var lb: [256 * 1024]u8 = undefined;
+    try t.expectEqual(@as(usize, 200000), (try sys.readFile(out.items()[pstart..pend], &lb)).len);
+    var zb: [128]u8 = undefined;
+    _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&zb, out.items()[pstart..pend]), 0);
+    out.reset();
+    const a_small = [_:null]?[*:0]const u8{ "/bin/bash", "-c", "echo small" };
+    try t.expect(try spawn(&a_small, 5000, &out, .bash));
+    try t.expectEqualStrings("small\n", out.items()); // short output: no log file mentioned
     out.reset();
     const t0 = sys.nowNs();
     const a3 = [_:null]?[*:0]const u8{ "/bin/bash", "-c", "(sleep 30; echo leaked) & sleep 30" };
