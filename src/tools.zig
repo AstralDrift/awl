@@ -112,11 +112,13 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
             sum(&r, name, "{s} (all)", .{p.path});
             r.ok = replaceAll(p.path, pairs[0].old, pairs[0].new, out);
             if (r.ok) files_changed.note(p.path);
+            if (r.ok) ui.diff(pairs[0].old, pairs[0].new);
             return r;
         }
         if (n == 1) sum(&r, name, "{s}", .{p.path}) else sum(&r, name, "{s} ({d} changes)", .{ p.path, n });
         r.ok = editFile(p.path, pairs[0..n], out);
         if (r.ok) files_changed.note(p.path);
+        if (r.ok) for (pairs[0..n]) |pp| ui.diff(pp.old, pp.new);
     } else if (eq(u8, name, "todo")) {
         const p = std.json.parseFromSliceLeaky(struct { items: []const struct { text: []const u8, status: []const u8 = "pending" } }, a, args, opts) catch return badArgs(out, name, &r);
         var done: usize = 0;
@@ -692,6 +694,7 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
             break;
         }
         var wait_ms: i32 = @intCast(@min((deadline - now) / std.time.ns_per_ms + 1, std.math.maxInt(i32)));
+        if (sys.tick != null) wait_ms = @min(wait_ms, sys.tick_ms);
         if (exited) wait_ms = 100; // after exit, drain what is already buffered, then stop
         var fds = [3]linux.pollfd{
             .{ .fd = p[0], .events = linux.POLL.IN, .revents = 0 },
@@ -709,8 +712,10 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
         }
         if (n_ready == 0) {
             if (exited) break;
+            sys.maybeTick();
             continue;
         }
+        sys.maybeTick();
         if (fds[2].revents != 0) exited = true;
         if (fds[0].revents == 0) continue;
         const n = sys.read(p[0], &chunk) catch 0;

@@ -67,7 +67,12 @@ pub fn plain() []const u8 {
 // Output is staged in a small buffer and flushed once per call.
 var ob: [8192]u8 = undefined;
 var on: usize = 0;
+pub var capture: ?*@import("buf.zig").Buf = null; // tests: collect output here instead
 fn put(s: []const u8) void {
+    if (live) { // a live status line is on screen: clear it before real output
+        live = false;
+        put("\r\x1b[K");
+    }
     if (s.len > ob.len - on) flushTo(if (oneshot) sys.stderr else sys.stdout);
     if (s.len > ob.len) {
         sys.writeAll(if (oneshot) sys.stderr else sys.stdout, s) catch {};
@@ -76,8 +81,10 @@ fn put(s: []const u8) void {
     @memcpy(ob[on .. on + s.len], s);
     on += s.len;
 }
+var last_out: u64 = 0;
 fn flushTo(fd: sys.fd_t) void {
-    if (!quiet) sys.writeAll(fd, ob[0..on]) catch {};
+    if (on > 0) last_out = sys.nowNs();
+    if (capture) |c| c.add(ob[0..on]) else if (!quiet) sys.writeAll(fd, ob[0..on]) catch {};
     on = 0;
 }
 fn flush() void {
@@ -113,6 +120,7 @@ pub fn reasoning(s: []const u8) void {
         tail[tail_n] = c;
         tail_n += 1;
     }
+    if (draft.len > 0) return drawLive();
     const w = @min(@as(usize, sys.termCols()) -| 6, tail_n);
     var start = tail_n - w;
     while (start < tail_n and (tail[start] & 0xC0) == 0x80) start += 1; // utf-8 boundary
@@ -122,6 +130,69 @@ pub fn reasoning(s: []const u8) void {
     put(tail[start..tail_n]);
     put(reset());
     flush();
+}
+
+// Live line: while the model or a tool works and nothing else is printing, one dim
+// line shows the elapsed time and whatever the user is typing (sent at the next step).
+var live = false;
+var live_t0: u64 = 0;
+pub var draft: []const u8 = ""; // text typed while the agent works (owned by tui)
+pub var queued: usize = 0; // messages waiting for the next step
+pub var draft_changed = false;
+
+/// A new wait starts (model request or tool): restart the timer.
+pub fn liveStart() void {
+    live_t0 = sys.nowNs();
+}
+
+/// Called every ~200 ms while waiting. Redraws only at the start of a line.
+pub fn tick() void {
+    if (!color or oneshot or quiet or capture != null) return;
+    if (thinking) {
+        if (draft.len > 0) drawLive();
+        return;
+    }
+    if (!bol or on > 0) return;
+    const now = sys.nowNs();
+    const changed = draft_changed;
+    draft_changed = false;
+    // Streaming text: stay out of the way unless the user is typing.
+    if (!changed and now -| last_out < 700 * std.time.ns_per_ms) return;
+    if (!changed and (now - live_t0) < std.time.ns_per_s and queued == 0) return;
+    drawLive();
+}
+
+fn drawLive() void {
+    var b: [1024]u8 = undefined;
+    var n: usize = 0;
+    const secs = (sys.nowNs() - live_t0) / std.time.ns_per_s;
+    const w = @as(usize, sys.termCols()) -| 1;
+    const head = std.fmt.bufPrint(&b, "\r\x1b[K{s}{s} {d}s", .{ muted(), if (thinking) "∴" else "⋯", secs }) catch return;
+    n = head.len;
+    var cols: usize = 4 + std.fmt.count("{d}", .{secs});
+    if (queued > 0) {
+        const q = std.fmt.bufPrint(b[n..], " · {d} queued", .{queued}) catch "";
+        n += q.len;
+        cols += q.len;
+    }
+    if (draft.len > 0) {
+        const p = std.fmt.bufPrint(b[n..], "{s}  › {s}", .{ reset(), sgr(&th.fg) }) catch "";
+        n += p.len;
+        cols += 4;
+        // show the end of the draft, on one line
+        const room = @min(w -| cols, b.len - n - 8);
+        var start = draft.len -| room;
+        while (start < draft.len and (draft[start] & 0xC0) == 0x80) start += 1;
+        for (draft[start..]) |c| {
+            b[n] = if (c == '\n') ' ' else c;
+            n += 1;
+        }
+    }
+    const r = reset();
+    @memcpy(b[n .. n + r.len], r);
+    n += r.len;
+    sys.writeAll(sys.stdout, b[0..n]) catch {};
+    live = true;
 }
 
 fn endThinking() void {
@@ -145,29 +216,154 @@ pub fn content(s0: []const u8) void {
         bol = s[s.len - 1] == '\n';
         return;
     }
-    for (s) |c| {
-        if (c == '\n') {
-            bol = true;
-            ticks = 0;
-        } else if (bol and c == '`') {
-            ticks += 1;
-            if (ticks == 3) {
-                fence = !fence;
-                put(if (fence) sgr(&th.green) else reset());
-            }
-        } else {
-            bol = false;
-            ticks = 0;
-        }
-        put(&[_]u8{c});
-    }
+    if (!color) {
+        put(s);
+        bol = s[s.len - 1] == '\n';
+    } else for (s) |c| md(c);
     flush();
+}
+
+// Markdown-lite, one byte at a time so replies still stream: headings, **bold**,
+// `code`, bullets and ``` fences. Markers at a line start are held until they are
+// known (at most a few bytes); everything else prints at once.
+var lead = true; // only indentation or a possible marker so far on this line
+var pend: [12]u8 = undefined;
+var pend_n: usize = 0;
+var star = false; // one '*' held back: maybe the start of "**"
+var bold = false;
+var code = false; // inside `inline code`
+var heading = false;
+
+const Lead = enum { wait, heading, bullet, fence, text };
+
+fn classify(p: []const u8, in_fence: bool) Lead {
+    const s = std.mem.trimStart(u8, p, " ");
+    if (s.len == 0) return .wait;
+    if (std.mem.allEqual(u8, s, '`')) return if (s.len == 3) .fence else if (s.len < 3) .wait else .text;
+    if (in_fence) return .text;
+    if (s[0] == '#') {
+        const h = std.mem.indexOfNone(u8, s, "#") orelse return if (s.len <= 6) .wait else .text;
+        return if (h <= 6 and s[h] == ' ' and h + 1 == s.len) .heading else .text;
+    }
+    if (s[0] == '-' or s[0] == '*' or s[0] == '+') {
+        if (s.len == 1) return .wait;
+        return if (s.len == 2 and s[1] == ' ') .bullet else .text;
+    }
+    return .text;
+}
+
+fn md(c: u8) void {
+    if (c == '\n') {
+        if (lead) flushPend();
+        endLine();
+        put("\n");
+        bol = true;
+        lead = true;
+        return;
+    }
+    bol = false;
+    if (!lead) return inline_(c);
+    pend[pend_n] = c;
+    pend_n += 1;
+    const p = pend[0..pend_n];
+    const indent = p[0 .. p.len - std.mem.trimStart(u8, p, " ").len];
+    switch (classify(p, fence)) {
+        .wait => if (pend_n < pend.len) return,
+        .heading => {
+            put(indent);
+            put(sgr(&th.accent));
+            put("\x1b[1m");
+            heading = true;
+        },
+        .bullet => {
+            put(indent);
+            put(muted());
+            put("•");
+            put(reset());
+            put(" ");
+        },
+        .fence => {
+            fence = !fence;
+            put(indent);
+            put(sgr(&th.green));
+            put("```");
+            if (!fence) put(reset());
+        },
+        .text => {
+            lead = false;
+            flushPend();
+            return;
+        },
+    }
+    if (lead and pend_n == pend.len and classify(p, fence) == .wait) {
+        lead = false;
+        flushPend();
+        return;
+    }
+    lead = false;
+    pend_n = 0;
+}
+
+fn flushPend() void {
+    const n = pend_n;
+    pend_n = 0;
+    lead = false;
+    for (pend[0..n]) |b| inline_(b);
+}
+
+fn inline_(c: u8) void {
+    if (fence) return put(&[_]u8{c});
+    if (c == '`') {
+        if (star) {
+            star = false;
+            put("*");
+        }
+        code = !code;
+        if (code) put(sgr(&th.green)) else restyle();
+        return;
+    }
+    if (code) return put(&[_]u8{c});
+    if (c == '*') {
+        if (star) {
+            star = false;
+            bold = !bold;
+            put(if (bold) "\x1b[1m" else "\x1b[22m");
+            if (!bold and heading) put("\x1b[1m");
+        } else star = true;
+        return;
+    }
+    if (star) {
+        star = false;
+        put("*");
+    }
+    put(&[_]u8{c});
+}
+
+/// Back to the style the line had before inline code.
+fn restyle() void {
+    put(reset());
+    if (heading) {
+        put(sgr(&th.accent));
+        put("\x1b[1m");
+    } else if (bold) put("\x1b[1m");
+}
+
+fn endLine() void {
+    if (star) put("*");
+    star = false;
+    if (heading or bold or code) put(reset());
+    heading = false;
+    bold = false;
+    code = false;
 }
 
 /// End of an assistant message: close any open line and color.
 pub fn endMessage() void {
     started = false;
     endThinking();
+    if (lead and pend_n > 0) flushPend();
+    endLine();
+    lead = true;
     if (fence) {
         fence = false;
         put(reset());
@@ -187,11 +383,72 @@ pub fn tool(name: []const u8, summary: []const u8) void {
     const sm = cut(summary, w);
     print("{s}▸ {s}{s} {s}{s}\n", .{ accent(), name, reset(), sm, if (sm.len < summary.len) "…" else "" });
     flush();
+    diff_lines = 0;
+    diffed = false;
+    liveStart();
+}
+
+// Edit diffs: the changed lines of each old/new pair, unchanged lines at both ends
+// dropped, at most `max_diff` lines per tool call.
+const max_diff = 12;
+var diff_lines: usize = 0;
+var diff_hidden: usize = 0;
+var diffed = false; // the edit's own "edited ..." output is then not repeated
+
+pub fn diff(old: []const u8, new: []const u8) void {
+    if (oneshot) return;
+    if (!diffed) diff_hidden = 0;
+    diffed = true;
+    var ol: [256][]const u8 = undefined;
+    var nl: [256][]const u8 = undefined;
+    const a = lines(old, &ol);
+    const b = lines(new, &nl);
+    var pre: usize = 0;
+    while (pre < a.len and pre < b.len and std.mem.eql(u8, a[pre], b[pre])) pre += 1;
+    var suf: usize = 0;
+    while (suf < a.len - pre and suf < b.len - pre and std.mem.eql(u8, a[a.len - 1 - suf], b[b.len - 1 - suf])) suf += 1;
+    const w = @as(usize, sys.termCols()) -| 5;
+    for (a[pre .. a.len - suf]) |l| diffLine(&th.red, "- ", l, w);
+    for (b[pre .. b.len - suf]) |l| diffLine(&th.green, "+ ", l, w);
+    flush();
+}
+
+fn diffLine(st: *const Sgr, mark: []const u8, l: []const u8, w: usize) void {
+    if (diff_lines == max_diff) {
+        diff_hidden += 1;
+        return;
+    }
+    diff_lines += 1;
+    put("  ");
+    put(sgr(st));
+    put(mark);
+    const t = cut(l, w);
+    put(t);
+    if (t.len < l.len) put("…");
+    put(reset());
+    put("\n");
+}
+
+fn lines(s: []const u8, out: [][]const u8) []const []const u8 {
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, s, "\n"), '\n');
+    while (it.next()) |l| {
+        if (n == out.len) break;
+        out[n] = std.mem.trimEnd(u8, l, "\r");
+        n += 1;
+    }
+    return out[0..n];
 }
 
 /// Show at most 8 lines of tool output, dimmed.
 pub fn toolOutput(text: []const u8, ok: bool) void {
     if (oneshot) return;
+    if (ok and diffed) {
+        diffed = false;
+        if (diff_hidden > 0) print("{s}  … {d} more changed lines{s}\n", .{ muted(), diff_hidden, reset() });
+        flush();
+        return;
+    }
     var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, text, "\n"), '\n');
     var shown: usize = 0;
     var total: usize = 0;
@@ -235,6 +492,23 @@ pub fn err(comptime f: []const u8, a: anytype) void {
     flushTo(sys.stderr);
 }
 
+/// A message the user queued mid-run, shown where the model receives it.
+pub fn userEcho(text: []const u8) void {
+    endMessage();
+    put(accent());
+    put("› ");
+    put(reset());
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (it.next()) |l| {
+        if (!first) put("\n  ");
+        first = false;
+        put(l);
+    }
+    put("\n");
+    flush();
+}
+
 pub fn note(comptime f: []const u8, a: anytype) void {
     endMessage();
     put(muted());
@@ -242,4 +516,57 @@ pub fn note(comptime f: []const u8, a: anytype) void {
     put(reset());
     put("\n");
     flush();
+}
+
+const tt = std.testing;
+
+fn render(f: anytype, args: anytype) ![]const u8 {
+    const Buf = @import("buf.zig").Buf;
+    const S = struct {
+        var b: Buf = undefined;
+    };
+    S.b = Buf.init(1 << 16);
+    capture = &S.b;
+    defer capture = null;
+    @call(.auto, f, args);
+    flush();
+    return S.b.items();
+}
+
+fn mdAll(s: []const u8) void {
+    // stream it in small pieces, like the model does
+    var i: usize = 0;
+    while (i < s.len) : (i += 3) content(s[i..@min(i + 3, s.len)]);
+    endMessage();
+}
+
+test "markdown-lite: headings, bullets, bold, code, fences" {
+    color = true;
+    defer color = false;
+    const got = try render(mdAll, .{"# Title\n- item **bold** and `x`\n```zig\nconst a = 1; // **no**\n```\nplain * star\n#include\n"});
+    try tt.expectEqualStrings(
+        "\x1b[1mTitle\x1b[0m\n" ++
+            "•\x1b[0m item \x1b[1mbold\x1b[22m and x\x1b[0m\n" ++
+            "```zig\nconst a = 1; // **no**\n" ++
+            "```\x1b[0m\n" ++
+            "plain * star\n#include\n",
+        got,
+    );
+}
+
+test "markdown-lite: unfinished markers print as typed" {
+    color = true;
+    defer color = false;
+    try tt.expectEqualStrings("-\n2 * 3 = 6*\n", try render(mdAll, .{"-\n2 * 3 = 6*\n"}));
+}
+
+test "edit diff: only changed lines, capped" {
+    try tt.expectEqualStrings("  - b\n  + B\n", try render(diff, .{ "a\nb\nc\n", "a\nB\nc\n" }));
+    diff_lines = 0;
+    const big = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n";
+    _ = try render(diff, .{ big, "x\n" });
+    try tt.expectEqual(@as(usize, max_diff), diff_lines);
+    try tt.expectEqual(@as(usize, 16 - max_diff), diff_hidden);
+    diff_lines = 0;
+    diffed = false;
 }

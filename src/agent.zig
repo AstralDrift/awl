@@ -194,11 +194,21 @@ pub fn user(text: []const u8) void {
 
 pub const Outcome = enum { done, cancelled, failed, max_steps };
 
+/// Messages the user typed while the agent worked; taken before each later step.
+pub var steer: ?*const fn () ?[]const u8 = null;
+
 pub fn run() Outcome {
     var step: usize = 0;
     var forced = false; // one forced compaction per run after a "too long" rejection
     while (step < max_steps) : (step += 1) {
-        if (step > 0) _ = compact(false);
+        if (step > 0) {
+            if (steer) |f| if (f()) |text| {
+                ui.userEcho(text);
+                user(text);
+            };
+            _ = compact(false);
+        }
+        ui.liveStart();
         const t0 = sys.nowNs();
         streamRetrying(msgs.items(), "]}") catch |e| {
             ui.endMessage();

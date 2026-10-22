@@ -31,6 +31,12 @@ script = [
     {"delay": 5, "content": "too late"},
     {"tool_calls": [{"name": "bash", "arguments": {"command": "sleep 100"}}]},
     {"content": "after cancel"},
+    {"tool_calls": [{"name": "bash", "arguments": {"command": "sleep 1.5"}}]},
+    {"content": "steered ok"},
+    {"tool_calls": [{"name": "edit", "arguments": {"path": "f.txt", "old_string": "beta", "new_string": "BETA"}}]},
+    {"content": "**done** edit"},
+    {"delay": 5, "content": "slow2"},
+    {"content": "final"},
 ]
 sp = os.path.join(W, "s.json")
 json.dump(script, open(sp, "w"))
@@ -131,6 +137,43 @@ check("loop continues after cancel", read_until("after cancel", 3), buf[-300:])
 m = requests()[-1]["messages"]
 roles = [x["role"] for x in m]
 check("cancelled tool has a result", "tool" in roles and any("interrupted" in (x.get("content") or "") for x in m if x["role"] == "tool"), roles)
+
+# type-ahead: a message typed while a tool runs reaches the model at the next step
+buf = b""
+send("steer test\r")
+read_until("sleep 1.5", 3)
+time.sleep(1.2)
+send("also check docs\r")
+check("steered reply", read_until("steered ok", 5), buf[-300:])
+m = requests()[-1]["messages"]
+check("queued message sent after the tool result", m[-1] == {"role": "user", "content": "also check docs"} and m[-2]["role"] == "tool", [x["role"] for x in m[-3:]])
+check("live line with timer", "⋯ 1s".encode() in buf, buf[-400:])
+check("queued count shown", b"1 queued" in buf, buf[-400:])
+check("queued message echoed", "› \x1b[0malso check docs".encode() in buf or b"also check docs\n" in buf.replace(b"\r", b""), buf[-400:])
+
+# edit shows a diff; **bold** renders as bold
+open(os.path.join(W, "f.txt"), "w").write("alpha\nbeta\ngamma\n")
+buf = b""
+send("edit it\r")
+check("edit reply", read_until("edit", 5) and read_until("\x1b[1mdone\x1b[22m", 5), buf[-300:])
+check("diff lines", b"- beta" in buf and b"+ BETA" in buf, buf[-400:])
+check("edit applied", open(os.path.join(W, "f.txt")).read() == "alpha\nBETA\ngamma\n")
+
+# Esc interrupts; text typed but not sent comes back in the prompt
+send("slow again\r")
+time.sleep(0.5)
+send("half typed")
+time.sleep(0.3)
+buf = b""
+t0 = time.time()
+send("\x1b")
+got = read_until("interrupted", 2)
+dt = (time.time() - t0) * 1000
+check(f"esc interrupts ({dt:.0f} ms)", got and dt < 700, buf[-200:])
+check("draft back in the prompt", read_until("half typed", 2), buf[-200:])
+send("\x15")  # Ctrl-U
+send("x\r")
+check("continues after esc", read_until("final", 3), buf[-300:])
 
 # double Ctrl-C at an empty prompt quits and restores the terminal
 send("\x03")

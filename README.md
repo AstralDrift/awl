@@ -14,6 +14,16 @@ Spec and build order: [PLAN.md](PLAN.md). Sibling project for macOS: `nib`.
     ./zig-out/bin/awl -p "fix the failing test"
     arena/awl-or.sh       # same, on an OpenRouter model (key in ~/.local/state/awl-arena/openrouter.key)
 
+## The TUI
+
+Inline, so the terminal keeps its scrollback and plain copy and paste. Replies stream with light
+markdown (headings, **bold**, `code`, bullets, fenced blocks); edits show the changed lines in
+red and green; a dim `⋯ 12s` line shows that a slow model call or command is still working.
+
+While it works you can keep typing: Enter queues the message and the model gets it at its next
+step (to steer it), or as the next prompt if it has finished. Esc or Ctrl-C stops the turn, and
+anything you queued or typed comes back in the prompt. `/help` lists the keys.
+
 ## What it loads
 
 - `AGENTS.md` from the working directory and every parent up to `/`, outermost first (24 KB cap).

@@ -46,7 +46,13 @@ pub fn repl() u8 {
     have_orig = linux.errno(linux.ioctl(sys.stdin, linux.T.CGETS, @intFromPtr(&orig))) == .SUCCESS;
     defer restore();
     out("\x1b[?2004h"); // bracketed paste
-    ui.note("awl · {s} · {s} · /help", .{ agent.cfg.model, session.path });
+    var cb: [4096]u8 = undefined;
+    const rc = linux.getcwd(&cb, cb.len);
+    var dir: []const u8 = if (linux.errno(rc) == .SUCCESS) std.mem.sliceTo(&cb, 0) else ".";
+    const home = sys.getenv("HOME") orelse "";
+    var tb: [4096]u8 = undefined;
+    if (home.len > 1 and std.mem.startsWith(u8, dir, home)) dir = std.fmt.bufPrint(&tb, "~{s}", .{dir[home.len..]}) catch dir;
+    ui.note("awl · {s} · {s} · /help", .{ agent.cfg.model, dir });
     var ed = Editor{};
     while (true) {
         setMode(false);
@@ -59,9 +65,151 @@ pub fn repl() u8 {
             continue;
         };
         agent.user(text);
-        _ = agent.run();
+        runAgent(&ed);
         out("\n");
     }
+}
+
+/// Run the agent with type-ahead on; then send whatever was queued, and leave any
+/// unsent draft in the editor.
+fn runAgent(ed: *Editor) void {
+    hist = &ed.hist;
+    sys.tick = &pump;
+    agent.steer = &takeQueued;
+    defer {
+        sys.tick = null;
+        agent.steer = null;
+        ui.draft = "";
+        ui.queued = 0;
+    }
+    while (true) {
+        const o = agent.run();
+        pump();
+        if (o != .done or q_count == 0) break;
+        const t = takeQueued().?;
+        ui.userEcho(t);
+        agent.user(t);
+    }
+    // Interrupted: nothing auto-sends; queued text and the draft go back to the prompt.
+    var n: usize = 0;
+    for ([_][]const u8{ q_mem[0..q_n], if (q_n > 0 and draft_n > 0) "\n" else "", draft_mem[0..draft_n] }) |part| {
+        const k = @min(part.len, ed.text.len - n);
+        @memcpy(ed.text[n .. n + k], part[0..k]);
+        n += k;
+    }
+    ed.preset = n;
+    q_n = 0;
+    q_count = 0;
+    draft_n = 0;
+    esc = .none;
+}
+
+// Type-ahead while the agent runs: keys are read on each tick, never blocking.
+var draft_mem: [8192]u8 = undefined;
+var draft_n: usize = 0;
+var q_mem: [16384]u8 = undefined;
+var q_n: usize = 0;
+var q_count: usize = 0;
+var esc: enum { none, esc, seq } = .none;
+var ta_seq: [8]u8 = undefined;
+var seq_n: usize = 0;
+var ta_paste = false;
+
+var hist: ?*Buf = null; // the editor's history: queued messages are added to it
+
+fn takeQueued() ?[]const u8 {
+    if (q_count == 0) return null;
+    const t = q_mem[0..q_n];
+    if (hist) |h| {
+        h.add(t);
+        h.byte(0);
+    }
+    q_n = 0;
+    q_count = 0;
+    ui.queued = 0;
+    return t;
+}
+
+fn pump() void {
+    var b: [1024]u8 = undefined;
+    var got_any = false;
+    while (true) {
+        var p = [1]linux.pollfd{.{ .fd = sys.stdin, .events = linux.POLL.IN, .revents = 0 }};
+        if ((sys.check(linux.poll(&p, 1, 0)) catch 0) == 0) break;
+        const n = sys.read(sys.stdin, &b) catch 0;
+        if (n == 0) break;
+        got_any = true;
+        for (b[0..n]) |c| key(c);
+    }
+    // A lone Esc (nothing followed it within a tick) interrupts, like Ctrl-C.
+    if (!got_any and esc == .esc) {
+        esc = .none;
+        _ = linux.kill(linux.getpid(), .INT);
+    }
+    ui.draft = draft_mem[0..draft_n];
+    ui.queued = q_count;
+    ui.tick();
+}
+
+fn key(c: u8) void {
+    switch (esc) {
+        .esc => {
+            esc = if (c == '[' or c == 'O') .seq else .none;
+            seq_n = 0;
+            if (c == '\r') addDraft("\n"); // Alt-Enter
+            return;
+        },
+        .seq => {
+            if (seq_n < ta_seq.len) ta_seq[seq_n] = c;
+            seq_n += 1;
+            if (c >= 0x40 and c <= 0x7e) {
+                esc = .none;
+                const s = ta_seq[0..@min(seq_n, ta_seq.len)];
+                if (std.mem.eql(u8, s, "200~")) ta_paste = true;
+                if (std.mem.eql(u8, s, "201~")) ta_paste = false;
+            }
+            return;
+        },
+        .none => {},
+    }
+    switch (c) {
+        27 => esc = .esc,
+        '\r' => if (ta_paste) addDraft("\n") else queueDraft(),
+        '\n' => addDraft("\n"),
+        127, 8 => {
+            while (draft_n > 0) {
+                draft_n -= 1;
+                if ((draft_mem[draft_n] & 0xC0) != 0x80) break;
+            }
+            ui.draft_changed = true;
+        },
+        21 => { // Ctrl-U
+            draft_n = 0;
+            ui.draft_changed = true;
+        },
+        else => if (c >= 32 or c == '\t' or c >= 0x80) addDraft(&[_]u8{c}),
+    }
+}
+
+fn addDraft(s: []const u8) void {
+    const k = @min(s.len, draft_mem.len - draft_n);
+    @memcpy(draft_mem[draft_n .. draft_n + k], s[0..k]);
+    draft_n += k;
+    ui.draft_changed = true;
+}
+
+fn queueDraft() void {
+    const t = std.mem.trim(u8, draft_mem[0..draft_n], " \t\n");
+    if (t.len == 0) return;
+    const sep: []const u8 = if (q_n > 0) "\n\n" else "";
+    if (q_n + sep.len + t.len > q_mem.len) return;
+    @memcpy(q_mem[q_n .. q_n + sep.len], sep);
+    q_n += sep.len;
+    @memcpy(q_mem[q_n .. q_n + t.len], t);
+    q_n += t.len;
+    q_count += 1;
+    draft_n = 0;
+    ui.draft_changed = true;
 }
 
 /// Returns null if `text` is not a known command, true to quit.
@@ -75,7 +223,7 @@ fn command(text: []const u8) ?bool {
         ui.loadTheme();
         ui.note("theme reloaded", .{});
     } else if (eq(u8, text, "/help")) {
-        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\n/clear  /theme  /quit", .{});
+        ui.note("Enter send · Alt-Enter/Ctrl-J newline · ↑↓ history · Ctrl-C cancel/clear (twice to quit) · Ctrl-D quit\nWhile it works: type and Enter to queue a message for the next step · Esc or Ctrl-C to stop\n/clear  /theme  /quit\nsession: {s}", .{session.path});
     } else return null;
     return false;
 }
@@ -123,6 +271,7 @@ const Editor = struct {
     in: *[4096]u8 = &in_mem,
     in_n: usize = 0,
     in_i: usize = 0,
+    preset: usize = 0, // text[0..preset] starts the next prompt (type-ahead left over)
 
     fn byte(self: *Editor) ?u8 {
         if (self.in_i == self.in_n) {
@@ -147,8 +296,9 @@ const Editor = struct {
     }
 
     fn read(self: *Editor) ?[]const u8 {
-        self.len = 0;
-        self.cur = 0;
+        self.len = self.preset;
+        self.cur = self.preset;
+        self.preset = 0;
         self.row = 0;
         self.hpos = null;
         self.render();

@@ -145,6 +145,19 @@ fn procStatus(key: []const u8) u64 {
     return std.fmt.parseInt(u64, num, 10) catch 0;
 }
 
+/// Called about every 200 ms while a wait (model stream, tool) is idle; set by the TUI.
+pub var tick: ?*const fn () void = null;
+pub const tick_ms = 200;
+var last_tick: u64 = 0;
+/// Run the tick hook if one is set and tick_ms have passed since the last run.
+pub fn maybeTick() void {
+    const f = tick orelse return;
+    const now = nowNs();
+    if (now -% last_tick < tick_ms * std.time.ns_per_ms) return;
+    last_tick = now;
+    f();
+}
+
 /// SIGINT and SIGPIPE are blocked; SIGINT is read from this fd instead.
 pub var sigfd: fd_t = -1;
 pub fn setupSignals() void {

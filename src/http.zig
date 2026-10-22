@@ -44,12 +44,21 @@ pub fn wait(fd: sys.fd_t, timeout_ms: i32) Error!bool {
         .{ .fd = fd, .events = linux.POLL.IN, .revents = 0 },
         .{ .fd = sys.sigfd, .events = linux.POLL.IN, .revents = 0 },
     };
+    var left = timeout_ms;
     while (true) {
-        const n = sys.check(linux.poll(&p, if (sys.sigfd >= 0) 2 else 1, timeout_ms)) catch |e| {
+        // With a tick hook, wake in slices to let the UI redraw and read keys.
+        const slice: i32 = if (sys.tick != null and (left < 0 or left > sys.tick_ms)) sys.tick_ms else left;
+        const n = sys.check(linux.poll(&p, if (sys.sigfd >= 0) 2 else 1, slice)) catch |e| {
             if (e == error.Interrupted) continue;
             return e;
         };
-        if (n == 0) return false;
+        if (n == 0) {
+            if (slice == left) return false;
+            if (left > 0) left -= slice;
+            sys.maybeTick();
+            continue;
+        }
+        sys.maybeTick();
         if (p[1].revents != 0) {
             sys.drainSignals();
             return error.Cancel;
