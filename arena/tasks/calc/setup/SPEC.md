@@ -13,6 +13,8 @@ start or end with `_` or contain `__` (that is a bad number).
 - An expression prints its value: `1 + 2` prints `3`.
 - `let NAME = EXPR` stores the value and prints `NAME = VALUE`. Names are a lower-case
   letter or `_`, then lower-case letters, digits or `_`. A name can be set again.
+  `let` is a keyword, never a name: a line that starts with `let` is a `let` statement,
+  and when it does not go on as `NAME = EXPR`, the error is at the first token that does not fit.
 
 ## Expressions, loosest binding first
 
