@@ -13,6 +13,11 @@ size=$(stat -c %s "$B")
 [ "$size" -le 262144 ] || fail "size $size > 256 KB"
 ok "size $size B"
 
+# `return f() == {}` reads as "return after f" but returns true; in tui.command true
+# means quit (it made /resume quit awl). Write the call, then `return false`.
+! grep -n '== {}' "$(dirname "$0")"/../src/*.zig || fail "'== {}' in src (see the comment above)"
+ok "no '== {}'"
+
 file "$B" | grep -q 'statically linked' || fail "not static"
 ok "static"
 

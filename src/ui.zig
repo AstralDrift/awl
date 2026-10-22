@@ -163,7 +163,6 @@ pub fn liveRows(b: *@import("buf.zig").Buf, w: usize) void {
         b.byte('\n');
     };
     const secs = (sys.nowNs() - live_t0) / std.time.ns_per_s;
-    const start = b.len;
     b.print("{s}{s} {d}s", .{ muted(), if (thinking) "∴" else "⋯", secs });
     var cols: usize = 4 + std.fmt.count("{d}", .{secs});
     if (queued > 0) {
@@ -182,7 +181,6 @@ pub fn liveRows(b: *@import("buf.zig").Buf, w: usize) void {
         b.add(tail[st..tail_n]);
     }
     b.add(reset());
-    _ = start;
 }
 fn flush() void {
     flushTo(if (oneshot) sys.stderr else sys.stdout);
@@ -212,7 +210,7 @@ pub fn reasoning(s: []const u8) void {
     }
     defer if (screen.on) requestDraw();
     for (s) |c0| {
-        const c = if (c0 == '\n' or c0 == '\t') ' ' else c0;
+        const c = if (c0 < 0x20 or c0 == 0x7f) ' ' else c0; // no control codes on the live line
         if (tail_n == tail.len) {
             std.mem.copyForwards(u8, tail[0 .. tail.len - 64], tail[64..]);
             tail_n -= 64;

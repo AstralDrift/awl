@@ -650,7 +650,12 @@ def full_screen():
     os.write(f7, b"\x1b[5~")
     check("PgUp scrolls the view up", until("rows \xc2\xb7 PgDn".encode().decode("latin-1")) or until("rows · PgDn"), out[0][-300:])
     out[0] = b""
-    os.write(f7, b"\x1b[<65;10;5M" * 10)  # wheel down to the bottom
+    os.write(f7, b"\x1b[5~" * 12)  # far past the top
+    until("no such text", 0.6)  # read the frames
+    frame = out[0].split(b"\x1b[?2026h")[-1]
+    check("PgUp past the top shows the first page, not a blank view", b"0.1.0" in frame and b"row 1\x1b" in frame, frame[-300:])
+    out[0] = b""
+    os.write(f7, b"\x1b[<65;10;5M" * 30)  # wheel down to the bottom
     time.sleep(0.4)
     check("wheel down returns to the bottom", until("row 60") and b"PgDn" not in out[0].split(b"row 60")[-1], out[0][-200:])
     out[0] = b""

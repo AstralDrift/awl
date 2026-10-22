@@ -325,11 +325,12 @@ fn footer(b: *Buf, w: usize) void {
             } else "";
         if (text.len == 0) continue;
         const sep: usize = if (first) 0 else 3;
-        if (cols + sep + text.len > w) break;
+        const tw = std.unicode.utf8CountCodepoints(text) catch text.len;
+        if (cols + sep + tw > w) break;
         if (!first) b.print("{s} · ", .{m});
         b.add(color);
         b.add(text);
-        cols += sep + text.len;
+        cols += sep + tw;
         first = false;
     }
     if (b.len > start) b.add(ui.plain());
@@ -742,8 +743,7 @@ fn command(text: []const u8) ?bool {
                 modelPicker();
                 return false;
             }
-        if (arg.len > 0) agent.setModel(arg);
-        ui.note("model: {s}{s}", .{ agent.cfg.model, if (arg.len == 0) "  (/model NAME to switch)" else "" });
+        if (arg.len > 0) switchModel(arg, 0) else ui.note("model: {s}  (/model NAME to switch)", .{agent.cfg.model});
     } else if (eq(u8, text, "/compact")) {
         if (!agent.compactNow()) ui.note("nothing to compact yet", .{});
     } else if (eq(u8, text, "/context")) {
@@ -956,9 +956,21 @@ fn modelPicker() void {
     switchModel(l[k].id, l[k].ctx);
 }
 
+/// Switch model. `ctx` 0: ask the server for this model's window (kept as is when it
+/// does not say), so trimming and compaction follow the new model.
 fn switchModel(id: []const u8, ctx: u64) void {
     agent.setModel(id);
-    if (ctx > 0) agent.ctx_limit = ctx;
+    if (ctx > 0) {
+        agent.ctx_limit = ctx;
+    } else {
+        var ids = Buf.init(1 << 20);
+        defer ids.free();
+        var infos: [1024]llm.ModelInfo = undefined;
+        const l = llm.models(agent.cfg, &ids, &infos) catch &.{};
+        for (l) |m| if (std.mem.eql(u8, m.id, agent.cfg.model) and m.ctx > 0) {
+            agent.ctx_limit = m.ctx;
+        };
+    }
     ui.note("model: {s}", .{agent.cfg.model});
 }
 
@@ -1321,7 +1333,7 @@ const Editor = struct {
             if (l.len == 0 or l[0] == '[' or std.mem.eql(u8, l, "no files found")) continue;
             const slot = names.extend(@sizeOf([]const u8));
             if (slot.len < @sizeOf([]const u8)) break;
-            @as(*align(1) []const u8, @ptrCast(slot.ptr)).* = std.mem.trimStart(u8, l, "./");
+            @as(*align(1) []const u8, @ptrCast(slot.ptr)).* = if (std.mem.startsWith(u8, l, "./")) l[2..] else l;
             n += 1;
         }
         const list = @as([*]align(1) const []const u8, @ptrCast(names.items().ptr))[0..n];

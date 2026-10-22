@@ -38,7 +38,10 @@ fn newLine() void {
     var b: [4]u8 = undefined;
     std.mem.writeInt(u32, &b, @intCast(text.len), .little);
     starts.add(&b);
-    if (scroll > 0) unseen += 1;
+    if (scroll > 0) { // scrolled up: keep the view where it is
+        scroll += 1;
+        unseen += 1;
+    }
 }
 
 /// Empty the current line (a "\r\x1b[K" rewrite).
@@ -68,7 +71,8 @@ pub fn feed(s: []const u8) void {
         .esc => esc = switch (c) {
             '[' => .csi,
             ']' => .osc,
-            else => .none,
+            else => .none, // includes the '\\' that ends an OSC
+
         },
         .csi => {
             if (seq_n < seq.len) seq[seq_n] = c;
@@ -89,8 +93,10 @@ pub fn feed(s: []const u8) void {
                 else => {}, // cursor moves belong to the inline layout
             }
         },
-        .osc => if (c == 7) {
+        .osc => if (c == 7) { // ends with BEL, or ESC \\ (handled as .esc)
             esc = .none;
+        } else if (c == 27) {
+            esc = .esc;
         },
     };
 }
@@ -157,6 +163,44 @@ fn wrap(l: []const u8, w: usize, out: []Row) []Row {
     return out[0..n];
 }
 
+const Slot = struct { l: usize, r: Row };
+
+/// The rows the view shows, bottom first (at most `view`). A scroll past the top is
+/// pulled back so the first page shows.
+fn collect(view: usize, w: usize, rows: []Slot) usize {
+    const room = @min(view, rows.len);
+    var got: usize = 0; // rows passed so far, from the bottom
+    var skip = scroll;
+    var fill: usize = 0;
+    var li = lineCount();
+    if (li > 0 and line(li - 1).len == 0) li -= 1; // the line being written is still empty
+    var wr: [256]Row = undefined;
+    while (li > 0 and fill < room) {
+        li -= 1;
+        const rs = wrap(line(li), w, &wr);
+        var k = rs.len;
+        while (k > 0 and fill < room) {
+            k -= 1;
+            got += 1;
+            if (skip > 0) {
+                skip -= 1;
+                continue;
+            }
+            rows[fill] = .{ .l = li, .r = rs[k] };
+            fill += 1;
+        }
+    }
+    if (fill < room and scroll > 0) { // ran out of rows above: show the top page
+        const top = got -| room;
+        if (top < scroll) {
+            scroll = top;
+            if (scroll == 0) unseen = 0;
+            return collect(view, w, rows);
+        }
+    }
+    return fill;
+}
+
 /// Draw the screen: the transcript in the top rows, then `bottom` (rows already cut to
 /// the width, each with its own colors) at the foot. The cursor goes to `cursor`
 /// (row within `bottom`, column), or is hidden.
@@ -168,31 +212,8 @@ pub fn draw(bottom: []const []const u8, cursor: ?[2]usize) void {
     var b = Buf.init(1 << 20);
     defer b.free();
     b.add("\x1b[?2026h\x1b[?25l"); // draw in one frame; cursor hidden while drawing
-    // collect the view's rows from the bottom up
-    var rows: [512]struct { l: usize, r: Row } = undefined;
-    const want = @min(view + scroll, 100_000);
-    var got: usize = 0; // rows found so far, from the bottom
-    var skip = scroll;
-    var fill: usize = 0; // rows of `rows` used (bottom first)
-    var li = lineCount();
-    if (li > 0 and line(li - 1).len == 0) li -= 1; // the line being written is still empty
-    var wr: [256]Row = undefined;
-    while (li > 0 and got < want and fill < @min(view, rows.len)) {
-        li -= 1;
-        const rs = wrap(line(li), w, &wr);
-        var k = rs.len;
-        while (k > 0 and fill < @min(view, rows.len)) {
-            k -= 1;
-            got += 1;
-            if (skip > 0) {
-                skip -= 1;
-                continue;
-            }
-            rows[fill] = .{ .l = li, .r = rs[k] };
-            fill += 1;
-        }
-    }
-    if (li == 0 and skip > 0) scroll -= skip; // scrolled past the top: stop there
+    var rows: [512]Slot = undefined;
+    const fill = collect(view, w, &rows);
     // fill the view top-down: blank rows first when the transcript is short
     var r: usize = 0;
     while (r < view) : (r += 1) {
@@ -245,4 +266,30 @@ test "wrap: escape sequences take no room, colors carry to the next row" {
     try tt.expectEqualStrings("ef\x1b[0mgh", l[rs[1].a..rs[1].b]);
     try tt.expectEqualStrings("\x1b[32m", rs[1].sgr);
     try tt.expectEqual(@as(usize, 1), wrap("", 4, &wr).len);
+}
+
+test "scrolling past the top shows the first page, not a blank view" {
+    reset();
+    feed("l0\nl1\nl2\nl3\nl4\n");
+    var rows: [8]Slot = undefined;
+    scroll = 100;
+    try tt.expectEqual(@as(usize, 3), collect(3, 80, &rows));
+    try tt.expectEqual(@as(usize, 2), scroll);
+    try tt.expectEqualStrings("l0", line(rows[2].l));
+    // a short transcript has no page above
+    scroll = 5;
+    try tt.expectEqual(@as(usize, 5), collect(10, 80, &rows));
+    try tt.expectEqual(@as(usize, 0), scroll);
+    reset();
+}
+
+test "new lines while scrolled up keep the view; OSC ended by ESC backslash" {
+    reset();
+    feed("a\nb\nc\n");
+    scroll = 1;
+    feed("d\n");
+    try tt.expectEqual(@as(usize, 2), scroll);
+    feed("x\x1b]0;title\x1b\\y\n");
+    try tt.expectEqualStrings("xy", line(lineCount() - 2));
+    reset();
 }
