@@ -489,13 +489,15 @@ fn cut(s: []const u8, w: usize) []const u8 {
     return s[0..n];
 }
 
-pub fn status(model: []const u8, tok: u64, secs: f64, ctx: u64, limit: u64) void {
+/// End of a turn: model, time, steps, files changed, context use, awl's memory.
+pub fn status(model: []const u8, secs: f64, steps: usize, changed: usize, ctx: u64, limit: u64) void {
     if (oneshot) return;
     endMessage();
-    const tps = if (secs > 0) @as(f64, @floatFromInt(tok)) / secs else 0;
     var lb: [32]u8 = undefined;
     const lim = if (limit > 0) (std.fmt.bufPrint(&lb, "/{d}k", .{limit / 1000}) catch "") else "";
-    print("{s}── {s} · {d:.1} tok/s · ctx {d:.1}k{s} · {d} KB{s}\n", .{ muted(), model, tps, @as(f64, @floatFromInt(ctx)) / 1000, lim, sys.rssKb(), reset() });
+    var cb: [32]u8 = undefined;
+    const ch = if (changed > 0) (std.fmt.bufPrint(&cb, " · {d} file{s} changed", .{ changed, if (changed == 1) "" else "s" }) catch "") else "";
+    print("{s}── {s} · {d:.1}s · {d} step{s}{s} · ctx {d:.1}k{s} · {d} KB{s}\n", .{ muted(), model, secs, steps, if (steps == 1) "" else "s", ch, @as(f64, @floatFromInt(ctx)) / 1000, lim, sys.rssKb(), reset() });
     flush();
 }
 

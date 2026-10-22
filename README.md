@@ -24,6 +24,10 @@ While it works you can keep typing: Enter queues the message and the model gets 
 step (to steer it), or as the next prompt if it has finished. Esc or Ctrl-C stops the turn, and
 anything you queued or typed comes back in the prompt. `/help` lists the keys.
 
+Each turn ends with one line: model, time, steps, files changed, context use and awl's own
+memory. A turn of 15 s or more that ends while the terminal is not focused rings the bell and
+sends a desktop notification (`notify-send`).
+
 A paste or dictation taller than the screen is shown as a window around the cursor; Ctrl-O
 prints all of it so you can scroll up and read it, and sending prints it once. At an empty
 prompt Ctrl-O (or `/expand`) prints the last tool output in full. `/copy` puts the last reply on

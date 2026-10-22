@@ -35,7 +35,7 @@ fn setMode(signals: bool) void {
 pub fn restore() void {
     if (!have_orig) return;
     _ = linux.ioctl(sys.stdin, linux.T.CSETSW, @intFromPtr(&orig));
-    out("\x1b[?2004l\x1b[0m");
+    out("\x1b[?2004l\x1b[?1004l\x1b[0m");
 }
 
 fn out(s: []const u8) void {
@@ -46,7 +46,7 @@ pub fn repl() u8 {
     if (!sys.isatty(sys.stdin) or !sys.isatty(sys.stdout)) return plain();
     have_orig = linux.errno(linux.ioctl(sys.stdin, linux.T.CGETS, @intFromPtr(&orig))) == .SUCCESS;
     defer restore();
-    out("\x1b[?2004h"); // bracketed paste
+    out("\x1b[?2004h\x1b[?1004h"); // bracketed paste; focus in/out reports
     var cb: [4096]u8 = undefined;
     const rc = linux.getcwd(&cb, cb.len);
     var dir: []const u8 = if (linux.errno(rc) == .SUCCESS) std.mem.sliceTo(&cb, 0) else ".";
@@ -95,14 +95,18 @@ fn runAgent(ed: *Editor) void {
         ui.queued = 0;
         ui.held = "";
     }
+    var o: agent.Outcome = .done;
+    var secs: f64 = 0;
     while (true) {
-        const o = agent.run();
+        o = agent.run();
+        secs += agent.run_secs;
         pump();
         if (o != .done or q_count == 0) break;
         const t = takeQueued().?;
         ui.userEcho(t);
         agent.user(t);
     }
+    if (!focused and secs >= 15 and o != .cancelled) notify(o, secs);
     // Interrupted: nothing auto-sends; queued text and the draft go back to the prompt.
     var n: usize = 0;
     for ([_][]const u8{ q_mem[0..q_n], if (q_n > 0 and draft_n > 0) "\n" else "", draft_mem[0..draft_n] }) |part| {
@@ -138,6 +142,33 @@ fn replayAdd(s: []const u8) void {
     const k = @min(s.len, replay.len - replay_n);
     @memcpy(replay[replay_n .. replay_n + k], s[0..k]);
     replay_n += k;
+}
+
+var focused = true; // from the terminal's focus reports (CSI I / CSI O), when it sends them
+
+/// A long turn finished while you were in another window: desktop notification
+/// (notify-send, as Omarchy's mako shows them), and a bell for the terminal's urgency hint.
+fn notify(o: agent.Outcome, secs: f64) void {
+    out("\x07");
+    var mb: [160]u8 = undefined;
+    const msg = std.fmt.bufPrintZ(&mb, "{s} after {d:.0}s", .{ if (o == .done) "finished" else "stopped", secs }) catch return;
+    // fork twice: the middle child exits at once and is waited for, so no zombie is left
+    const pid = linux.fork();
+    if (pid != 0) {
+        var st: u32 = 0;
+        _ = linux.wait4(@intCast(pid), &st, 0, null);
+        return;
+    }
+    if (linux.fork() != 0) linux.exit(0);
+    const devnull = linux.open("/dev/null", .{ .ACCMODE = .RDWR }, 0);
+    _ = linux.dup2(@intCast(devnull), 0);
+    _ = linux.dup2(@intCast(devnull), 1);
+    _ = linux.dup2(@intCast(devnull), 2);
+    sys.unblockAll();
+    var env: [1024]?[*:0]const u8 = undefined;
+    const argv = [_:null]?[*:0]const u8{ "/usr/bin/notify-send", "-a", "awl", "awl", msg };
+    _ = linux.execve("/usr/bin/notify-send", &argv, sys.childEnvp(sys.envp, &env));
+    linux.exit(0);
 }
 
 // Type-ahead while the agent runs: keys are read on each tick, never blocking.
@@ -242,7 +273,9 @@ fn key(c: u8) void {
             if (c >= 0x40 and c <= 0x7e) {
                 esc = .none;
                 const s = ta_seq[0..@min(seq_n, ta_seq.len)];
-                if (std.mem.eql(u8, s, "200~")) {
+                if (std.mem.eql(u8, s, "I") or std.mem.eql(u8, s, "O")) {
+                    focused = s[0] == 'I';
+                } else if (std.mem.eql(u8, s, "200~")) {
                     ta_paste = true;
                 } else if (std.mem.eql(u8, s, "201~")) {
                     ta_paste = false;
@@ -642,6 +675,8 @@ const Editor = struct {
         else if (eq(u8, s, "H") or eq(u8, s, "1~")) self.cur = self.lineStart() //
         else if (eq(u8, s, "F") or eq(u8, s, "4~")) self.cur = self.lineEnd() //
         else if (eq(u8, s, "3~")) self.delete() //
+        else if (eq(u8, s, "I")) focused = true //
+        else if (eq(u8, s, "O")) focused = false //
         else if (eq(u8, s, "A")) self.history(-1) //
         else if (eq(u8, s, "B")) self.history(1);
     }

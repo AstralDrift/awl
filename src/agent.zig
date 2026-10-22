@@ -243,7 +243,13 @@ pub const Outcome = enum { done, cancelled, failed, max_steps };
 /// Messages the user typed while the agent worked; taken before each later step.
 pub var steer: ?*const fn () ?[]const u8 = null;
 
+/// The last run, for the summary line and notifications.
+pub var run_secs: f64 = 0;
+
 pub fn run() Outcome {
+    const run_t0 = sys.nowNs();
+    const changed0 = tools.files_changed.n;
+    defer run_secs = @as(f64, @floatFromInt(sys.nowNs() - run_t0)) / 1e9;
     var step: usize = 0;
     var forced = false; // one forced compaction per run after a "too long" rejection
     while (step < max_steps) : (step += 1) {
@@ -280,7 +286,8 @@ pub fn run() Outcome {
         pushAssistant(step);
         elide();
         if (turn.n == 0) {
-            ui.status(cfg.model, turn.completion_tokens, secs, ctx_tokens, ctx_limit);
+            _ = secs;
+            ui.status(cfg.model, @as(f64, @floatFromInt(sys.nowNs() - run_t0)) / 1e9, step + 1, tools.files_changed.n - changed0, ctx_tokens, ctx_limit);
             if (turn.length_cut) ui.note("reply cut off at the max token limit", .{});
             return .done;
         }

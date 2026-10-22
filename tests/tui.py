@@ -2,6 +2,7 @@
 """Drive the awl TUI through a pseudo-terminal against fake_sse.py.
 Usage: tui.py path/to/awl"""
 import json
+import re
 import os
 import pty
 import select
@@ -91,7 +92,8 @@ except (OSError, IndexError):
     print("skip theme check (no omarchy colors.toml)")
 send("hello\r")
 check("first reply", read_until("first answer"), buf[-300:])
-check("status line", read_until("tok/s"), buf[-300:])
+check("status line", read_until(" step"), buf[-300:])
+check("status line: model, time, steps, context", re.search(r"── fake-model · \d+\.\ds · 1 step · ctx 0\.1k · \d+ KB".encode(), buf) is not None, buf[-200:])
 
 send("again\r")
 check("second reply", read_until("second answer"), buf[-300:])
@@ -388,7 +390,7 @@ def inputs():
     os.write(f4, b"read @src/par\t")
     check("tab completes a unique @file", until(f4, "@src/parser.py "), out[0][-120:])
     os.write(f4, b"\r")
-    until(f4, "tok/s")
+    until(f4, " step")
     time.sleep(0.3)
     c = reqs()[-1]["messages"][-1]["content"]
     check("@file attached to the message", c.startswith("read @src/parser.py") and '<file path="src/parser.py">\ndef parse(s):\n    return s.split()\n</file>' in c, c[:120])
@@ -410,7 +412,7 @@ def inputs():
     time.sleep(1.1)  # session files are named by the second
     out[0] = b""
     os.write(f4, b"second chat\r")
-    until(f4, "tok/s")
+    until(f4, " step")
     time.sleep(0.3)
     out[0] = b""
     os.write(f4, b"/resume\r")
@@ -419,7 +421,7 @@ def inputs():
     check("/resume N opens it", until(f4, "resumed 4 messages"), out[0][-200:])
     out[0] = b""
     os.write(f4, b"after resume\r")
-    until(f4, "tok/s")
+    until(f4, " step")
     m = reqs()[-1]["messages"]
     check("resumed conversation continues", m[1]["content"].startswith("read @src/parser.py") and m[-1]["content"] == "after resume", [x["content"][:20] for x in m[1:]])
     # a /command typed while the model works runs after the turn instead of being sent
