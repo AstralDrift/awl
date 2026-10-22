@@ -107,6 +107,21 @@ assert f"# AGENTS.md from {sys.argv[2]}/outer\n" in sysmsg, sysmsg[-300:]
 EOF
 stop
 
+# 2d. project skills: name + description listed, body left for the model to read
+mkdir -p "$W/skp/.git" "$W/skp/sub" "$W/skp/.agents/skills/demo"
+printf -- '---\nname: demo\ndescription: >\n  Demo skill for tests.\n  Second line.\n---\nSECRET-BODY\n' >"$W/skp/.agents/skills/demo/SKILL.md"
+echo '[{"content":"ok"}]' >"$W/sk.json"
+serve "$W/sk.json"
+(cd "$W/skp/sub" && "$AWL" -p hi >/dev/null 2>&1)
+python3 - "$LOG" "$W" <<'EOF' && ok "project skills listed" || bad "project skills listed" "see above"
+import json, sys
+s = json.loads(open(sys.argv[1]).readline())["messages"][0]["content"]
+want = f"- demo: Demo skill for tests. Second line. ({sys.argv[2]}/skp/.agents/skills/demo/SKILL.md)"
+assert want in s, s[s.find("# Skills"):][:400]
+assert "SECRET-BODY" not in s
+EOF
+stop
+
 # 3. server error is reported, exit 1
 echo '[{"status":500,"content":"model exploded"}]' >"$W/err.json"
 serve "$W/err.json"

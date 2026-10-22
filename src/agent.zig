@@ -7,6 +7,7 @@ const llm = @import("llm.zig");
 const tools = @import("tools.zig");
 const ui = @import("ui.zig");
 const session = @import("session.zig");
+const skills = @import("skills.zig");
 const bufm = @import("buf.zig");
 const Buf = bufm.Buf;
 
@@ -52,7 +53,24 @@ pub fn init(cwd: []const u8) void {
     var tb: [600]u8 = undefined;
     bufm.escape(&head, std.fmt.bufPrint(&tb, "\nTools: {s}.\nWorking directory: {s}\nDate: {d}-{d:0>2}-{d:0>2}", .{ tools.names(), cwd, yd.year, md.month.numeric(), md.day_index + 1 }) catch "");
     addAgentsMd(cwd);
+    var hb: [1024]u8 = undefined;
+    var rb: [1024]u8 = undefined;
+    const user_dir = if (sys.getenv("HOME")) |h| (std.fmt.bufPrint(&hb, "{s}/.agents/skills", .{h}) catch "") else "";
+    const proj_dir = std.fmt.bufPrint(&rb, "{s}/.agents/skills", .{projectRoot(cwd)}) catch "";
+    skills.add(&head, if (std.mem.eql(u8, user_dir, proj_dir)) &.{user_dir} else &.{ proj_dir, user_dir });
     head.add("\"}");
+}
+
+/// The git root containing `cwd`, or `cwd` itself outside a repository.
+fn projectRoot(cwd: []const u8) []const u8 {
+    var pb: [4200]u8 = undefined;
+    var d = cwd;
+    while (true) {
+        if (sys.exists(std.fmt.bufPrint(&pb, "{s}/.git", .{d}) catch return cwd)) return d;
+        const i = std.mem.lastIndexOfScalar(u8, d, '/') orelse return cwd;
+        if (i == 0) return cwd;
+        d = d[0..i];
+    }
 }
 
 /// AGENTS.md from the cwd and every parent directory up to /, outermost first,

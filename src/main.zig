@@ -144,5 +144,6 @@ test {
     _ = @import("http.zig");
     _ = @import("llm.zig");
     _ = @import("sys.zig");
+    _ = @import("skills.zig");
     _ = @import("tools.zig");
 }
