@@ -66,3 +66,18 @@ class MiniSweAgentFixed(MiniSweAgent):
     async def exec_as_agent(self, environment, command, *a, **kw):
         command = command.replace("--with litellm ", "--with litellm --with mcp ")
         return await super().exec_as_agent(environment, command, *a, **kw)
+
+
+from harbor.agents.installed.hermes import Hermes  # noqa: E402
+
+
+class HermesFixed(Hermes):
+    """Harbor's Hermes adapter, for Hermes builds without the `hermes version` command
+    (2026-10: "'version' is not a `hermes` command")."""
+
+    def get_version_command(self) -> str | None:
+        return 'export PATH="$HOME/.local/bin:$PATH"; hermes --version 2>/dev/null || echo unknown'
+
+    async def exec_as_agent(self, environment, command, *a, **kw):
+        command = command.replace("&& hermes version", "&& (hermes --version || hermes --help >/dev/null)")
+        return await super().exec_as_agent(environment, command, *a, **kw)

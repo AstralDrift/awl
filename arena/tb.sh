@@ -1,7 +1,7 @@
 #!/bin/bash
 # Terminal-Bench 2.0 through Harbor, on the Local AI model.
 #
-#   arena/tb.sh AGENT [harbor run args...]    AGENT: awl | terminus-2 | mini-swe-agent | pi
+#   arena/tb.sh AGENT [harbor run args...]    AGENT: awl | terminus-2 | mini-swe-agent | pi | opencode | hermes
 #   e.g. arena/tb.sh awl -i fix-git           one task
 #        arena/tb.sh awl $(arena/tb.sh --subset)
 #
@@ -12,7 +12,9 @@
 #   on every request so all agents run the model the same way.
 # - Task containers join that network through a compose overlay (ufw blocks container ->
 #   host); terminus-2 runs on the host and uses the proxy's 127.0.0.1 port.
-# - TB_N: concurrent trials (default 2; one GPU). TB_TASKS: task directory (default 2.0;
+# - TB_N: concurrent trials (default 2; one GPU). Keep the total across agents run at once
+#   under ~25: each trial gets its own Docker network and the default address pools run out
+#   ("all predefined address pools have been fully subnetted"). TB_TASKS: task directory (default 2.0;
 #   2.1 is results/tb/tb21/terminal-bench-2-1 via harbor dataset download terminal-bench/terminal-bench-2-1).
 # - TB_UPSTREAM=openrouter: same, on OpenRouter instead of the local GPU (key in
 #   ~/.local/state/awl-arena/openrouter.key). TB_MODEL (default deepseek/deepseek-v4.1-flash-1017),
@@ -79,6 +81,12 @@ mini-swe-agent)
 pi)
   export OPENAI_BASE_URL=$CBASE/v1
   ARGS+=(-a pi -m "openai/$MODEL" --ak model_api=openai-completions) ;;
+opencode)
+  export OPENAI_BASE_URL=$CBASE/v1
+  ARGS+=(-a opencode -m "openai/$MODEL") ;;
+hermes)
+  export OPENAI_BASE_URL=$CBASE/v1 PYTHONPATH=$REPO
+  ARGS+=(-a arena.harbor.awl_agent:HermesFixed -m "openai/$MODEL") ;;
 *) echo "tb: unknown agent $AGENT"; exit 2 ;;
 esac
 exec harbor run "${ARGS[@]}" "$@" </dev/null

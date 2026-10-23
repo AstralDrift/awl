@@ -1,18 +1,61 @@
 # awl
 
-A bare-metal coding-agent harness and inline TUI for Omarchy Linux. Written in Zig, static, no libc:
-a ~230 KB binary that idles at ~0.3 MB and peaks under 1 MB over a 50-turn session.
-It talks to the Omarchy Local AI gateway (`127.0.0.1:12434`) and gives the model seven tools:
-read, write, edit (one change or an `edits` list, all or nothing), bash, todo (a checklist that
-survives context trimming), grep (ripgrep) and find (fd).
+A coding agent for the terminal, built to beat the popular ones on results, speed and cost with
+the smallest possible footprint. One static Zig binary (no libc, no runtime, ~230 KB) that talks
+to any OpenAI-compatible server: Omarchy Local AI on your GPU, or OpenRouter in the cloud.
 
-Spec and build order: [PLAN.md](PLAN.md). Sibling project for macOS: `nib`.
+The model gets seven tools: read, write, edit (one change or an `edits` list, all or nothing),
+bash (with background jobs), todo (a checklist that survives context trimming), grep (ripgrep)
+and find (fd). Everything else is a lean loop that keeps the prompt small.
+
+## Results
+
+**Terminal-Bench 2.0**, 20-task subset (4 easy, 16 medium, 15-minute limits), every agent on the
+same model, tasks and settings, run through [Harbor](https://github.com/harbor-framework/harbor):
+
+<!-- results:tb -->
+**Cloud: DeepSeek V4.1 Flash** (OpenRouter, Relace provider, medium reasoning, 10 tasks at a time):
+
+| Agent | Solved | Median time per task | Cost of the 20 tasks | Requests |
+|---|---|---|---|---|
+| **awl** | **17 / 20** | **83 s** | $0.47 | 571 |
+| pi | 15 / 20 | 104 s | **$0.16** | 273 |
+| opencode | 15 / 20 | 93 s | $0.55 | 408 |
+
+**Local: Qwen3.8-27B** (EXL3 on one RTX 4090, 2 tasks at a time):
+
+| Agent | Solved | Tokens per task | Finished but wrong |
+|---|---|---|---|
+| **awl** | **12 / 20** | 182K | **2** |
+| pi | 11 / 20 | 363K | 3 |
+| mini-swe-agent | 10 / 20 | 273K | 5 |
+| Terminus 2 (Terminal-Bench's reference agent) | 9 / 20 | 162K | 8 |
+<!-- /results:tb -->
+
+awl solved the most tasks on both models and was fastest per task in the cloud. It also works
+longer per task: on DeepSeek it made twice pi's requests and cost about 3x as much (still under
+$0.50 for all 20 tasks). Each table is one run of 20 tasks, so a gap of one or two tasks is within
+noise. Method, per-task tables and every run are in [arena/LOG.md](arena/LOG.md); reproduce with
+`arena/tb.sh` (see Benchmarks below).
+
+**Footprint**, measured on the same machine:
+
+| | awl | pi |
+|---|---|---|
+| Install | **234 KB**, one static file | 107 MB binary |
+| Startup (`--version`) | **0.2 ms** | 205 ms |
+| Memory of the harness process | **~0.3 MB** idle, < 1 MB peak over 50 turns | ~135-155 MB |
+| Prompt per request (Terminal-Bench, local Qwen) | **8.9K tokens** | 17.5K tokens |
+
+## Quick start
 
     mise install          # pins Zig 0.16.0
     zig build -Doptimize=ReleaseSmall
-    ./zig-out/bin/awl     # TUI
+    ./zig-out/bin/awl     # TUI, on the Local AI model
     ./zig-out/bin/awl -p "fix the failing test"
     arena/awl-or.sh       # same, on an OpenRouter model (key in ~/.local/state/awl-arena/openrouter.key)
+
+Spec and history: [PLAN.md](PLAN.md). Sibling project for macOS: `nib`.
 
 ## The TUI
 
@@ -111,18 +154,19 @@ ghostty, alacritty, and over ssh).
 ### Terminal-Bench 2.0 (Harbor)
 
     harbor dataset download terminal-bench@2.0 -o arena/results/tb/tb2   # once
-    arena/tb.sh awl $(arena/tb.sh --subset)       # 20-task subset; also terminus-2, mini-swe-agent, pi
+    export TB_UPSTREAM=openrouter TB_PROVIDER=relace TB_N=10 TB_BUDGET=2  # cloud: fast, no GPU
+    arena/tb.sh awl $(arena/tb.sh --subset)       # the 20-task subset
     arena/tb.sh awl -i fix-git                    # one task
-    TB_UPSTREAM=openrouter TB_N=4 arena/tb.sh awl $(arena/tb.sh --subset)   # on OpenRouter (fast)
     python3 arena/tb_report.py                    # per-task table, tokens, time
 
-`arena/harbor/awl_agent.py` is the Harbor adapter: it uploads the static binary into each task
-container. All agents reach the Local AI model through one proxy container on the gateway's Docker
-network, which adds the key and sets `reasoning_effort=medium` for everyone. With
-`TB_UPSTREAM=openrouter` the same proxy talks to OpenRouter (default model
-`deepseek/deepseek-v4.1-flash-1017`, `TB_PROVIDER` pins a provider, `TB_BUDGET` caps spend in USD). First run on local
-Qwen3.8-27B (2026-10-23, 20 tasks, 15-minute limits): awl 12/20, pi 11, mini-swe-agent 10,
-Terminus 2 9; awl used about half of pi's tokens per task. Details in `arena/LOG.md`.
+Agents: `awl`, `pi`, `opencode`, `terminus-2`, `mini-swe-agent`, `hermes`. `arena/harbor/awl_agent.py`
+holds awl's Harbor adapter (it uploads the static binary into each task container) and fixes for
+Harbor's mini-swe-agent and Hermes installs. Every agent reaches the model through one proxy
+container (`arena/proxy.py`) that adds the key, logs tokens and cost per agent, sets the same
+`reasoning_effort` for all (`TB_REASONING`, default `medium`), pins one provider (`TB_PROVIDER`)
+and refuses requests past `TB_BUDGET` dollars. Without `TB_UPSTREAM` it uses the Local AI model.
+`TB_MODEL` picks the model (default `deepseek/deepseek-v4.1-flash-1017`), `TB_TASKS` the task set
+(for example Terminal-Bench 2.1). Task containers get no AGENTS.md, so every agent starts equal.
 
 ### Arena (head-to-head against pi, omp, grok on our own tasks)
 
