@@ -111,38 +111,49 @@ pub fn projectRoot(cwd: []const u8) []const u8 {
     }
 }
 
-/// AGENTS.md from the cwd and every parent directory up to /, outermost first,
-/// so the nearest file comes last and wins conflicts. At most 24 KB in total.
+/// AGENTS.md files, outermost first so the nearest comes last and wins conflicts:
+/// the user's own file ($XDG_CONFIG_HOME/awl/AGENTS.md, else ~/.config/awl/AGENTS.md),
+/// then the git root down to the cwd (outside a repository, the cwd only). Nothing
+/// above the repository: a parent folder's rules belong to other projects or tools.
+/// AWL_AGENTS=off loads none. At most 24 KB in total.
 fn addAgentsMd(cwd: []const u8) void {
+    if (sys.getenv("AWL_AGENTS")) |v| if (std.mem.eql(u8, v, "off")) return;
+    var used: usize = 0;
+    var cb: [4200]u8 = undefined;
+    const cfg_dir = if (sys.getenv("XDG_CONFIG_HOME")) |x| std.fmt.bufPrint(&cb, "{s}/awl", .{x}) catch null else if (sys.getenv("HOME")) |h| std.fmt.bufPrint(&cb, "{s}/.config/awl", .{h}) catch null else null;
+    if (cfg_dir) |d| addAgentsFile(d, &used);
+    const root = projectRoot(cwd);
     var ends: [64]usize = undefined; // cwd[0..ends[i]] are the directories, innermost first
     var n: usize = 0;
     var d = cwd;
     while (n < ends.len) {
         ends[n] = d.len;
         n += 1;
+        if (d.len <= root.len) break;
         const i = std.mem.lastIndexOfScalar(u8, d, '/') orelse break;
-        if (d.len == 1) break; // "/"
         d = if (i == 0) cwd[0..1] else d[0..i];
     }
-    var fb: [32768]u8 = undefined;
-    var pb: [4200]u8 = undefined;
-    var used: usize = 0;
     var k = n;
     while (k > 0) {
         k -= 1;
-        const dir = cwd[0..ends[k]];
-        const sep: []const u8 = if (dir.len > 0 and dir[dir.len - 1] == '/') "" else "/";
-        const t = sys.readFile(std.fmt.bufPrint(&pb, "{s}{s}AGENTS.md", .{ dir, sep }) catch continue, &fb) catch continue;
-        var hb: [4300]u8 = undefined;
-        if (used + t.len > 24 * 1024) {
-            bufm.escape(&head, std.fmt.bufPrint(&hb, "\n\n# {s}{s}AGENTS.md skipped (over the 24 KB AGENTS.md budget)\n", .{ dir, sep }) catch "");
-            continue;
-        }
-        used += t.len;
-        n_agents_md += 1;
-        bufm.escape(&head, std.fmt.bufPrint(&hb, "\n\n# AGENTS.md from {s}\n", .{dir}) catch "\n\n# AGENTS.md\n");
-        bufm.escape(&head, t);
+        addAgentsFile(cwd[0..ends[k]], &used);
     }
+}
+
+fn addAgentsFile(dir: []const u8, used: *usize) void {
+    var fb: [32768]u8 = undefined;
+    var pb: [4200]u8 = undefined;
+    const sep: []const u8 = if (dir.len > 0 and dir[dir.len - 1] == '/') "" else "/";
+    const t = sys.readFile(std.fmt.bufPrint(&pb, "{s}{s}AGENTS.md", .{ dir, sep }) catch return, &fb) catch return;
+    var hb: [4300]u8 = undefined;
+    if (used.* + t.len > 24 * 1024) {
+        bufm.escape(&head, std.fmt.bufPrint(&hb, "\n\n# {s}{s}AGENTS.md skipped (over the 24 KB AGENTS.md budget)\n", .{ dir, sep }) catch "");
+        return;
+    }
+    used.* += t.len;
+    n_agents_md += 1;
+    bufm.escape(&head, std.fmt.bufPrint(&hb, "\n\n# AGENTS.md from {s}\n", .{dir}) catch "\n\n# AGENTS.md\n");
+    bufm.escape(&head, t);
 }
 
 pub fn resume_(path: []const u8) !usize {

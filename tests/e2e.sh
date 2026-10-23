@@ -7,7 +7,8 @@ W=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$W"' EXIT
 export XDG_STATE_HOME=$W/state
 # The caller's awl settings must not leak in (e.g. running inside an awl session).
-unset AWL_URL AWL_MODEL AWL_KEY AWL_SYSTEM AWL_MAX_STEPS AWL_RSS
+unset AWL_URL AWL_MODEL AWL_KEY AWL_SYSTEM AWL_MAX_STEPS AWL_RSS AWL_AGENTS
+export XDG_CONFIG_HOME=/nonexistent
 pass=0
 fail=0
 ok() { echo "ok   $1"; pass=$((pass + 1)); }
@@ -91,20 +92,42 @@ assert "PATH=" in tool["content"], tool["content"]
 EOF
 stop
 
-# 2c. AGENTS.md from every parent directory, outermost first (nearest wins conflicts)
-mkdir -p "$W/outer/inner"
-echo "OUTER-RULE" >"$W/outer/AGENTS.md"
-echo "INNER-RULE" >"$W/outer/inner/AGENTS.md"
+# 2c. AGENTS.md: the user's file, then the git root down to the cwd (outermost first,
+# nearest wins conflicts); nothing above the repository; outside one, the cwd only
+mkdir -p "$W/above/outer/.git" "$W/above/outer/inner" "$W/cfg/awl" "$W/loose/sub"
+echo "ABOVE-RULE" >"$W/above/AGENTS.md"
+echo "OUTER-RULE" >"$W/above/outer/AGENTS.md"
+echo "INNER-RULE" >"$W/above/outer/inner/AGENTS.md"
+echo "GLOBAL-RULE" >"$W/cfg/awl/AGENTS.md"
+echo "LOOSE-PARENT" >"$W/loose/AGENTS.md"
+echo "LOOSE-HERE" >"$W/loose/sub/AGENTS.md"
+sysmsg() { python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["messages"][0]["content"])' "$LOG"; }
 echo '[{"content":"ok"}]' >"$W/ag.json"
 serve "$W/ag.json"
-(cd "$W/outer/inner" && "$AWL" -p hi >/dev/null 2>&1)
-python3 - "$LOG" "$W" <<'EOF' && ok "AGENTS.md from parents, outer first" || bad "AGENTS.md from parents" "see above"
-import json, sys
-sysmsg = json.loads(open(sys.argv[1]).readline())["messages"][0]["content"]
-o, i = sysmsg.find("OUTER-RULE"), sysmsg.find("INNER-RULE")
-assert 0 < o < i, (o, i, sysmsg[-300:])
-assert f"# AGENTS.md from {sys.argv[2]}/outer\n" in sysmsg, sysmsg[-300:]
-EOF
+(cd "$W/above/outer/inner" && XDG_CONFIG_HOME=$W/cfg "$AWL" -p hi >/dev/null 2>&1)
+python3 - "$(sysmsg)" "$W" <<'EOF2' && ok "AGENTS.md: user file, then git root to cwd, nothing above the repo" || bad "AGENTS.md in a repo" "see above"
+import sys
+m = sys.argv[1]
+g, o, i = m.find("GLOBAL-RULE"), m.find("OUTER-RULE"), m.find("INNER-RULE")
+assert 0 < g < o < i, (g, o, i, m[-400:])
+assert "ABOVE-RULE" not in m, m[-400:]
+assert f"# AGENTS.md from {sys.argv[2]}/above/outer\n" in m, m[-400:]
+EOF2
+stop
+serve "$W/ag.json"
+(cd "$W/loose/sub" && XDG_CONFIG_HOME=$W/none "$AWL" -p hi >/dev/null 2>&1)
+python3 - "$(sysmsg)" <<'EOF2' && ok "AGENTS.md outside a repo: the cwd only" || bad "AGENTS.md outside a repo" "see above"
+import sys
+m = sys.argv[1]
+assert "LOOSE-HERE" in m and "LOOSE-PARENT" not in m, m[-300:]
+EOF2
+stop
+serve "$W/ag.json"
+(cd "$W/above/outer/inner" && XDG_CONFIG_HOME=$W/cfg AWL_AGENTS=off "$AWL" -p hi >/dev/null 2>&1)
+python3 - "$(sysmsg)" <<'EOF2' && ok "AWL_AGENTS=off loads none" || bad "AWL_AGENTS=off" "see above"
+import sys
+assert "-RULE" not in sys.argv[1], sys.argv[1][-300:]
+EOF2
 stop
 
 # 2d. project skills: name + description listed, body left for the model to read

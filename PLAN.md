@@ -108,8 +108,9 @@ Still open: an Omarchy Local AI agent entry (`local-ai/agents/awl`) and MCP.
 The v1 build order is done. From here the arena decides. The model is "Arch Linux for agents":
 a minimal base that gets real work done and is easy to build on.
 
-**North star:** on arena T2 with Qwen3.8-27B, awl's pass rate is at least the best of
-pi / omp / grok, with the fewest prompt tokens and the smallest footprint.
+**North star (updated 2026-10-23):** beat pi: more tasks solved, faster, on more models
+(Terminal-Bench and our arena are the scoreboard). Lines of code do not matter. Stay minimal
+where it counts: tokens per request, memory, startup, dependencies, things the user must learn.
 
 **Footprint goals (soft, not caps):** binary < 256 KB, idle RSS < 1 MB, peak < 4 MB over
 50 turns, startup < 1 ms. A feature that wins tasks may spend some of this; one that does

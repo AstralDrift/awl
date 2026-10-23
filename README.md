@@ -71,7 +71,9 @@ ghostty, alacritty, and over ssh).
 
 ## What it loads
 
-- `AGENTS.md` from the working directory and every parent up to `/`, outermost first (24 KB cap).
+- `AGENTS.md`: your own `~/.config/awl/AGENTS.md` (or `$XDG_CONFIG_HOME/awl/`), then the git root
+  down to the working directory, outermost first so the nearest wins (24 KB cap). Nothing above the
+  repository; outside one, only the working directory's file. `AWL_AGENTS=off` loads none.
 - Skills in the Agent Skills format from `~/.agents/skills/` and `<project>/.agents/skills/`:
   only each skill's name and description go in the prompt; the model reads a `SKILL.md` when a task
   matches. This repo's `skills/` holds three single-agent playbooks (bug fix, feature, refactor)
@@ -97,6 +99,7 @@ ghostty, alacritty, and over ssh).
 | `AWL_REASONING` | `medium` | `reasoning_effort` to send (`low`, `medium`, `xhigh`, ...; `off` sends none). Local AI's Qwen defaults to xhigh, about twice the tokens per turn; dropped automatically if a server rejects it |
 | `AWL_MAX_TOKENS` | `16384` | output cap per reply (`max_tokens`, as pi sends; `0` sends none). A reply cut off before any tool call gets a note asking the model to continue |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |
+| `AWL_AGENTS` | on | `off` loads no AGENTS.md files (clean evals and benchmarks) |
 | `AWL_MODE` | `auto` | `auto`, `ask` (approve commands and edits) or `plan` (read-only) |
 | `AWL_STATUS` | `model,ctx,mode,branch` | items of the status line under the prompt, in order: `model`, `ctx`, `mode`, `branch`, `dir`, `session`; `off` hides it |
 | `AWL_WELCOME` | on | `off` shrinks the startup screen to one line |
