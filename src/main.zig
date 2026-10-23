@@ -174,4 +174,6 @@ test {
     _ = @import("session.zig");
     _ = @import("tui.zig");
     _ = @import("screen.zig");
+    _ = @import("agent.zig");
+    _ = @import("ui.zig");
 }

@@ -12,7 +12,8 @@
 #   on every request so all agents run the model the same way.
 # - Task containers join that network through a compose overlay (ufw blocks container ->
 #   host); terminus-2 runs on the host and uses the proxy's 127.0.0.1 port.
-# - TB_N: concurrent trials (default 2; one GPU).
+# - TB_N: concurrent trials (default 2; one GPU). TB_TASKS: task directory (default 2.0;
+#   2.1 is results/tb/tb21/terminal-bench-2-1 via harbor dataset download terminal-bench/terminal-bench-2-1).
 # - TB_UPSTREAM=openrouter: same, on OpenRouter instead of the local GPU (key in
 #   ~/.local/state/awl-arena/openrouter.key). TB_MODEL (default deepseek/deepseek-v4.1-flash-1017),
 #   TB_PROVIDER (pin one provider), TB_BUDGET (USD, default 2: the proxy refuses requests past it).
@@ -59,7 +60,7 @@ sed "s/@NET@/$NET/" "$HERE/harbor/gateway-net.yaml.in" >"$OVERLAY"
 CBASE=http://$PIP:$PORT/run/$RUN # as seen from task containers
 HBASE=http://127.0.0.1:$PORT/run/$RUN # as seen from the host
 export OPENAI_API_KEY=local
-ARGS=(-p "$TB/tb2/terminal-bench" -o "$TB/jobs" --job-name "$RUN-$(date +%m%d-%H%M%S)" -n "${TB_N:-2}" -y
+ARGS=(-p "${TB_TASKS:-$TB/tb2/terminal-bench}" -o "$TB/jobs" --job-name "$RUN-$(date +%m%d-%H%M%S)" -n "${TB_N:-2}" -y
   --extra-docker-compose "$OVERLAY")
 Z=$(cd "$REPO" && mise where zig) && export PATH="$Z:$PATH"
 case $AGENT in
