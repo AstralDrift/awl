@@ -238,9 +238,10 @@ class H(BaseHTTPRequestHandler):
         self.close_connection = True
         if path.endswith("/models"):
             return
+        calls = meter.finish()  # first: a plain JSON reply's usage is read here
         rec = {"t0": t0, "model_s": round(time.time() - t0, 3), "path": path, "status": status,
                "bytes_sent": len(body), "prompt_tokens": meter.prompt, "completion_tokens": meter.completion,
-               "cached_tokens": meter.cached, "tool_calls": meter.finish(), "cost": meter.cost, "retries": retries, "provider": meter.provider,
+               "cached_tokens": meter.cached, "tool_calls": calls, "cost": meter.cost, "retries": retries, "provider": meter.provider,
                "reasoning_chars": sum(map(len, meter.think)), "content_chars": meter.content_chars}
         with lock:
             with open(os.path.join(OUT, f"{run}.jsonl"), "a") as f:
