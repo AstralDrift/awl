@@ -98,7 +98,8 @@ I commit after each green phase (the commit message carries the measured size, R
 - Comparative: arena T2 across awl, pi, omp, and grok, reporting success rate, turns, prompt tokens, wall time, and harness RSS.
 
 ## Later
-Compaction, a bash permission gate, an Omarchy theme-set hook, an Omarchy Local AI agent entry (`local-ai/agents/awl`), a `/model` switch, and MCP.
+Done since v1: compaction, a permission gate (`AWL_MODE=ask`), the live Omarchy theme, and `/model`.
+Still open: an Omarchy Local AI agent entry (`local-ai/agents/awl`) and MCP.
 
 ---
 
@@ -124,3 +125,8 @@ record the line in `arena/LOG.md` → keep or revert.
 3. Replies start flush: drop leading blank lines from the model (done).
 4. Tool-error hints that steer a small model back on track (edit near-miss: show the closest line).
 5. Anything the T1/T2 failure logs point at.
+
+Items 1-4 are done (2026-10-22). **External yardstick (2026-10-23):** Terminal-Bench 2.0
+through Harbor (`arena/tb.sh`), 20-task subset, against Terminus 2, mini-swe-agent and pi
+on the same model and settings. Failure logs from it feed this backlog (first find: replies
+need an output cap, `AWL_MAX_TOKENS`).
