@@ -1,0 +1,9 @@
+# Harbor compose overlay: also attach the task container to the Local AI gateway's
+# network, where the measuring proxy runs (ufw blocks containers from the host).
+services:
+  main:
+    networks: [default, gw]
+networks:
+  gw:
+    external: true
+    name: @NET@

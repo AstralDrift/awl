@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory() as w:
     script = os.path.join(w, "s.json")
     json.dump([{"status": 429, "content": "slow down"},
                {"reasoning": "hmm", "content": "ok there", "usage": {"prompt_tokens": 50, "completion_tokens": 5, "cost": 0.0012}},
-               {"content": "awl ok"}], open(script, "w"))
+               {"content": "awl ok"}, {"content": "r ok"}], open(script, "w"))
     keyf = os.path.join(w, "k")
     open(keyf, "w").write("sk-test\n")
     log, out = os.path.join(w, "up.jsonl"), os.path.join(w, "proxy")
@@ -75,6 +75,18 @@ with tempfile.TemporaryDirectory() as w:
         check("awl end to end through hosted proxy", r.returncode == 0 and r.stdout.strip() == "awl ok", r.stdout + r.stderr)
         sysmsg = [json.loads(l) for l in open(log)][-1]["messages"][0]["content"]
         check("sandbox outside any repo: no AGENTS.md in awl's system prompt", "AGENTS.md" not in sysmsg, sysmsg[-300:])
+
+        p2, port2 = start([sys.executable, os.path.join(ROOT, "proxy.py"), "--upstream", f"http://127.0.0.1:{fport}",
+                           "--out", out, "--key-file", keyf, "--model", "m", "--ctx", "9", "--reasoning", "low"])
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port2}/v1/chat/completions", json.dumps(
+                {"model": "m", "reasoning": {"effort": "high"}, "messages": [{"role": "user", "content": "x"}]}).encode(),
+                {"Content-Type": "application/json"})
+            urllib.request.urlopen(req).read()
+            u = [json.loads(l) for l in open(log)][-1]
+            check("--reasoning sets one effort for every request", u.get("reasoning_effort") == "low" and "reasoning" not in u, u)
+        finally:
+            p2.kill()
     finally:
         proxy.kill()
         fake.kill()

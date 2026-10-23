@@ -17,6 +17,10 @@ the real key, answers /v1/models itself (just --model, max_model_len = --ctx), d
 reasoning_effort/reasoning/include_reasoning so every harness gets the model's default
 (--keep-reasoning-params to keep them), pins --provider, and retries 429/502/503
 before any byte reaches the harness, so rate limits never count against one harness.
+
+--reasoning LEVEL sets reasoning_effort=LEVEL on every chat request (after the drop
+above), so every harness runs the model at the same effort. --host ADDR binds there
+instead of 127.0.0.1 (e.g. 0.0.0.0 inside a container on the gateway's network).
 """
 import http.client
 import json
@@ -28,7 +32,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 opt = {"--upstream": "http://127.0.0.1:12434", "--out": "arena/results/proxy", "--port": "0",
-       "--key-file": "", "--model": "", "--ctx": "0", "--provider": ""}
+       "--key-file": "", "--model": "", "--ctx": "0", "--provider": "",
+       "--reasoning": "", "--host": "127.0.0.1"}
 FLAGS = {"--keep-reasoning-params"}
 a = sys.argv[1:]
 i = 0
@@ -150,6 +155,10 @@ class H(BaseHTTPRequestHandler):
             if opt["--provider"]:
                 # comma list = ordered set of allowed providers, nothing else
                 req["provider"] = {"order": opt["--provider"].split(","), "allow_fallbacks": False}
+        if opt["--reasoning"]:
+            for k in ("reasoning_effort", "reasoning", "include_reasoning"):
+                req.pop(k, None)
+            req["reasoning_effort"] = opt["--reasoning"]
         return req
 
     def forward(self):
@@ -243,7 +252,7 @@ class H(BaseHTTPRequestHandler):
                 f.write(f"=== turn ({meter.completion} tok)\n" + "".join(meter.think) + "\n")
 
 
-srv = ThreadingHTTPServer(("127.0.0.1", int(opt["--port"])), H)
+srv = ThreadingHTTPServer((opt["--host"], int(opt["--port"])), H)
 srv.daemon_threads = True
 print(srv.server_address[1], flush=True)
 srv.serve_forever()
