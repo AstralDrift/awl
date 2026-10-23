@@ -1,0 +1,1 @@
+How does awl keep a long session inside the model's context window? Explain when old tool output gets trimmed, when compaction runs, what a compaction keeps, and what happens when the server doesn't report a context size. Cite file:line for each point. This is a question: don't change any files.

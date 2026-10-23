@@ -126,14 +126,17 @@ pub fn scrollBy(rows: isize) void {
 /// One screen row of a line: bytes [a, b) and the last color set before a.
 const Row = struct { a: usize, b: usize, sgr: []const u8 };
 
-/// Split `l` into rows of at most `w` columns. Escape sequences take no room; a UTF-8
-/// sequence takes one column.
+/// Split `l` into rows of at most `w` columns, after a space where the row has one.
+/// Escape sequences take no room; a UTF-8 sequence takes one column.
 fn wrap(l: []const u8, w: usize, out: []Row) []Row {
     var n: usize = 0;
     var a: usize = 0;
     var cols: usize = 0;
     var sgr: []const u8 = "";
     var row_sgr: []const u8 = "";
+    var sp: usize = 0; // just after the last space seen, its column, and the color there
+    var sp_cols: usize = 0;
+    var sp_sgr: []const u8 = "";
     var i: usize = 0;
     while (i < l.len) {
         if (l[i] == 27) { // CSI ... m
@@ -147,14 +150,26 @@ fn wrap(l: []const u8, w: usize, out: []Row) []Row {
         const k = @min(std.unicode.utf8ByteSequenceLength(l[i]) catch 1, l.len - i);
         if (cols == w) {
             if (n == out.len) return out[0..n];
-            out[n] = .{ .a = a, .b = i, .sgr = row_sgr };
+            if (sp > a) { // break after the row's last space, so words stay whole
+                out[n] = .{ .a = a, .b = sp, .sgr = row_sgr };
+                a = sp;
+                row_sgr = sp_sgr;
+                cols -= sp_cols;
+            } else {
+                out[n] = .{ .a = a, .b = i, .sgr = row_sgr };
+                a = i;
+                row_sgr = sgr;
+                cols = 0;
+            }
             n += 1;
-            a = i;
-            row_sgr = sgr;
-            cols = 0;
         }
         i += k;
         cols += 1;
+        if (l[i - k] == ' ') { // a row may break after this
+            sp = i;
+            sp_cols = cols;
+            sp_sgr = sgr;
+        }
     }
     if (n < out.len) {
         out[n] = .{ .a = a, .b = l.len, .sgr = row_sgr };
@@ -292,4 +307,15 @@ test "new lines while scrolled up keep the view; OSC ended by ESC backslash" {
     feed("x\x1b]0;title\x1b\\y\n");
     try tt.expectEqualStrings("xy", line(lineCount() - 2));
     reset();
+}
+
+test "wrap: breaks after a space when the row has one, carrying colors" {
+    var wr: [8]Row = undefined;
+    const l = "hello \x1b[31mworld foo";
+    const rs = wrap(l, 8, &wr);
+    try tt.expectEqual(@as(usize, 3), rs.len);
+    try tt.expectEqualStrings("hello ", l[rs[0].a..rs[0].b]);
+    try tt.expectEqualStrings("\x1b[31mworld ", l[rs[1].a..rs[1].b]);
+    try tt.expectEqualStrings("foo", l[rs[2].a..rs[2].b]);
+    try tt.expectEqualStrings("\x1b[31m", rs[2].sgr);
 }

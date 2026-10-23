@@ -691,16 +691,44 @@ fn cut(s: []const u8, w: usize) []const u8 {
     return s[0..n];
 }
 
-/// End of a turn: model, time, steps, files changed, context use, awl's memory.
+/// The end-of-turn line: model, time, steps, files changed, context use, awl's memory.
+/// Items drop from the end until it fits `w` columns; the model and time always stay.
+fn statusLine(out: []u8, model: []const u8, secs: f64, steps: usize, changed: usize, ctx: u64, limit: u64, kb: u64, w: usize) []const u8 {
+    var ib: [4][48]u8 = undefined;
+    var lb: [16]u8 = undefined;
+    const lim = if (limit > 0) (std.fmt.bufPrint(&lb, "/{d}k", .{limit / 1000}) catch "") else "";
+    const items = [_][]const u8{
+        std.fmt.bufPrint(&ib[0], " · {d} step{s}", .{ steps, if (steps == 1) "" else "s" }) catch "",
+        if (changed > 0) (std.fmt.bufPrint(&ib[1], " · {d} file{s} changed", .{ changed, if (changed == 1) "" else "s" }) catch "") else "",
+        std.fmt.bufPrint(&ib[2], " · ctx {d:.1}k{s}", .{ @as(f64, @floatFromInt(ctx)) / 1000, lim }) catch "",
+        std.fmt.bufPrint(&ib[3], " · {d} KB", .{kb}) catch "",
+    };
+    var n = (std.fmt.bufPrint(out, "── {s} · {d:.1}s", .{ cut(model, @min(out.len / 2, 64)), secs }) catch return "").len;
+    var cols = std.unicode.utf8CountCodepoints(out[0..n]) catch n;
+    for (items) |it| {
+        const c = std.unicode.utf8CountCodepoints(it) catch it.len;
+        if (cols + c > w or n + it.len > out.len) break;
+        @memcpy(out[n .. n + it.len], it);
+        n += it.len;
+        cols += c;
+    }
+    return out[0..n];
+}
+
 pub fn status(model: []const u8, secs: f64, steps: usize, changed: usize, ctx: u64, limit: u64) void {
     if (oneshot) return;
     endMessage();
-    var lb: [32]u8 = undefined;
-    const lim = if (limit > 0) (std.fmt.bufPrint(&lb, "/{d}k", .{limit / 1000}) catch "") else "";
-    var cb: [32]u8 = undefined;
-    const ch = if (changed > 0) (std.fmt.bufPrint(&cb, " · {d} file{s} changed", .{ changed, if (changed == 1) "" else "s" }) catch "") else "";
-    print("{s}── {s} · {d:.1}s · {d} step{s}{s} · ctx {d:.1}k{s} · {d} KB{s}\n", .{ muted(), model, secs, steps, if (steps == 1) "" else "s", ch, @as(f64, @floatFromInt(ctx)) / 1000, lim, sys.rssKb(), reset() });
+    var b: [512]u8 = undefined;
+    print("{s}{s}{s}\n", .{ muted(), statusLine(&b, model, secs, steps, changed, ctx, limit, sys.rssKb(), @as(usize, sys.termCols()) -| 1), reset() });
     flush();
+}
+
+test "end-of-turn line: items drop from the end to fit" {
+    var b: [512]u8 = undefined;
+    try tt.expectEqualStrings("── m · 3.0s · 7 steps · 1 file changed · ctx 0.1k/32k · 448 KB", statusLine(&b, "m", 3.0, 7, 1, 123, 32000, 448, 80));
+    try tt.expectEqualStrings("── m · 3.0s · 7 steps · 1 file changed", statusLine(&b, "m", 3.0, 7, 1, 123, 32000, 448, 50));
+    try tt.expectEqualStrings("── m · 3.0s · 1 step · ctx 0.1k · 448 KB", statusLine(&b, "m", 3.0, 1, 0, 123, 0, 448, 40));
+    try tt.expectEqualStrings("── m · 3.0s", statusLine(&b, "m", 3.0, 7, 1, 123, 32000, 448, 12));
 }
 
 pub fn err(comptime f: []const u8, a: anytype) void {
