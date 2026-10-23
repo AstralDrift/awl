@@ -314,6 +314,23 @@ assert r[0]["reasoning_effort"] == "medium" and "reasoning_effort" not in r[1], 
 EOF2
 stop
 
+# 8c3. max_tokens sent by default; a reply cut off with no tool call gets a "continue" nudge
+echo '[{"reasoning": "hmm hmm", "finish": "length"}, {"content": "finished"}]' > "$W/cut.json"
+serve "$W/cut.json"
+out=$(cd "$W" && "$AWL" -p go 2>"$W/o")
+python3 - "$LOG" "$out" <<'EOF2' && ok "length cut -> continue; max_tokens 16384" || bad "length cut" "$out $(tail -2 "$W/o")"
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "finished", sys.argv[2]
+assert r[0]["max_tokens"] == 16384, r[0].get("max_tokens")
+assert "output token limit" in r[1]["messages"][-1]["content"], r[1]["messages"][-1]
+EOF2
+stop
+serve "$W/hi.json"
+out=$(cd "$W" && AWL_MAX_TOKENS=0 "$AWL" -p go 2>/dev/null)
+python3 -c "import json,sys; r=json.loads(open(sys.argv[1]).readline()); assert 'max_tokens' not in r" "$LOG" && ok "AWL_MAX_TOKENS=0 sends no cap" || bad "max_tokens off" "$out"
+stop
+
 # 8d. a "too long" rejection forces one compaction and the run continues (window unknown)
 python3 - "$W/c400.json" <<'EOF'
 import json, sys

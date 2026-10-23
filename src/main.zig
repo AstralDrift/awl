@@ -29,8 +29,9 @@ const usage =
     \\  -c          continue the latest session
     \\  -r FILE     resume a session file
     \\  --full      full-screen mode (also AWL_FULL=1, or /full)
-    \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MAX_STEPS AWL_SYSTEM AWL_REASONING AWL_RETRIES AWL_MODE
-    \\     AWL_STATUS (model,ctx,mode,branch,dir,session or off) AWL_WELCOME (off: one line) AWL_MODELS (Ctrl-P cycles)
+    \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MODE AWL_REASONING AWL_MAX_TOKENS AWL_MAX_STEPS
+    \\     AWL_RETRIES AWL_SYSTEM AWL_WELCOME (off: one line) AWL_MODELS (Ctrl-P cycles)
+    \\     AWL_STATUS (model,ctx,mode,branch,dir,session or off)
     \\
 ;
 

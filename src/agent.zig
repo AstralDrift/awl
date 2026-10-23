@@ -49,6 +49,11 @@ pub fn init(cwd: []const u8) void {
         head.add(",\"reasoning_effort\":");
         bufm.str(&head, effort);
     }
+    // Output cap per reply (AWL_MAX_TOKENS, 0 = none). Without one, Qwen sometimes
+    // reasons in a loop: one Terminal-Bench reply ran 69K tokens and ate a task's
+    // whole time limit. pi sends the same 16384.
+    const cap = std.fmt.parseInt(u32, sys.getenv("AWL_MAX_TOKENS") orelse "16384", 10) catch 16384;
+    if (cap > 0) head.print(",\"max_tokens\":{d}", .{cap});
     head.add(",\"tools\":[");
     tools.schema(&head);
     head.add("],\"messages\":[{\"role\":\"system\",\"content\":\"");
@@ -297,10 +302,14 @@ pub fn run() Outcome {
         ctx_tokens = turn.prompt_tokens + turn.completion_tokens;
         pushAssistant(step);
         elide();
+        if (turn.n == 0 and turn.length_cut) { // cut off mid-thought: let it go on
+            ui.note("reply cut off at the max token limit (AWL_MAX_TOKENS); asking the model to continue", .{});
+            addUser(cut_note);
+            continue;
+        }
         if (turn.n == 0) {
             _ = secs;
             ui.status(cfg.model, @as(f64, @floatFromInt(sys.nowNs() - run_t0)) / 1e9, step + 1, tools.files_changed.n - changed0, ctx_tokens, ctx_limit);
-            if (turn.length_cut) ui.note("reply cut off at the max token limit", .{});
             return .done;
         }
         for (turn.calls[0..turn.n], 0..) |*c, i| {
@@ -322,6 +331,8 @@ pub fn run() Outcome {
     ui.err("stopped after {d} steps (AWL_MAX_STEPS)", .{max_steps});
     return .max_steps;
 }
+
+const cut_note = "[Your last reply hit the output token limit before it finished. Think more briefly: make the next tool call now, or give your answer.]";
 
 pub var max_retries: u32 = 5;
 

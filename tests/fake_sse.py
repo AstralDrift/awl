@@ -43,7 +43,7 @@ def events(turn, model):
                                        "function": {"name": tc["name"], "arguments": ""}}]}))
         for i in range(0, len(a), 7):
             out.append(ev({"tool_calls": [{"index": idx, "function": {"arguments": a[i:i + 7]}}]}))
-    out.append(ev({}, "tool_calls" if turn.get("tool_calls") else "stop"))
+    out.append(ev({}, turn.get("finish") or ("tool_calls" if turn.get("tool_calls") else "stop")))
     out.append({"id": "x", "choices": [], "usage": turn.get("usage") or {"prompt_tokens": 100 + served, "completion_tokens": 10}})
     sep = b": OPENROUTER PROCESSING\n\n" if int(opt["--comments"]) else b""
     body = sep + b"".join(b"data: " + json.dumps(e).encode() + b"\n\n" + sep for e in out)
