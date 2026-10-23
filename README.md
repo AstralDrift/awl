@@ -110,11 +110,14 @@ ghostty, alacritty, and over ssh).
     harbor dataset download terminal-bench@2.0 -o arena/results/tb/tb2   # once
     arena/tb.sh awl $(arena/tb.sh --subset)       # 20-task subset; also terminus-2, mini-swe-agent, pi
     arena/tb.sh awl -i fix-git                    # one task
+    TB_UPSTREAM=openrouter TB_N=4 arena/tb.sh awl $(arena/tb.sh --subset)   # on OpenRouter (fast)
     python3 arena/tb_report.py                    # per-task table, tokens, time
 
 `arena/harbor/awl_agent.py` is the Harbor adapter: it uploads the static binary into each task
 container. All agents reach the Local AI model through one proxy container on the gateway's Docker
-network, which adds the key and sets `reasoning_effort=medium` for everyone. First run on local
+network, which adds the key and sets `reasoning_effort=medium` for everyone. With
+`TB_UPSTREAM=openrouter` the same proxy talks to OpenRouter (default model
+`deepseek/deepseek-v4.1-flash-1017`, `TB_PROVIDER` pins a provider, `TB_BUDGET` caps spend in USD). First run on local
 Qwen3.8-27B (2026-10-23, 20 tasks, 15-minute limits): awl 12/20, pi 11, mini-swe-agent 10,
 Terminus 2 9; awl used about half of pi's tokens per task. Details in `arena/LOG.md`.
 

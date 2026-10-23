@@ -13,6 +13,10 @@
 # - Task containers join that network through a compose overlay (ufw blocks container ->
 #   host); terminus-2 runs on the host and uses the proxy's 127.0.0.1 port.
 # - TB_N: concurrent trials (default 2; one GPU).
+# - TB_UPSTREAM=openrouter: same, on OpenRouter instead of the local GPU (key in
+#   ~/.local/state/awl-arena/openrouter.key). TB_MODEL (default deepseek/deepseek-v4.1-flash-1017),
+#   TB_PROVIDER (pin one provider), TB_BUDGET (USD, default 2: the proxy refuses requests past it).
+#   Jobs and proxy logs are named AGENT-or so they never mix with local runs.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(dirname "$HERE")
@@ -24,28 +28,39 @@ if [ "${1:-}" = --subset ]; then for t in $SUBSET; do printf -- '-i %s ' "$t"; d
 AGENT=$1
 shift
 TB=$HERE/results/tb
-PORT=18080
-GW=$(docker ps --format '{{.Names}}' | grep -- '-gateway$' | head -1)
-[ -n "$GW" ] || { echo "tb: no Local AI gateway container is running"; exit 2; }
-NET=$(docker inspect "$GW" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')
-KEYF=$HOME/.local/state/omarchy/local-ai/gateway.key
-read -r MODEL CTX < <(curl -s -m5 -H "Authorization: Bearer $(cat "$KEYF")" http://127.0.0.1:12434/v1/models |
-  python3 -c 'import sys,json; m=json.load(sys.stdin)["data"][0]; print(m["id"], m.get("max_model_len", 0))')
 mkdir -p "$TB/proxy" "$TB/jobs"
-if ! docker ps --format '{{.Names}}' | grep -qx awl-tbproxy; then
-  docker run -d --rm --name awl-tbproxy --network "$NET" -p 127.0.0.1:$PORT:$PORT --user "$(id -u):$(id -g)" \
+if [ "${TB_UPSTREAM:-local}" = openrouter ]; then
+  PORT=18081 PROXY=awl-tbproxy-or RUN=$AGENT-or NET=awl-tb # own network: no local model needed
+  docker network inspect $NET >/dev/null 2>&1 || docker network create $NET >/dev/null
+  KEYF=$HOME/.local/state/awl-arena/openrouter.key
+  [ -s "$KEYF" ] || { echo "tb: no OpenRouter key at $KEYF"; exit 2; }
+  MODEL=${TB_MODEL:-deepseek/deepseek-v4.1-flash-1017} CTX=${TB_CTX:-262144}
+  UPARGS=(--upstream https://openrouter.ai/api --budget "${TB_BUDGET:-2}" ${TB_PROVIDER:+--provider "$TB_PROVIDER"})
+else
+  PORT=18080 PROXY=awl-tbproxy RUN=$AGENT
+  GW=$(docker ps --format '{{.Names}}' | grep -- '-gateway$' | head -1)
+  [ -n "$GW" ] || { echo "tb: no Local AI gateway container is running"; exit 2; }
+  NET=$(docker inspect "$GW" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')
+  KEYF=$HOME/.local/state/omarchy/local-ai/gateway.key
+  read -r MODEL CTX < <(curl -s -m5 -H "Authorization: Bearer $(cat "$KEYF")" http://127.0.0.1:12434/v1/models |
+    python3 -c 'import sys,json; m=json.load(sys.stdin)["data"][0]; print(m["id"], m.get("max_model_len", 0))')
+  UPARGS=(--upstream "http://$GW:12434")
+fi
+if ! docker ps --format '{{.Names}}' | grep -qx "$PROXY"; then
+  docker run -d --rm --name "$PROXY" --network "$NET" -p 127.0.0.1:$PORT:$PORT --user "$(id -u):$(id -g)" \
     -v "$HERE/proxy.py:/proxy.py:ro" -v "$KEYF:/key:ro" -v "$TB/proxy:/out" python:3.13-alpine \
-    python3 -u /proxy.py --upstream "http://$GW:12434" --out /out --port $PORT --host 0.0.0.0 \
-    --key-file /key --model "$MODEL" --ctx "$CTX" --reasoning medium >/dev/null
+    python3 -u /proxy.py "${UPARGS[@]}" --out /out --port $PORT --host 0.0.0.0 \
+    --key-file /key --model "$MODEL" --ctx "$CTX" --reasoning "${TB_REASONING:-medium}" >/dev/null
   sleep 2
 fi
-PIP=$(docker inspect awl-tbproxy --format "{{(index .NetworkSettings.Networks \"$NET\").IPAddress}}")
-sed "s/@NET@/$NET/" "$HERE/harbor/gateway-net.yaml.in" >"$TB/gateway-net.yaml"
-CBASE=http://$PIP:$PORT/run/$AGENT # as seen from task containers
-HBASE=http://127.0.0.1:$PORT/run/$AGENT # as seen from the host
+PIP=$(docker inspect "$PROXY" --format "{{(index .NetworkSettings.Networks \"$NET\").IPAddress}}")
+OVERLAY=$TB/net-$NET.yaml
+sed "s/@NET@/$NET/" "$HERE/harbor/gateway-net.yaml.in" >"$OVERLAY"
+CBASE=http://$PIP:$PORT/run/$RUN # as seen from task containers
+HBASE=http://127.0.0.1:$PORT/run/$RUN # as seen from the host
 export OPENAI_API_KEY=local
-ARGS=(-p "$TB/tb2/terminal-bench" -o "$TB/jobs" --job-name "$AGENT-$(date +%m%d-%H%M%S)" -n "${TB_N:-2}" -y
-  --extra-docker-compose "$TB/gateway-net.yaml")
+ARGS=(-p "$TB/tb2/terminal-bench" -o "$TB/jobs" --job-name "$RUN-$(date +%m%d-%H%M%S)" -n "${TB_N:-2}" -y
+  --extra-docker-compose "$OVERLAY")
 Z=$(cd "$REPO" && mise where zig) && export PATH="$Z:$PATH"
 case $AGENT in
 awl)

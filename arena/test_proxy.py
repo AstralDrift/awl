@@ -32,7 +32,8 @@ with tempfile.TemporaryDirectory() as w:
     script = os.path.join(w, "s.json")
     json.dump([{"status": 429, "content": "slow down"},
                {"reasoning": "hmm", "content": "ok there", "usage": {"prompt_tokens": 50, "completion_tokens": 5, "cost": 0.0012}},
-               {"content": "awl ok"}, {"content": "r ok"}], open(script, "w"))
+               {"content": "awl ok"}, {"content": "r ok"},
+               {"content": "paid", "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0012}}], open(script, "w"))
     keyf = os.path.join(w, "k")
     open(keyf, "w").write("sk-test\n")
     log, out = os.path.join(w, "up.jsonl"), os.path.join(w, "proxy")
@@ -77,7 +78,8 @@ with tempfile.TemporaryDirectory() as w:
         check("sandbox outside any repo: no AGENTS.md in awl's system prompt", "AGENTS.md" not in sysmsg, sysmsg[-300:])
 
         p2, port2 = start([sys.executable, os.path.join(ROOT, "proxy.py"), "--upstream", f"http://127.0.0.1:{fport}",
-                           "--out", out, "--key-file", keyf, "--model", "m", "--ctx", "9", "--reasoning", "low"])
+                           "--out", out, "--key-file", keyf, "--model", "m", "--ctx", "9", "--reasoning", "low",
+                           "--budget", "0.001"])
         try:
             req = urllib.request.Request(f"http://127.0.0.1:{port2}/v1/chat/completions", json.dumps(
                 {"model": "m", "reasoning": {"effort": "high"}, "messages": [{"role": "user", "content": "x"}]}).encode(),
@@ -85,6 +87,13 @@ with tempfile.TemporaryDirectory() as w:
             urllib.request.urlopen(req).read()
             u = [json.loads(l) for l in open(log)][-1]
             check("--reasoning sets one effort for every request", u.get("reasoning_effort") == "low" and "reasoning" not in u, u)
+            # the script's next turn reports cost 0.0012 > budget 0.001; the one after must be refused
+            try:
+                urllib.request.urlopen(req).read()
+                urllib.request.urlopen(req).read()
+                check("--budget refuses requests once spent", False, "second request went through")
+            except urllib.error.HTTPError as e:
+                check("--budget refuses requests once spent", e.code == 402, e.code)
         finally:
             p2.kill()
     finally:

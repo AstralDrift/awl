@@ -21,6 +21,8 @@ before any byte reaches the harness, so rate limits never count against one harn
 --reasoning LEVEL sets reasoning_effort=LEVEL on every chat request (after the drop
 above), so every harness runs the model at the same effort. --host ADDR binds there
 instead of 127.0.0.1 (e.g. 0.0.0.0 inside a container on the gateway's network).
+--budget USD: once the reported cost of the requests so far reaches it, chat requests get
+HTTP 402 instead of going upstream, so a long run cannot overspend.
 """
 import http.client
 import json
@@ -33,7 +35,7 @@ from urllib.parse import urlsplit
 
 opt = {"--upstream": "http://127.0.0.1:12434", "--out": "arena/results/proxy", "--port": "0",
        "--key-file": "", "--model": "", "--ctx": "0", "--provider": "",
-       "--reasoning": "", "--host": "127.0.0.1"}
+       "--reasoning": "", "--host": "127.0.0.1", "--budget": "0"}
 FLAGS = {"--keep-reasoning-params"}
 a = sys.argv[1:]
 i = 0
@@ -54,6 +56,7 @@ RETRY = {429, 502, 503}
 OUT = opt["--out"]
 os.makedirs(OUT, exist_ok=True)
 lock = threading.Lock()
+spent = 0.0  # USD reported by the upstream, for --budget
 
 
 class Meter:
@@ -162,6 +165,7 @@ class H(BaseHTTPRequestHandler):
         return req
 
     def forward(self):
+        global spent
         run, path = "none", self.path
         parts = self.path.split("/")
         if len(parts) > 3 and parts[1] == "run":
@@ -174,6 +178,14 @@ class H(BaseHTTPRequestHandler):
                 return self.models(model, ctx)
             if HOSTED:
                 return self.models()
+        if path.endswith("/chat/completions") and float(opt["--budget"]) and spent >= float(opt["--budget"]):
+            msg = json.dumps({"error": {"message": f"arena budget of ${opt['--budget']} reached (spent ${spent:.4f})"}}).encode()
+            self.send_response(402)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+            return
         if path.endswith("/chat/completions") and body:
             try:
                 body = json.dumps(self.rewrite(json.loads(body))).encode()
@@ -244,6 +256,7 @@ class H(BaseHTTPRequestHandler):
                "cached_tokens": meter.cached, "tool_calls": calls, "cost": meter.cost, "retries": retries, "provider": meter.provider,
                "reasoning_chars": sum(map(len, meter.think)), "content_chars": meter.content_chars}
         with lock:
+            spent += meter.cost
             with open(os.path.join(OUT, f"{run}.jsonl"), "a") as f:
                 f.write(json.dumps(rec) + "\n")
             # debugging aids: the newest request (whole history) and every turn's reasoning
