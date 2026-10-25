@@ -39,6 +39,9 @@ script = [
     {"delay": 5, "content": "slow2"},
     {"content": "final"},
     {"content": "pasted ok"},
+    {"content": "big paste ok"},
+    {"delay": 3, "content": "busy slow"},
+    {"content": "busy paste ok"},
 ]
 sp = os.path.join(W, "s.json")
 json.dump(script, open(sp, "w"))
@@ -76,6 +79,22 @@ def read_until(pat, timeout=5.0):
 
 def send(s):
     os.write(fd, s.encode() if isinstance(s, str) else s)
+
+
+def send_drain(s):
+    """Write a large payload while reading awl's output, as a terminal does (a plain write deadlocks on a full pty)."""
+    global buf
+    d = s.encode() if isinstance(s, str) else s
+    i = 0
+    while i < len(d):
+        r, w, _ = select.select([fd], [fd], [], 5)
+        if r:
+            try:
+                buf += os.read(fd, 1 << 20)
+            except OSError:
+                return
+        if w:
+            i += os.write(fd, d[i:i + 4096])
 
 
 def requests():
@@ -203,6 +222,24 @@ check("/copy emits OSC 52", read_until("copied 1 lines", 2) and b"\x1b]52;c;" + 
 buf = b""
 send("\x0f")
 check("ctrl-o shows the last tool output", read_until("+ BETA", 2) or read_until("edited", 2), buf[-200:])
+
+# pastes beyond the old fixed buffers: idle (was cut to 64 KiB) and while a turn runs (was cut to 8 KiB, dropped past 16 KiB)
+bigtxt = ("0123456789abcdef" * 8 + "\n") * 2400  # 309,600 chars
+buf = b""
+send_drain("\x1b[200~" + bigtxt.replace("\n", "\r") + "\x1b[201~end")
+read_until("never", 0.5)
+send("\r")
+check("300 KB paste reply", read_until("big paste ok", 15), buf[-200:])
+got = requests()[-1]["messages"][-1]["content"]
+check("300 KB paste sent whole", got == bigtxt + "end", f"sent {len(bigtxt) + 3} chars, got {len(got)}")
+buf = b""
+send("busyslow\r")
+time.sleep(0.8)
+steer = "".join(f"steer-{i:04d} " + "x" * 40 + "\n" for i in range(400))  # ~21 KB
+send_drain("\x1b[200~" + steer.replace("\n", "\r") + "\x1b[201~\r")
+check("busy 21 KB paste delivered after the turn", read_until("busy paste ok", 15), buf[-300:])
+got = requests()[-1]["messages"][-1]["content"]
+check("busy 21 KB paste sent whole", got.strip() == steer.strip(), f"sent {len(steer.strip())} chars, got {len(got.strip())}")
 
 # double Ctrl-C at an empty prompt quits and restores the terminal
 send("\x03")

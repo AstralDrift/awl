@@ -451,10 +451,14 @@ fn notify(o: agent.Outcome, secs: f64) void {
     linux.exit(0);
 }
 
+// Largest prompt (typed, pasted, or queued while the agent runs). These live in .bss: no binary size, no RSS until touched.
+// They used to be 64 KiB (editor), 8 KiB (draft) and 16 KiB (queue) and silently cut longer pastes.
+const input_cap = 4 << 20;
+
 // Type-ahead while the agent runs: keys are read on each tick, never blocking.
-var draft_mem: [8192]u8 = undefined;
+var draft_mem: [input_cap]u8 = undefined;
 var draft_n: usize = 0;
-var q_mem: [16384]u8 = undefined;
+var q_mem: [input_cap]u8 = undefined;
 var q_n: usize = 0;
 var q_count: usize = 0;
 var esc: enum { none, esc, seq } = .none;
@@ -528,6 +532,7 @@ fn pump() void {
         if ((sys.check(linux.poll(&p, 1, 0)) catch 0) == 0) break;
         const n = sys.read(sys.stdin, &b) catch 0;
         if (n == 0) break;
+        keylog(b[0..n]);
         got_any = true;
         for (b[0..n]) |c| key(c);
     }
@@ -1086,15 +1091,49 @@ fn plain() u8 {
     }
 }
 
+/// AWL_DEBUG_KEYS=<file>: append every raw input chunk (escaped) so a keyboard or paste problem shows exactly what the terminal sent.
+pub var keylog_path: ?[]const u8 = null;
+var keylog_fd: ?sys.fd_t = null;
+var keylog_t0: u64 = 0;
+var keylog_buf = Buf.init(1 << 16);
+fn keylog(bytes: []const u8) void {
+    const path = keylog_path orelse return;
+    if (keylog_fd == null) {
+        keylog_fd = sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, 0o600) catch {
+            keylog_path = null;
+            return;
+        };
+        keylog_t0 = sys.nowNs();
+    }
+    const hex = "0123456789abcdef";
+    keylog_buf.truncate(0);
+    keylog_buf.print("+{d}ms n={d} ", .{ (sys.nowNs() - keylog_t0) / std.time.ns_per_ms, bytes.len });
+    for (bytes) |c| switch (c) {
+        0x1b => keylog_buf.add("\\e"),
+        '\r' => keylog_buf.add("\\r"),
+        '\n' => keylog_buf.add("\\n"),
+        '\\' => keylog_buf.add("\\\\"),
+        0x20...0x5b, 0x5d...0x7e => keylog_buf.byte(c),
+        else => {
+            keylog_buf.add("\\x");
+            keylog_buf.byte(hex[c >> 4]);
+            keylog_buf.byte(hex[c & 15]);
+        },
+    };
+    keylog_buf.byte('\n');
+    sys.writeAll(keylog_fd.?, keylog_buf.items()) catch {};
+}
+
 const prompt = "› ";
 const indent = "  ";
 
 // Big buffers live in .bss so they cost nothing in the binary or until touched.
-var text_mem: [65536]u8 = undefined;
+var text_mem: [input_cap]u8 = undefined;
 var in_mem: [4096]u8 = undefined;
 
 const Editor = struct {
-    text: *[65536]u8 = &text_mem,
+    text: *[input_cap]u8 = &text_mem,
+    dropped: usize = 0, // bytes of the current paste that did not fit
     len: usize = 0,
     cur: usize = 0,
     row: usize = 0, // terminal row of the cursor, relative to the prompt's first row
@@ -1126,6 +1165,7 @@ const Editor = struct {
             } else _ = http.wait(sys.stdin, -1) catch return 3;
             const n = sys.read(sys.stdin, self.in) catch 0;
             if (n == 0) return null;
+            keylog(self.in[0..n]);
             self.in_n = n;
             self.in_i = 0;
         }
@@ -1257,8 +1297,11 @@ const Editor = struct {
         const s = seq[0..@min(n, seq.len)];
         const eq = std.mem.eql;
         if (scrollKey(s)) return;
-        if (eq(u8, s, "200~")) self.pasting = true //
-        else if (eq(u8, s, "201~")) self.pasting = false //
+        if (eq(u8, s, "200~")) {
+            self.pasting = true;
+            self.dropped = 0;
+        } //
+        else if (eq(u8, s, "201~")) self.pasteEnd() //
         else if (eq(u8, s, "D")) self.cur = self.prev(self.cur) //
         else if (eq(u8, s, "C")) self.cur = self.next(self.cur) //
         else if (eq(u8, s, "H") or eq(u8, s, "1~")) self.cur = self.lineStart() //
@@ -1270,8 +1313,19 @@ const Editor = struct {
         else if (eq(u8, s, "B")) self.history(1);
     }
 
+    fn pasteEnd(self: *Editor) void {
+        self.pasting = false;
+        if (self.dropped > 0) {
+            ui.note("input limit reached: {d} KB of the paste were not added (limit {d} MB)", .{ (self.dropped + 1023) / 1024, input_cap >> 20 });
+            self.dropped = 0;
+        }
+    }
+
     fn insert(self: *Editor, s: []const u8) void {
-        if (self.len + s.len > self.text.len) return;
+        if (self.len + s.len > self.text.len) {
+            self.dropped += s.len;
+            return;
+        }
         std.mem.copyBackwards(u8, self.text[self.cur + s.len .. self.len + s.len], self.text[self.cur..self.len]);
         @memcpy(self.text[self.cur .. self.cur + s.len], s);
         self.len += s.len;
