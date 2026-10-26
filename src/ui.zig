@@ -482,7 +482,7 @@ var bold = false;
 var code = false; // inside `inline code`
 var heading = false;
 
-const Lead = enum { wait, heading, bullet, fence, quote, table, text };
+const Lead = enum { wait, heading, bullet, done, todo, fence, quote, table, text };
 
 fn classify(p: []const u8, in_fence: bool) Lead {
     const s = std.mem.trimStart(u8, p, " ");
@@ -495,7 +495,15 @@ fn classify(p: []const u8, in_fence: bool) Lead {
     }
     if (s[0] == '-' or s[0] == '*' or s[0] == '+') {
         if (s.len == 1) return .wait;
-        return if (s.len == 2 and s[1] == ' ') .bullet else .text;
+        if (std.mem.allEqual(u8, s, s[0])) return .wait; // maybe a rule (---), decided at the line end
+        if (s[1] != ' ') return .text;
+        // "- [x] " / "- [ ] ": a task item; "- " then anything else: a bullet
+        const box = s[2..];
+        if (box.len == 0) return .wait;
+        if (box[0] != '[') return .bullet;
+        if (box.len < 4) return if (box.len == 1 or box[1] == 'x' or box[1] == 'X' or box[1] == ' ') .wait else .bullet;
+        if (box[2] == ']' and box[3] == ' ') return if (box[1] == ' ') .todo else if (box[1] == 'x' or box[1] == 'X') .done else .bullet;
+        return .bullet;
     }
     if (s[0] == '|') return .table;
     if (s[0] == '>') return if (s.len == 1) .wait else if (s[1] == ' ') .quote else .text;
@@ -591,7 +599,13 @@ fn md(c: u8) void {
     }
     if (lead and pend_n == 0 and tbl.len > 0 and c != '|' and c != ' ') flushTable(); // the table ended
     if (c == '\n') {
-        if (lead) flushPend();
+        const hp = std.mem.trimStart(u8, pend[0..pend_n], " ");
+        if (lead and hp.len >= 3 and (hp[0] == '-' or hp[0] == '*' or hp[0] == '_') and std.mem.allEqual(u8, hp, hp[0])) {
+            pend_n = 0; // a rule: ---, ***, ___
+            put(muted());
+            for (0..@min(@as(usize, sys.termCols()) -| 1, 60)) |_| put("─");
+            put(reset());
+        } else if (lead) flushPend();
         endLine();
         put("\n");
         bol = true;
@@ -604,7 +618,8 @@ fn md(c: u8) void {
     pend_n += 1;
     const p = pend[0..pend_n];
     const indent = p[0 .. p.len - std.mem.trimStart(u8, p, " ").len];
-    switch (classify(p, fence)) {
+    const r = classify(p, fence);
+    switch (r) {
         .wait => if (pend_n < pend.len) return,
         .heading => {
             put(indent);
@@ -618,9 +633,20 @@ fn md(c: u8) void {
             put("•");
             put(reset());
             put(" ");
+            const rest = std.mem.trimStart(u8, p, " ")[2..]; // characters held past "- "
+            lead = false;
+            pend_n = 0;
+            for (rest) |b| inline_(b);
+            return;
+        },
+        .done, .todo => {
+            put(indent);
+            put(if (r == .done) sgr(&th.green) else muted());
+            put(if (r == .done) "✓" else "○");
+            put(reset());
+            put(" ");
         },
         .table => {
-            if (tbl.len == 0) bol = true;
             tbl.add(p);
             tline = true;
             lead = false;
@@ -663,7 +689,67 @@ fn flushPend() void {
     for (pend[0..n]) |b| inline_(b);
 }
 
+// [text](url): held until it is known; printed as an OSC 8 hyperlink (clickable in kitty, foot, ghostty,
+// alacritty; other terminals show the underlined text). Anything else that started with '[' prints as typed.
+var link: [400]u8 = undefined;
+var link_n: usize = 0;
+var link_mid: usize = 0; // index of "](" in link, 0 while still in the text part
+
+fn linkChar(c: u8) bool {
+    if (link_n == link.len or c == '\n') return false;
+    link[link_n] = c;
+    link_n += 1;
+    const l = link[0..link_n];
+    if (link_mid == 0) {
+        if (c == ']') return true;
+        if (l.len >= 2 and l[l.len - 2] == ']') {
+            if (c != '(') {
+                link_n -= 1; // not part of it: the caller prints it after the held text
+                return false;
+            }
+            link_mid = l.len - 2;
+        }
+        return true;
+    }
+    if (c != ')') {
+        if (c != ' ') return true;
+        link_n -= 1;
+        return false;
+    }
+    const text = l[1..link_mid];
+    const url = l[link_mid + 2 .. l.len - 1];
+    link_n = 0;
+    link_mid = 0;
+    if (text.len == 0 or url.len == 0) {
+        put(l);
+        return true;
+    }
+    put("\x1b]8;;");
+    put(url);
+    put("\x1b\\\x1b[4m");
+    put(text);
+    put("\x1b[24m\x1b]8;;\x1b\\");
+    return true;
+}
+
+fn flushLink() void {
+    const n = link_n;
+    link_n = 0;
+    link_mid = 0;
+    put(link[0..n]);
+}
+
 fn inline_(c: u8) void {
+    if (link_n > 0) {
+        if (linkChar(c)) return;
+        flushLink();
+        if (c == '\n') return;
+    }
+    if (c == '[' and !fence and !code) {
+        link[0] = c;
+        link_n = 1;
+        return;
+    }
     if (fence) return put(&[_]u8{c});
     if (c == '`') {
         if (star) {
@@ -701,6 +787,7 @@ fn restyle() void {
 }
 
 fn endLine() void {
+    if (link_n > 0) flushLink();
     if (star) put("*");
     star = false;
     if (heading or bold or code) put(reset());
@@ -1093,6 +1180,16 @@ test "markdown-lite: tables align, quotes get a bar, a table in a fence stays as
     );
 }
 
+test "markdown-lite: links, rules, task items; brackets that are not links print as typed" {
+    color = true;
+    defer color = false;
+    const got = try render(mdAll, .{"see [docs](https://x.y/z) now\n---\n- [x] done\n- [ ] open\n- plain\n[1] a[i] [a](b c)\n"});
+    try tt.expect(std.mem.indexOf(u8, got, "\x1b]8;;https://x.y/z\x1b\\\x1b[4mdocs\x1b[24m\x1b]8;;\x1b\\ now") != null);
+    const txt = try stripSgr(got);
+    try tt.expect(std.mem.indexOf(u8, txt, "─" ** 20) != null);
+    try tt.expect(std.mem.indexOf(u8, txt, "✓ done\n○ open\n• plain\n[1] a[i] [a](b c)\n") != null);
+}
+
 test "markdown-lite: a table wider than the terminal prints as sent" {
     color = true;
     defer color = false;
@@ -1105,6 +1202,12 @@ fn stripSgr(s: []const u8) ![]const u8 {
     var n: usize = 0;
     var i: usize = 0;
     while (i < s.len) : (i += 1) {
+        if (s[i] == 0x1b and i + 1 < s.len and s[i + 1] == ']') { // OSC ... ESC \
+            i += 2;
+            while (i + 1 < s.len and !(s[i] == 0x1b and s[i + 1] == '\\')) i += 1;
+            i += 1;
+            continue;
+        }
         if (s[i] == 0x1b) {
             while (i < s.len and s[i] != 'm') i += 1;
             continue;
