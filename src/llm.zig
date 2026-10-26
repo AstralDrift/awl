@@ -42,6 +42,9 @@ pub const Turn = struct {
     completion_tokens: u64 = 0,
     reasoning_bytes: usize = 0,
     length_cut: bool = false,
+    // The reply started a call past max_calls: the stream was stopped there (a model stuck repeating near-identical
+    // calls once wrote 171 in one reply, 17K tokens), and only the first max_calls run.
+    overflow: bool = false,
 
     pub fn reset(self: *Turn) void {
         self.content.reset();
@@ -55,6 +58,7 @@ pub const Turn = struct {
         self.completion_tokens = 0;
         self.reasoning_bytes = 0;
         self.length_cut = false;
+        self.overflow = false;
     }
 };
 
@@ -120,6 +124,7 @@ pub fn stream(cfg: Cfg, body: []const []const u8, t: *Turn) Error!void {
         const data = std.mem.trim(u8, line[5..], " ");
         if (std.mem.eql(u8, data, "[DONE]")) break;
         try event(data, t);
+        if (t.overflow) break; // closing the connection makes the server stop generating
     }
 }
 
@@ -152,7 +157,10 @@ fn event(data: []const u8, t: *Turn) Error!void {
         };
         if (d.tool_calls) |tcs| for (tcs) |tc| {
             const i = if (tc.index) |x| x.v else (if (t.n > 0) t.n - 1 else 0);
-            if (i >= max_calls) continue;
+            if (i >= max_calls) {
+                t.overflow = true;
+                return;
+            }
             if (i >= t.n) t.n = i + 1;
             const call = &t.calls[i];
             if (tc.id) |id| if (call.id.n == 0) call.id.add(id.v);

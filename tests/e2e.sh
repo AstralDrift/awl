@@ -401,6 +401,36 @@ serve "$W/keep.json"
 out=$(cd "$W" && AWL_KEEP_REASONING=0 "$AWL" -p go 2>/dev/null)
 python3 -c "import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; a=[m for m in r[1]['messages'] if m['role']=='assistant'][-1]; assert 'reasoning_content' not in a, a" "$LOG" && ok "AWL_KEEP_REASONING=0 sends none" || bad "keep reasoning off" "$out"
 stop
+# grep and find given an absolute path inside the project print short relative paths (long absolute ones get mis-copied)
+mkdir -p "$W/relsub" && echo "needle_rel" > "$W/relsub/r.txt"
+python3 -c "import json,sys; print(json.dumps([{'tool_calls': [{'name': 'grep', 'arguments': {'pattern': 'needle_rel', 'path': sys.argv[1] + '/relsub'}}, {'name': 'find', 'arguments': {'pattern': 'r.txt', 'path': sys.argv[1]}}]}, {'content': 'rel ok'}]))" "$W" > "$W/rel.json"
+serve "$W/rel.json"
+out=$(cd "$W" && "$AWL" -p go 2>/dev/null)
+python3 - "$LOG" "$W" <<'EOF2' && ok "grep/find inside the project print relative paths" || bad "relative paths" "$out"
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+res = [m["content"] for m in r[1]["messages"] if m["role"] == "tool"]
+assert "relsub/r.txt:1:needle_rel" in res[0] and sys.argv[2] not in res[0], res[0]
+assert "relsub/r.txt" in res[1] and sys.argv[2] not in res[1], res[1]
+EOF2
+stop
+# a runaway reply (a stuck model once wrote 171 near-identical calls): the stream stops at call 17, 16 run, the model is told
+python3 -c "import json; print(json.dumps([{'tool_calls': [{'name': 'bash', 'arguments': {'command': 'echo run%d >> runaway.txt' % i}} for i in range(20)]}, {'content': 'calmer'}]))" > "$W/runaway.json"
+serve "$W/runaway.json"
+rm -f "$W/runaway.txt"
+out=$(cd "$W" && "$AWL" -p go 2>"$W/o")
+python3 - "$LOG" "$out" "$W/runaway.txt" <<'EOF2' && ok "runaway reply: 16 calls run, the rest stopped, model told" || bad "runaway" "$out $(tail -2 "$W/o")"
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "calmer", sys.argv[2]
+assert open(sys.argv[3]).read().split() == ["run%d" % i for i in range(16)]
+m = r[1]["messages"]
+a = [x for x in m if x["role"] == "assistant"][-1]
+assert len(a["tool_calls"]) == 16, len(a["tool_calls"])
+res = [x for x in m if x["role"] == "tool"]
+assert len(res) == 16 and "at most 16 tool calls" in res[-1]["content"] and "at most" not in res[0]["content"], res[-1]
+EOF2
+stop
 # a reply cut off inside a tool call: nothing runs, the model is asked to redo the call
 echo '[{"tool_calls": [{"name": "write", "arguments": {"path": "cutfile.txt", "content": "half"}}], "finish": "length"}, {"content": "finished"}]' > "$W/cutcall.json"
 serve "$W/cutcall.json"

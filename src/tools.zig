@@ -227,7 +227,8 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
     } else if (eq(u8, name, "grep") and have_rg) {
         const p = std.json.parseFromSliceLeaky(struct { pattern: Str, path: ?Str = null, glob: ?Str = null, context: ?Int(u8) = null, ignore_case: bool = false, limit: ?Int(usize) = null }, a, args, opts) catch return badArgs(out, name, args, &r);
         const pattern = p.pattern.v;
-        const path = opt(p.path) orelse ".";
+        var cb0: [4096]u8 = undefined;
+        const path = rel(opt(p.path) orelse ".", &cb0);
         sum(&r, name, "{s} {s}", .{ pattern, path });
         var argv: [24:null]?[*:0]const u8 = .{ rg_path, "-n", "--no-heading", "--color", "never", "--smart-case", "--max-columns", "300", "--max-columns-preview" } ++ .{null} ** 15;
         var n: usize = 9;
@@ -255,7 +256,8 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         capLines(out, @min(if (p.limit) |l| l.v else 200, 1000), "lines");
     } else if (eq(u8, name, "find") and have_fd) {
         const q = std.json.parseFromSliceLeaky(struct { pattern: ?Str = null, path: ?Str = null }, a, args, opts) catch return badArgs(out, name, args, &r);
-        const p = .{ .pattern = opt(q.pattern), .path = opt(q.path) };
+        var cb0: [4096]u8 = undefined;
+        const p = .{ .pattern = opt(q.pattern), .path = if (opt(q.path)) |x| rel(x, &cb0) else null };
         sum(&r, name, "{s} {s}", .{ p.pattern orelse "*", p.path orelse "." });
         var argv: [9:null]?[*:0]const u8 = .{ fd_path, "--color", "never", "--max-results", "501" } ++ .{null} ** 4;
         var pat = p.pattern orelse "";
@@ -326,6 +328,16 @@ fn badArgs(out: *Buf, name: []const u8, args: []const u8, r: *Result) Result {
     return r.*;
 }
 
+/// A path inside the working directory, made relative, so grep and find print short paths: long absolute paths
+/// are what models mis-copy. Anything else is returned unchanged.
+fn rel(path: []const u8, cb: *[4096]u8) []const u8 {
+    if (linux.errno(linux.getcwd(cb, cb.len)) != .SUCCESS) return path;
+    const c = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(cb)), 0);
+    if (std.mem.eql(u8, std.mem.trimEnd(u8, path, "/"), c)) return ".";
+    if (c.len > 1 and path.len > c.len + 1 and std.mem.startsWith(u8, path, c) and path[c.len] == '/') return path[c.len + 1 ..];
+    return path;
+}
+
 fn errMsg(out: *Buf, what: []const u8, path: []const u8, e: anyerror) bool {
     out.print("{s} {s}: {s}", .{ what, path, switch (e) {
         error.NotFound => "no such file or directory",
@@ -333,7 +345,134 @@ fn errMsg(out: *Buf, what: []const u8, path: []const u8, e: anyerror) bool {
         error.IsDir => "is a directory",
         else => @tagName(sys.last_errno),
     } });
+    if (e == error.NotFound) _ = pathHint(out, path);
     return false;
+}
+
+/// A path that does not exist: say what was probably meant, so a mis-copied path costs one turn instead of a
+/// guessing loop. Models copying long paths drop folders (…/bench/run-1/… for …/bench/2026-10-19/runs/run-1/…)
+/// or repeat them (…/app/app/app.html for …/app/app.html). From the deepest folder that exists: the missing
+/// part with leading folders left out, then the missing part under a folder up to 3 levels down, else the
+/// names there that start like the missing one. False when there is nothing to say.
+pub fn pathHint(out: *Buf, path: []const u8) bool {
+    const p = std.mem.trimEnd(u8, path, "/");
+    if (p.len == 0 or p.len > 1024 or sys.exists(p)) return false;
+    var dir: []const u8 = ".";
+    var ms: usize = 0; // p[ms..] is the missing part
+    var end = p.len;
+    while (std.mem.lastIndexOfScalar(u8, p[0..end], '/')) |i| {
+        const d = if (i == 0) "/" else p[0..i];
+        if (sys.exists(d)) {
+            dir = d;
+            ms = i + 1;
+            break;
+        }
+        end = i;
+    }
+    const miss = p[ms..];
+    var pb: [2048]u8 = undefined;
+    // extra folders: leave out leading parts of the missing path
+    var k = std.mem.indexOfScalar(u8, miss, '/');
+    while (k) |i| : (k = std.mem.indexOfScalarPos(u8, miss, i + 1, '/')) {
+        const c = std.fmt.bufPrint(&pb, "{s}/{s}", .{ dir, miss[i + 1 ..] }) catch return false;
+        if (sys.exists(c)) {
+            out.print(" Did you mean {s}?", .{c});
+            return true;
+        }
+    }
+    // dropped folders: the missing part under a folder below `dir`
+    var budget: usize = 400; // folders opened at most
+    const n = std.fmt.bufPrint(&pb, "{s}", .{dir}) catch return false;
+    if (std.mem.indexOfScalar(u8, miss, '/') != null) if (findUnder(&pb, n.len, miss, 3, &budget)) |c| {
+        out.print(" Did you mean {s}?", .{c});
+        return true;
+    };
+    // else: names in `dir` that start like the missing one
+    const want = miss[0 .. std.mem.indexOfScalar(u8, miss, '/') orelse miss.len];
+    const dfd = sys.open(dir, .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch return false;
+    defer sys.close(dfd);
+    var best: [5][]const u8 = undefined;
+    var score: [5]usize = .{0} ** 5;
+    var keep: [5][256]u8 = undefined;
+    var b: [8192]u8 align(8) = undefined;
+    while (true) {
+        const got = sys.check(linux.getdents64(dfd, &b, b.len)) catch break;
+        if (got == 0) break;
+        var off: usize = 0;
+        while (off < got) {
+            const e: *align(1) linux.dirent64 = @ptrCast(&b[off]);
+            const name = std.mem.sliceTo(@as([*:0]u8, @ptrCast(&b[off + @offsetOf(linux.dirent64, "name")])), 0);
+            off += e.reclen;
+            var s: usize = 0;
+            while (s < @min(name.len, want.len) and std.ascii.toLower(name[s]) == std.ascii.toLower(want[s])) s += 1;
+            if (s < 3 or name.len > 255) continue;
+            var w: usize = 0; // replace the weakest kept name
+            for (score, 0..) |v, j| {
+                if (v < score[w]) w = j;
+            }
+            if (s <= score[w]) continue;
+            @memcpy(keep[w][0..name.len], name);
+            best[w] = keep[w][0..name.len];
+            score[w] = s;
+        }
+    }
+    var shown = false;
+    for (score, 0..) |v, j| {
+        if (v == 0) continue;
+        if (shown) out.print(", {s}", .{best[j]}) else out.print(" Close names in {s}/: {s}", .{ dir, best[j] });
+        shown = true;
+    }
+    return shown;
+}
+
+/// Depth-first search below `pb[0..n]` (a folder) for a subfolder `f` with `f/miss` existing; returns that path
+/// in `pb`. Skips hidden folders and node_modules; stops after `budget` folders.
+fn findUnder(pb: *[2048]u8, n: usize, miss: []const u8, depth: u8, budget: *usize) ?[]const u8 {
+    if (depth == 0 or budget.* == 0) return null;
+    budget.* -= 1;
+    const dfd = sys.open(pb[0..n], .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch return null;
+    defer sys.close(dfd);
+    var b: [4096]u8 align(8) = undefined;
+    while (true) {
+        const got = sys.check(linux.getdents64(dfd, &b, b.len)) catch return null;
+        if (got == 0) return null;
+        var off: usize = 0;
+        while (off < got) {
+            const e: *align(1) linux.dirent64 = @ptrCast(&b[off]);
+            const name = std.mem.sliceTo(@as([*:0]u8, @ptrCast(&b[off + @offsetOf(linux.dirent64, "name")])), 0);
+            off += e.reclen;
+            if (e.type != linux.DT.DIR or name[0] == '.' or std.mem.eql(u8, name, "node_modules")) continue;
+            const m = (std.fmt.bufPrint(pb[n..], "/{s}", .{name}) catch continue).len + n;
+            const c = std.fmt.bufPrint(pb[m..], "/{s}", .{miss}) catch continue;
+            if (sys.exists(pb[0 .. m + c.len])) return pb[0 .. m + c.len];
+            if (findUnder(pb, m, miss, depth - 1, budget)) |r| return r;
+        }
+    }
+}
+
+/// Absolute paths a command reported missing ("…: No such file or directory"), at most 2, each with a hint.
+fn missingHints(out: *Buf, base: usize) void {
+    var seen: [2][]const u8 = undefined;
+    var ns: usize = 0;
+    var hb = Buf.init(8192);
+    defer hb.free();
+    var it = std.mem.splitScalar(u8, out.items()[base..], '\n');
+    while (it.next()) |line| {
+        if (ns == seen.len) break;
+        const at = std.mem.indexOf(u8, line, ": No such file or directory") orelse continue;
+        const sp = std.mem.lastIndexOfAny(u8, line[0..at], " '\"`") orelse continue;
+        const pth = std.mem.trim(u8, line[sp + 1 .. at], "'\"`");
+        if (pth.len < 2 or pth[0] != '/') continue;
+        var dup = false;
+        for (seen[0..ns]) |s| dup = dup or std.mem.eql(u8, s, pth);
+        if (dup) continue;
+        seen[ns] = pth;
+        ns += 1;
+        const mark = hb.len;
+        hb.print("\n[{s} does not exist.", .{pth});
+        if (pathHint(&hb, pth)) hb.add("]") else hb.len = mark;
+    }
+    out.add(hb.items());
 }
 
 const Map = struct {
@@ -542,7 +681,7 @@ fn replaceAll(path: []const u8, old: []const u8, new: []const u8, out: *Buf) boo
     const count = std.mem.count(u8, m.bytes, o);
     if (count == 0) {
         out.print("old_string not found in {s}.", .{path});
-        if (!closestLine(m.bytes, o, out)) out.add(" Read the file and copy the text exactly, including whitespace.");
+        if (!missHint(m.bytes, o, out)) out.add(" Read the file and copy the text exactly, including whitespace.");
         return false;
     }
     var body = Buf.init(m.bytes.len + count * (nw.len + 1) + 16);
@@ -578,7 +717,7 @@ fn editIn(path: []const u8, bytes: []const u8, pairs: []const Pair, out: *Buf) b
         const i = std.mem.indexOf(u8, bytes, p.old) orelse {
             editLabel(k, pairs.len, out);
             out.print("old_string not found in {s}.", .{path});
-            if (!closestLine(bytes, p.old, out)) out.add(" Read the file and copy the text exactly, including whitespace.");
+            if (!missHint(bytes, p.old, out)) out.add(" Read the file and copy the text exactly, including whitespace.");
             if (pairs.len > 1) out.add(" No changes were made.");
             return false;
         };
@@ -632,52 +771,69 @@ fn editIn(path: []const u8, bytes: []const u8, pairs: []const Pair, out: *Buf) b
     return true;
 }
 
-/// Point out the file line that best matches the first non-blank line of `old`:
-/// trimmed equality wins, else the longest common prefix of at least 8 bytes.
-/// One pass over `bytes`, no allocation. False when nothing useful was found.
-fn closestLine(bytes: []const u8, old: []const u8, out: *Buf) bool {
-    const want = blk: {
-        var it = std.mem.splitScalar(u8, old, '\n');
-        while (it.next()) |l| {
-            const s = std.mem.trim(u8, l, " \t\r");
-            if (s.len != 0) break :blk s;
-        }
-        break :blk null;
-    } orelse return false;
-    var best: []const u8 = &.{};
-    var best_line: usize = 0;
-    var best_prefix: usize = 0;
-    var exact = false;
-    var n: usize = 0;
-    var it = std.mem.splitScalar(u8, bytes, '\n');
-    while (it.next()) |raw| {
-        n += 1;
-        const s = std.mem.trim(u8, raw, " \t\r");
-        if (std.mem.eql(u8, s, want)) { // only whitespace differs
-            best = std.mem.trimEnd(u8, raw, "\r");
-            best_line = n;
-            exact = true;
-            break;
-        }
-        const p = commonPrefix(s, want);
-        if (p >= 8 and p > best_prefix) {
-            best = std.mem.trimEnd(u8, raw, "\r");
-            best_line = n;
-            best_prefix = p;
+/// Where a missing old_string stops matching the file: the longest leading part of it that occurs in the file
+/// (binary search; whether a prefix occurs is monotone in its length), then the file line and the old_string line
+/// at the first difference. A stray leading quote or backtick (models copy them from template strings) is retried
+/// without. False when not even 8 bytes match, so the caller gives the generic hint.
+fn missHint(bytes: []const u8, old: []const u8, out: *Buf) bool {
+    var o = std.mem.trim(u8, old, " \t\r\n");
+    var dropped: ?u8 = null;
+    var k = matchedPrefix(bytes, o);
+    if (k < 8 and o.len > 1 and std.mem.indexOfScalar(u8, "`'\"", o[0]) != null) {
+        const k2 = matchedPrefix(bytes, o[1..]);
+        if (k2 >= 8) {
+            dropped = o[0];
+            o = o[1..];
+            k = k2;
         }
     }
-    if (!exact and best_prefix < 8) return false;
-    var cut = @min(best.len, 160);
-    while (cut < best.len and cut > 0 and (best[cut] & 0xC0) == 0x80) cut -= 1; // keep utf-8 whole
-    out.print(" Closest line {d}: `{s}`{s}", .{ best_line, best[0..cut], if (exact) " (whitespace differs)" else "" });
+    if (k < 8) return false;
+    const pos = std.mem.indexOf(u8, bytes, o[0..k]).?;
+    const fd = pos + k; // first byte that differs, in the file
+    const fs = if (std.mem.lastIndexOfScalar(u8, bytes[0..fd], '\n')) |n| n + 1 else 0;
+    const fl = std.mem.trimEnd(u8, bytes[fs .. std.mem.indexOfScalarPos(u8, bytes, fd, '\n') orelse bytes.len], "\r");
+    const line = std.mem.count(u8, bytes[0..fs], "\n") + 1;
+    if (k == o.len) {
+        if (dropped) |c|
+            out.print(" Without its leading {c} it occurs at line {d}: `{s}`", .{ c, line, around(fl, fd - fs) })
+        else
+            out.print(" It occurs at line {d} with different whitespace around it: `{s}`", .{ line, around(fl, fd - fs) });
+        return true;
+    }
+    if (dropped) |c| out.print(" Without its leading {c} it", .{c}) else out.add(" It");
+    const os = if (std.mem.lastIndexOfScalar(u8, o[0..k], '\n')) |n| n + 1 else 0;
+    const ol = std.mem.trimEnd(u8, o[os .. std.mem.indexOfScalarPos(u8, o, k, '\n') orelse o.len], "\r");
+    const ws = std.mem.eql(u8, std.mem.trim(u8, fl, " \t"), std.mem.trim(u8, ol, " \t"));
+    out.print(" matches the file up to line {d}, where the file has ", .{line});
+    quoted(out, around(fl, fd - fs));
+    out.add(" and old_string has ");
+    quoted(out, around(ol, k - os));
+    out.print("{s}.", .{if (ws) " (whitespace differs)" else ""});
     return true;
 }
 
-fn commonPrefix(a: []const u8, b: []const u8) usize {
-    const n = @min(a.len, b.len);
-    var i: usize = 0;
-    while (i < n and a[i] == b[i]) i += 1;
-    return i;
+fn matchedPrefix(bytes: []const u8, o: []const u8) usize {
+    var lo: usize = 0; // o[0..lo] occurs
+    var hi: usize = o.len + 1; // o[0..hi] does not (or past the end)
+    while (hi - lo > 1) {
+        const mid = lo + (hi - lo) / 2;
+        if (std.mem.indexOf(u8, bytes, o[0..mid]) != null) lo = mid else hi = mid;
+    }
+    return lo;
+}
+
+/// At most 160 bytes of a line, starting up to 60 before column `col` when the line is longer, so the
+/// difference stays in view; cut on UTF-8 boundaries.
+fn around(s: []const u8, col: usize) []const u8 {
+    var a: usize = if (s.len > 160 and col > 60) @min(col - 60, s.len - 160) else 0;
+    while (a > 0 and (s[a] & 0xC0) == 0x80) a -= 1;
+    var c = @min(s.len, a + 160);
+    while (c < s.len and c > a and (s[c] & 0xC0) == 0x80) c -= 1;
+    return s[a..c];
+}
+
+fn quoted(out: *Buf, s: []const u8) void {
+    if (std.mem.trim(u8, s, " \t").len == 0) out.add("an empty line") else out.print("`{s}`", .{s});
 }
 
 /// Keep the first `max` lines of `out`, noting how many were dropped.
@@ -945,6 +1101,7 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
     }
     if (code == 127 and out.len == base) out.add("command not found");
     if (code != 0) out.print("\n[exit {d}]", .{code});
+    if (code != 0 and dropped == 0) missingHints(out, base);
     if (kind == .bash and code == 0 and out.len == base) out.add("(no output)");
     return code == 0;
 }
@@ -956,6 +1113,36 @@ fn tmpdir(buf: []u8) []const u8 {
     var zb: [256]u8 = undefined;
     _ = linux.mkdirat(linux.AT.FDCWD, sys.z(&zb, p), 0o755);
     return p;
+}
+
+test "missing paths get a did-you-mean: dropped folders, repeated folders, close names, bash output" {
+    var db: [64]u8 = undefined;
+    const d = tmpdir(&db);
+    var cb: [512]u8 = undefined;
+    var out = Buf.init(1 << 20);
+    const mk = try std.fmt.bufPrint(&cb, "{{\"command\":\"cd {s} && rm -rf ph && mkdir -p ph/bench/2026-10-19/runs/run-1/bb ph/app ph/bench/bonsai-a ph/bench/bonsai-b && touch ph/bench/2026-10-19/runs/run-1/bb/x.js ph/app/app.html\"}}", .{d});
+    _ = try run("bash", mk, &out);
+    var pb: [256]u8 = undefined;
+    var eb: [512]u8 = undefined;
+    // dropped folders (the awl slip)
+    out.reset();
+    _ = pathHint(&out, try std.fmt.bufPrint(&pb, "{s}/ph/bench/run-1/bb/x.js", .{d}));
+    try t.expectEqualStrings(try std.fmt.bufPrint(&eb, " Did you mean {s}/ph/bench/2026-10-19/runs/run-1/bb/x.js?", .{d}), out.items());
+    // repeated folders (the omp loop)
+    out.reset();
+    _ = pathHint(&out, try std.fmt.bufPrint(&pb, "{s}/ph/app/app/app/app.html", .{d}));
+    try t.expectEqualStrings(try std.fmt.bufPrint(&eb, " Did you mean {s}/ph/app/app.html?", .{d}), out.items());
+    // nothing found below: names that start like the missing one
+    out.reset();
+    _ = pathHint(&out, try std.fmt.bufPrint(&pb, "{s}/ph/bench/bonsai-c/y.js", .{d}));
+    try t.expect(std.mem.indexOf(u8, out.items(), "Close names in ") != null and std.mem.indexOf(u8, out.items(), "bonsai-a") != null and std.mem.indexOf(u8, out.items(), "bonsai-b") != null);
+    // read's error, and a command's "No such file or directory" line
+    out.reset();
+    _ = try run("read", try std.fmt.bufPrint(&cb, "{{\"path\":\"{s}/ph/app/app/app.html\"}}", .{d}), &out);
+    try t.expect(std.mem.endsWith(u8, out.items(), try std.fmt.bufPrint(&eb, "no such file or directory Did you mean {s}/ph/app/app.html?", .{d})));
+    out.reset();
+    _ = try run("bash", try std.fmt.bufPrint(&cb, "{{\"command\":\"cat {s}/ph/bench/run-1/bb/x.js\"}}", .{d}), &out);
+    try t.expect(std.mem.endsWith(u8, out.items(), try std.fmt.bufPrint(&eb, "[{s}/ph/bench/run-1/bb/x.js does not exist. Did you mean {s}/ph/bench/2026-10-19/runs/run-1/bb/x.js?]", .{ d, d })));
 }
 
 test "edit and read on a CRLF file" {
@@ -1225,26 +1412,59 @@ test "background jobs: start, log, exit notice, kill on exit" {
 test "edit: not-found hint when only whitespace differs" {
     var out = Buf.init(1 << 20);
     try t.expect(!editIn("src/a.zig", "fn main() {\n    const x = foo(1);\n}\n", &.{.{ .old = "\tconst x = foo(1);", .new = "" }}, &out));
-    try t.expectEqualStrings(
-        "old_string not found in src/a.zig. Closest line 2: `    const x = foo(1);` (whitespace differs)",
-        out.items(),
-    );
+    try t.expectEqualStrings("old_string not found in src/a.zig. It occurs at line 2 with different whitespace around it: `    const x = foo(1);`", out.items());
+}
+
+test "edit: not-found hint names the first line that differs" {
+    var out = Buf.init(1 << 20);
+    const file = "}\nfn main() {\n    const x = foo(1);\n    const y = bar(2);\n}\n";
+    // the first lines match exactly; a later line's text differs (blaming whitespace here sent models into cat -A loops)
+    try t.expect(!editIn("src/a.zig", file, &.{.{ .old = "fn main() {\n    const x = foo(1);\n    const y = baz(2);", .new = "" }}, &out));
+    try t.expectEqualStrings("old_string not found in src/a.zig. It matches the file up to line 4, where the file has `    const y = bar(2);` and old_string has `    const y = baz(2);`.", out.items());
+    out.reset();
+    // a later line differs only in indentation
+    try t.expect(!editIn("src/a.zig", file, &.{.{ .old = "fn main() {\n    const x = foo(1);\n\tconst y = bar(2);", .new = "" }}, &out));
+    try t.expectEqualStrings("old_string not found in src/a.zig. It matches the file up to line 4, where the file has `    const y = bar(2);` and old_string has `\tconst y = bar(2);` (whitespace differs).", out.items());
+    out.reset();
+    // a first line that occurs many times (`}`) still finds the right place
+    try t.expect(!editIn("src/a.zig", file, &.{.{ .old = "}\nfn main() {\n    const x = foo(9);", .new = "" }}, &out));
+    try t.expectEqualStrings("old_string not found in src/a.zig. It matches the file up to line 3, where the file has `    const x = foo(1);` and old_string has `    const x = foo(9);`.", out.items());
 }
 
 test "edit: not-found hint on a near miss" {
     var out = Buf.init(1 << 20);
     try t.expect(!editIn("src/a.zig", "pub fn readFile(path: []const u8) void\n", &.{.{ .old = "pub fn readFile(path: []const u8, n: usize) void", .new = "" }}, &out));
-    try t.expectEqualStrings(
-        "old_string not found in src/a.zig. Closest line 1: `pub fn readFile(path: []const u8) void`",
-        out.items(),
-    );
+    try t.expectEqualStrings("old_string not found in src/a.zig. It matches the file up to line 1, where the file has `pub fn readFile(path: []const u8) void` and old_string has `pub fn readFile(path: []const u8, n: usize) void`.", out.items());
 }
 
-test "edit: long closest line is cut on a utf-8 boundary" {
+test "edit: not-found hint retries a fragment without its stray leading backtick" {
+    var out = Buf.init(1 << 20);
+    const file = "const a = 1;\n  return `${n} x @ ${fmt(p, c)} = ${fmt(t)}`;\n";
+    try t.expect(!editIn("a.js", file, &.{.{ .old = "`@ ${fmt(p, c)} = ${fmt(t, c)}`", .new = "" }}, &out));
+    try t.expectEqualStrings("old_string not found in a.js. Without its leading ` it matches the file up to line 2, where the file has `  return `${n} x @ ${fmt(p, c)} = ${fmt(t)}`;` and old_string has `@ ${fmt(p, c)} = ${fmt(t, c)}``.", out.items());
+}
+
+test "edit: not-found hint when a stray leading backtick is the only difference" {
+    var out = Buf.init(1 << 20);
+    try t.expect(!editIn("a.js", "  return `${n} @ ${fmt(p)}`;\n", &.{.{ .old = "`@ ${fmt(p)}`;", .new = "" }}, &out));
+    try t.expectEqualStrings("old_string not found in a.js. Without its leading ` it occurs at line 1: `  return `${n} @ ${fmt(p)}`;`", out.items());
+}
+
+test "edit: not-found hint keeps a late difference in a long line in view, and names empty lines" {
+    var out = Buf.init(1 << 20);
+    const long = "y" ** 300;
+    try t.expect(!editIn("a", "a();\n" ++ long ++ "Z\n", &.{.{ .old = "a();\n" ++ long ++ "Q", .new = "" }}, &out));
+    try t.expectEqualStrings("old_string not found in a. It matches the file up to line 2, where the file has `" ++ "y" ** 159 ++ "Z` and old_string has `" ++ "y" ** 159 ++ "Q`.", out.items());
+    out.reset();
+    try t.expect(!editIn("a", "fn a() {\n  b();\n}\n", &.{.{ .old = "fn a() {\n\n  b();", .new = "" }}, &out));
+    try t.expectEqualStrings("old_string not found in a. It matches the file up to line 2, where the file has `  b();` and old_string has an empty line.", out.items());
+}
+
+test "edit: long file line in the hint is cut on a utf-8 boundary" {
     var out = Buf.init(1 << 20);
     const line = "x" ** 159 ++ "é and more";
     try t.expect(!editIn("a", line ++ "\n", &.{.{ .old = "x" ** 20 ++ "y", .new = "" }}, &out));
-    try t.expectEqualStrings("old_string not found in a. Closest line 1: `" ++ "x" ** 159 ++ "`", out.items());
+    try t.expectEqualStrings("old_string not found in a. It matches the file up to line 1, where the file has `" ++ "x" ** 159 ++ "` and old_string has `" ++ "x" ** 20 ++ "y`.", out.items());
 }
 
 test "edit: no hint without a useful match" {

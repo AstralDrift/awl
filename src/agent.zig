@@ -368,12 +368,16 @@ pub fn run() Outcome {
                 return .cancelled;
             };
             ui.toolOutput(out.items(), r.ok);
+            if (turn.overflow and i + 1 == turn.n) out.add(overflow_note);
             pushResult(c, step, i, out.items());
         }
+        if (turn.overflow) ui.note("reply stopped after {d} tool calls; the model was told", .{llm.max_calls});
     }
     ui.err("stopped after {d} steps (AWL_MAX_STEPS)", .{max_steps});
     return .max_steps;
 }
+
+const overflow_note = "\n[awl stopped your reply here: at most 16 tool calls run per reply, so the calls after this one were not run. Make fewer calls, and check each result before repeating a similar command.]";
 
 const cut_note = "[Your last reply hit the output token limit before it finished. Think more briefly: make the next tool call now, or give your answer.]";
 
