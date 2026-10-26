@@ -53,8 +53,8 @@ pub fn init(cwd: []const u8) void {
     // thinkers (Nanbeige4.3 ran past pi's 16384 on one reply) must not be cut off, and the
     // model card suggests up to 65536 for agent loops. The cap is only a backstop against a
     // runaway reasoning loop (a Qwen reply once ran 69K tokens and ate a task's time limit).
-    const cap = std.fmt.parseInt(u32, sys.getenv("AWL_MAX_TOKENS") orelse "65536", 10) catch 65536;
-    if (cap > 0) head.print(",\"max_tokens\":{d}", .{cap});
+    cap_max = std.fmt.parseInt(u32, sys.getenv("AWL_MAX_TOKENS") orelse "65536", 10) catch 65536;
+    if (cap_max > 0) head.print(",\"max_tokens\":{d: >10}", .{cap_max}); // fixed width: setCap() rewrites it in place
     head.add(",\"tools\":[");
     tools.schema(&head);
     head.add("],\"messages\":[{\"role\":\"system\",\"content\":\"");
@@ -354,6 +354,45 @@ const cut_note = "[Your last reply hit the output token limit before it finished
 const cut_call_note = "[not run: your reply hit the output token limit while writing this tool call, so its arguments were incomplete. Make the call again with less text in one call (write a long file in several smaller steps).]";
 
 pub var max_retries: u32 = 5;
+var cap_max: u32 = 0;
+
+/// Rewrite the request's max_tokens in place (the field is 10 characters wide, space padded).
+fn setCap(n: u64) void {
+    const key = ",\"max_tokens\":";
+    const h = head.items();
+    const i = std.mem.indexOf(u8, h, key) orelse return;
+    _ = std.fmt.bufPrint(h[i + key.len ..][0..10], "{d: >10}", .{@min(n, 9_999_999_999)}) catch {};
+}
+
+/// Servers refuse prompt + max_tokens > context (SGLang: "Requested token count exceeds the model's maximum
+/// context length"). Before each request: the cap, or less when the window is known and the prompt is big
+/// (prompt estimated at bytes / 3, which overcounts tokens; never below 1024).
+fn fitCap(prompt_bytes: usize) void {
+    if (cap_max == 0) return;
+    var n: u64 = cap_max;
+    if (ctx_limit > 0) n = @min(n, @max(ctx_limit -| (prompt_bytes / 3 + 256), 1024));
+    setCap(n);
+}
+
+/// The server said exactly how many input tokens it counted ("…a total of N tokens: M tokens from the input
+/// messages and K tokens for the completion"): ask for what is left, once. False if the message has no such count.
+fn shrinkCap() bool {
+    if (cap_max == 0) return false;
+    const d = llm.detail[0..llm.detail_len];
+    const at = std.mem.indexOf(u8, d, " tokens from the input") orelse return false;
+    var i = at;
+    while (i > 0 and std.ascii.isDigit(d[i - 1])) i -= 1;
+    const input = std.fmt.parseInt(u64, d[i..at], 10) catch return false;
+    const lim = if (ctx_limit > 0) ctx_limit else blk: {
+        const m = std.mem.indexOf(u8, d, "context length of ") orelse return false;
+        var e = m + 18;
+        while (e < d.len and std.ascii.isDigit(d[e])) e += 1;
+        break :blk std.fmt.parseInt(u64, d[m + 18 .. e], 10) catch return false;
+    };
+    if (input + 64 >= lim) return false; // the prompt itself is too long: compaction's job
+    setCap(lim - input - 64);
+    return true;
+}
 
 /// The server refused the request because of reasoning_effort: stop sending it.
 fn dropReasoning() bool {
@@ -374,6 +413,8 @@ fn dropReasoning() bool {
 /// retried while nothing of the reply has arrived, so output is never duplicated.
 fn streamRetrying(mid: []const u8, tail: []const u8) llm.Error!void {
     var attempt: u32 = 0;
+    var shrunk = false;
+    fitCap(head.len + mid.len + tail.len);
     while (true) : (attempt += 1) {
         turn.reset();
         llm.stream(cfg, &.{ head.items(), mid, tail }, &turn) catch |e| {
@@ -386,6 +427,11 @@ fn streamRetrying(mid: []const u8, tail: []const u8) llm.Error!void {
                 else => true,
             };
             if (e == error.Status and llm.last_status == 400 and dropReasoning()) {
+                attempt -|= 1;
+                continue;
+            }
+            if (e == error.Status and llm.last_status == 400 and !shrunk and shrinkCap()) {
+                shrunk = true;
                 attempt -|= 1;
                 continue;
             }

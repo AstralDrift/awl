@@ -349,6 +349,17 @@ assert r[0]["max_tokens"] == 65536, r[0].get("max_tokens")
 assert "output token limit" in r[1]["messages"][-1]["content"], r[1]["messages"][-1]
 EOF2
 stop
+# max_tokens fits the window: sized per request, and shrunk to what a server says is left
+echo '[{"content": "fits"}]' > "$W/fit.json"
+serve "$W/fit.json" --ctx 8000
+out=$(cd "$W" && "$AWL" -p go 2>/dev/null)
+python3 -c "import json,sys; r=json.loads(open(sys.argv[1]).readline()); assert 1024 <= r['max_tokens'] <= 8000 - 256, r['max_tokens']" "$LOG" && [ "$out" = fits ] && ok "max_tokens sized to the known window" || bad "max_tokens fit" "$out"
+stop
+echo '[{"status": 400, "content": "Requested token count exceeds the model'"'"'s maximum context length of 49152 tokens. You requested a total of 50186 tokens: 1034 tokens from the input messages and 49152 tokens for the completion."}, {"content": "shrunk ok"}]' > "$W/shrink.json"
+serve "$W/shrink.json"
+out=$(cd "$W" && "$AWL" -p go 2>"$W/o")
+python3 -c "import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; assert len(r) == 2 and r[1]['max_tokens'] == 49152 - 1034 - 64, [x.get('max_tokens') for x in r]" "$LOG" && [ "$out" = "shrunk ok" ] && ! grep -q compacted "$W/o" && ok "400 'exceeds context' -> max_tokens shrunk, no compaction" || bad "shrink" "$out $(tail -2 "$W/o")"
+stop
 # a call cut off mid-arguments goes back to the server as {} (templates iterate arguments as a mapping)
 echo '[{"tool_calls": [{"name": "write", "arguments": "{\"path\": \"cut2.txt\""}], "finish": "length"}, {"content": "finished"}]' > "$W/cutargs.json"
 serve "$W/cutargs.json"
