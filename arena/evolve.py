@@ -11,7 +11,10 @@ What evolves: the system prompt (AWL_SYSTEM). One step:
   2. Propose: the model under test reads the prompt, the lessons so far and the evidence, and returns one edited prompt
      with a rationale. Proposals that name a task or a task file are rejected (lessons must be general).
   3. Probe: the candidate runs the tune tasks once. If it passes at least as many and is >= 5% faster in total, both
-     run again, paired, and it is adopted only if that holds again (one lucky run does not count).
+     run again, and it is adopted only if, over BOTH runs pooled, it passes at least as many and is >= 5% faster
+     (one lucky run does not count; with 6 tasks a run, a single noisy failure should not decide either way).
+     Rule history: until 2026-10-26 04:05 the rerun alone decided (pass count first); changed after step 1, whose
+     decision (rejected) stands as recorded.
   4. Lessons: adopted and rejected edits go to lessons.md with their numbers; the proposer sees them next time.
 The held-out tier is never used for decisions inside a step. State lives in arena/evolve/NAME/.
 """
@@ -152,6 +155,10 @@ def lesson(d, text):
         f.write(text.rstrip() + "\n")
 
 
+def pooled(a, b):
+    return {"pass": a["pass"] + b["pass"], "n": a["n"] + b["n"], "wall": round(a["wall"] + b["wall"], 1)}
+
+
 def better(c, b):
     return c["pass"] > b["pass"] or (c["pass"] == b["pass"] and c["wall"] <= 0.95 * b["wall"])
 
@@ -197,7 +204,8 @@ def main():
                 rows2, run2 = arena(best_p, tasks, "t3", upstream, timeout)
                 crows2, crun2 = arena(cp, tasks, "t3", upstream, timeout)
                 cs2, bs2 = score(crows2), score(rows2)
-                rec.update(confirm_cand=cs2, confirm_best=bs2, adopted=better(cs2, bs2))
+                pc, pb = pooled(cs, cs2), pooled(bs, bs2)
+                rec.update(confirm_cand=cs2, confirm_best=bs2, pooled_cand=pc, pooled_best=pb, adopted=better(pc, pb))
                 if rec["adopted"]:
                     open(best_p, "w").write(cand)
                     json.dump([crows2, crun2], open(last, "w"))
