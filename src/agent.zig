@@ -672,13 +672,21 @@ fn pushAssistant(step: usize) void {
             m.add(",\"type\":\"function\",\"function\":{\"name\":");
             bufm.str(&m, c.name.get());
             m.add(",\"arguments\":");
-            bufm.str(&m, if (c.args.len == 0) "{}" else c.args.items());
+            bufm.str(&m, if (jsonObject(c.args.items())) c.args.items() else "{}");
             m.add("}}");
         }
         m.byte(']');
     }
     m.byte('}');
     push(&m);
+}
+
+/// Arguments that are not a JSON object (a call cut off by the output cap) go back as {}: chat templates
+/// iterate them as a mapping (Nanbeige: `arguments|items`) and a server would reject the next request.
+fn jsonObject(s: []const u8) bool {
+    const t = std.mem.trim(u8, s, " \t\r\n");
+    if (t.len < 2 or t[0] != '{') return false;
+    return std.json.validate(std.heap.page_allocator, t) catch false;
 }
 
 fn pushResult(c: *const llm.Call, step: usize, i: usize, text: []const u8) void {

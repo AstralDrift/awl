@@ -349,6 +349,19 @@ assert r[0]["max_tokens"] == 65536, r[0].get("max_tokens")
 assert "output token limit" in r[1]["messages"][-1]["content"], r[1]["messages"][-1]
 EOF2
 stop
+# a call cut off mid-arguments goes back to the server as {} (templates iterate arguments as a mapping)
+echo '[{"tool_calls": [{"name": "write", "arguments": "{\"path\": \"cut2.txt\""}], "finish": "length"}, {"content": "finished"}]' > "$W/cutargs.json"
+serve "$W/cutargs.json"
+out=$(cd "$W" && "$AWL" -p go 2>/dev/null)
+python3 - "$LOG" "$out" "$W/cut2.txt" <<'EOF2' && ok "cut-off arguments sent back as {}" || bad "cut args" "$out"
+import json, os, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+a = [m for m in r[1]["messages"] if m["role"] == "assistant"][-1]
+assert sys.argv[2] == "finished", sys.argv[2]
+assert a["tool_calls"][0]["function"]["arguments"] == "{}", a
+assert not os.path.exists(sys.argv[3])
+EOF2
+stop
 # the reasoning goes back with its turn (chat templates re-render it; prefix caches stay valid)
 echo '[{"reasoning": "  look at the file first\n", "tool_calls": [{"name": "bash", "arguments": {"command": "true"}}]}, {"content": "kept"}]' > "$W/keep.json"
 serve "$W/keep.json"
