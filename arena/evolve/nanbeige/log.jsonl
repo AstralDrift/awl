@@ -1,0 +1,1 @@
+{"event": "init", "tasks": ["flaky", "feature-cli", "refactor", "multifile", "server", "wrongfix"], "ts": "2026-10-26T00:13:21"}
