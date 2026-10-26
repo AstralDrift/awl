@@ -850,8 +850,13 @@ pub fn endMessage() void {
     flush();
 }
 
+var tool_name: [16]u8 = undefined;
+var tool_name_n: usize = 0;
+
 pub fn tool(name: []const u8, summary: []const u8) void {
     endMessage();
+    tool_name_n = @min(name.len, tool_name.len);
+    @memcpy(tool_name[0..tool_name_n], name[0..tool_name_n]);
     const w = @as(usize, sys.termCols()) -| (name.len + 4);
     const sm = cut(summary, w);
     print("{s}▸ {s}{s} {s}{s}\n", .{ accent(), name, reset(), sm, if (sm.len < summary.len) "…" else "" });
@@ -930,21 +935,34 @@ pub fn toolOutput(text: []const u8, ok: bool) void {
         flush();
         return;
     }
-    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, text, "\n"), '\n');
-    var shown: usize = 0;
-    var total: usize = 0;
+    // What is worth seeing differs by tool: a file the model reads is its business (one line: how much),
+    // a command's verdict is at the end (the last lines), a search's best hits are at the top.
+    const body = std.mem.trimEnd(u8, text, "\n");
+    const total = if (body.len == 0) 0 else std.mem.count(u8, body, "\n") + 1;
+    const name = tool_name[0..tool_name_n];
     const w = @as(usize, sys.termCols()) -| 4;
     put(if (ok) muted() else sgr(&th.red));
-    while (it.next()) |l| : (total += 1) {
-        if (shown == 8) continue;
+    defer {
+        put(reset());
+        flush();
+    }
+    if (ok and std.mem.eql(u8, name, "read")) {
+        const mark = std.mem.lastIndexOf(u8, body, "\n[lines ");
+        if (mark) |i| print("  {s}\n", .{cut(body[i + 1 ..], w)}) else print("  {d} line{s}\n", .{ total, if (total == 1) "" else "s" });
+        return;
+    }
+    const keep = 8;
+    const at_end = std.mem.eql(u8, name, "bash") or std.mem.eql(u8, name, "!");
+    if (at_end and total > keep) print("  … {d} lines above\n", .{total - keep});
+    var it = std.mem.splitScalar(u8, body, '\n');
+    var i: usize = 0;
+    while (it.next()) |l| : (i += 1) {
+        if (if (at_end) i + keep < total else i >= keep) continue;
         put("  ");
         put(cut(l, w));
         put("\n");
-        shown += 1;
     }
-    if (total > shown) print("  … {d} more lines\n", .{total - shown});
-    put(reset());
-    flush();
+    if (!at_end and total > keep) print("  … {d} more lines\n", .{total - keep});
 }
 
 fn cut(s: []const u8, w: usize) []const u8 {
@@ -1188,6 +1206,21 @@ test "markdown-lite: links, rules, task items; brackets that are not links print
     const txt = try stripSgr(got);
     try tt.expect(std.mem.indexOf(u8, txt, "─" ** 20) != null);
     try tt.expect(std.mem.indexOf(u8, txt, "✓ done\n○ open\n• plain\n[1] a[i] [a](b c)\n") != null);
+}
+
+test "tool output: read is one line, bash shows its end, search its top" {
+    quiet = false;
+    const ten = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    tool_name_n = 4;
+    @memcpy(tool_name[0..4], "read");
+    try tt.expectEqualStrings("  10 lines\n", try stripSgr(try render(toolOutput, .{ ten, true })));
+    try tt.expectEqualStrings("  [lines 2-3 of 4; use offset=4 to continue]\n", try stripSgr(try render(toolOutput, .{ "2→b\nc\n[lines 2-3 of 4; use offset=4 to continue]", true })));
+    tool_name_n = 4;
+    @memcpy(tool_name[0..4], "bash");
+    try tt.expectEqualStrings("  … 2 lines above\n  3\n  4\n  5\n  6\n  7\n  8\n  9\n  10\n", try stripSgr(try render(toolOutput, .{ ten, true })));
+    tool_name_n = 4;
+    @memcpy(tool_name[0..4], "grep");
+    try tt.expectEqualStrings("  1\n  2\n  3\n  4\n  5\n  6\n  7\n  8\n  … 2 more lines\n", try stripSgr(try render(toolOutput, .{ ten, true })));
 }
 
 test "markdown-lite: a table wider than the terminal prints as sent" {

@@ -61,7 +61,7 @@ Spec and history: [PLAN.md](PLAN.md). Sibling project for macOS: `nib`.
 
 Inline, so the terminal keeps its scrollback and plain copy and paste. Replies stream with light
 markdown (headings, **bold**, `code`, bullets, fenced blocks); edits show the changed lines in
-red and green; a dim `⋯ 12s` line shows that a slow model call or command is still working.
+red and green; a read is one line (how much), a command shows its last lines, a search its first; a dim `⋯ 12s` line shows that a slow model call or command is still working.
 
 While it works you can keep typing: Enter queues the message and the model gets it at its next
 step (to steer it), or as the next prompt if it has finished. Esc or Ctrl-C stops the turn, and
