@@ -548,7 +548,8 @@ fn flushTable() void {
     }
     var total: usize = 2;
     for (widths[0..ncols]) |w| total += w + 2;
-    if (ncols == 0 or total > sys.termCols()) return rawTable(text);
+    if (ncols == 0) return rawTable(text);
+    if (total > sys.termCols()) return tableRecords(text, ncols);
     it = std.mem.splitScalar(u8, text, '\n');
     var row: usize = 0;
     while (it.next()) |line| {
@@ -566,7 +567,7 @@ fn flushTable() void {
         while (cells.next()) |c0| : (k += 1) {
             if (k == ncols) break;
             const c = std.mem.trim(u8, c0, " ");
-            for (c) |b| if (b != '`' and b != '*') put(&[_]u8{b});
+            plainCell(c);
             if (k + 1 < ncols) for (0..widths[k] - cellWidth(c) + 2) |_| put(" ");
         }
         if (row == 0) put(reset());
@@ -580,6 +581,53 @@ fn flushTable() void {
         }
         row += 1;
     }
+}
+
+/// A table too wide for the terminal: each row as a record, its first cell bold, then "Header: value" lines
+/// that the terminal wraps. Readable at any width, unlike pipes broken across lines.
+fn tableRecords(text: []const u8, ncols: usize) void {
+    var head: [16][]const u8 = undefined;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var row: usize = 0;
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        var cells = std.mem.splitScalar(u8, std.mem.trim(u8, std.mem.trim(u8, line, " "), "|"), '|');
+        var peek = cells;
+        var rule = true;
+        while (peek.next()) |c| if (!isRule(c)) {
+            rule = false;
+        };
+        if (rule) continue;
+        var k: usize = 0;
+        while (cells.next()) |c0| : (k += 1) {
+            if (k == ncols) break;
+            const c = std.mem.trim(u8, c0, " ");
+            if (row == 0) {
+                head[k] = c;
+                continue;
+            }
+            if (k == 0) {
+                put("\x1b[1m");
+                plainCell(c);
+                put(reset());
+                put("\n");
+            } else {
+                put("  ");
+                put(muted());
+                plainCell(head[k]);
+                put(":");
+                put(reset());
+                put(" ");
+                plainCell(c);
+                put("\n");
+            }
+        }
+        row += 1;
+    }
+}
+
+fn plainCell(c: []const u8) void {
+    for (c) |b| if (b != '`' and b != '*') put(&[_]u8{b});
 }
 
 fn rawTable(text: []const u8) void {
@@ -1253,11 +1301,11 @@ test "tool output: read is one line, bash shows its end, search its top" {
     try tt.expectEqualStrings("  1\n  2\n  3\n  4\n  5\n  6\n  7\n  8\n  … 2 more lines\n", try stripSgr(try render(toolOutput, .{ ten, true })));
 }
 
-test "markdown-lite: a table wider than the terminal prints as sent" {
+test "markdown-lite: a table wider than the terminal becomes records" {
     color = true;
     defer color = false;
-    const wide = "| " ++ "w" ** 90 ++ " | b |\n|---|---|\n";
-    try tt.expectEqualStrings(wide, try stripSgr(try render(mdAll, .{wide})));
+    const wide = "| name | note |\n|---|---|\n| `a` | " ++ "w" ** 90 ++ " |\n| b | short |\n";
+    try tt.expectEqualStrings("a\n  note: " ++ "w" ** 90 ++ "\nb\n  note: short\n", try stripSgr(try render(mdAll, .{wide})));
 }
 
 var strip_b: [4096]u8 = undefined;
