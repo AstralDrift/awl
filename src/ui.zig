@@ -886,10 +886,40 @@ pub fn diff(old: []const u8, new: []const u8) void {
     var suf: usize = 0;
     while (suf < a.len - pre and suf < b.len - pre and std.mem.eql(u8, a[a.len - 1 - suf], b[b.len - 1 - suf])) suf += 1;
     const w = @as(usize, sys.termCols()) -| 5;
-    for (a[pre .. a.len - suf]) |l| diffLine(&th.red, "- ", l, w);
-    for (b[pre .. b.len - suf]) |l| diffLine(&th.green, "+ ", l, w);
+    const x = a[pre .. a.len - suf];
+    const y = b[pre .. b.len - suf];
+    if (x.len >= lcs.len or y.len >= lcs.len) { // too big to align: old lines, then new
+        for (x) |l| diffLine(&th.red, "- ", l, w);
+        for (y) |l| diffLine(&th.green, "+ ", l, w);
+        return flush();
+    }
+    // Longest common subsequence: lines kept in the middle are not shown as removed and added again.
+    var i = x.len + 1;
+    while (i > 0) {
+        i -= 1;
+        var j = y.len + 1;
+        while (j > 0) {
+            j -= 1;
+            lcs[i][j] = if (i == x.len or j == y.len) 0 else if (std.mem.eql(u8, x[i], y[j])) lcs[i + 1][j + 1] + 1 else @max(lcs[i + 1][j], lcs[i][j + 1]);
+        }
+    }
+    i = 0;
+    var j: usize = 0;
+    while (i < x.len or j < y.len) {
+        if (i < x.len and j < y.len and std.mem.eql(u8, x[i], y[j])) {
+            i += 1;
+            j += 1;
+        } else if (j == y.len or (i < x.len and lcs[i + 1][j] >= lcs[i][j + 1])) {
+            diffLine(&th.red, "- ", x[i], w);
+            i += 1;
+        } else {
+            diffLine(&th.green, "+ ", y[j], w);
+            j += 1;
+        }
+    }
     flush();
 }
+var lcs: [129][129]u8 = undefined;
 
 fn diffLine(st: *const Sgr, mark: []const u8, l: []const u8, w: usize) void {
     if (diff_lines == max_diff) {
@@ -1256,6 +1286,13 @@ test "markdown-lite: unfinished markers print as typed" {
     color = true;
     defer color = false;
     try tt.expectEqualStrings("-\n2 * 3 = 6*\n", try render(mdAll, .{"-\n2 * 3 = 6*\n"}));
+}
+
+test "edit diff: lines kept in the middle are not shown" {
+    diff_lines = 0;
+    try tt.expectEqualStrings("  -     x = 1\n  +     x = 2\n  + n = len(s)\n  + y = n\n", try render(diff, .{ "def f():\n    x = 1\ns = sorted(v)\nreturn s\n", "def f():\n    x = 2\ns = sorted(v)\nn = len(s)\ny = n\nreturn s\n" }));
+    diff_lines = 0;
+    diffed = false;
 }
 
 test "edit diff: only changed lines, capped" {
