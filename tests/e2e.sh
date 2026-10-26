@@ -341,12 +341,24 @@ stop
 echo '[{"reasoning": "hmm hmm", "finish": "length"}, {"content": "finished"}]' > "$W/cut.json"
 serve "$W/cut.json"
 out=$(cd "$W" && "$AWL" -p go 2>"$W/o")
-python3 - "$LOG" "$out" <<'EOF2' && ok "length cut -> continue; max_tokens 16384" || bad "length cut" "$out $(tail -2 "$W/o")"
+python3 - "$LOG" "$out" <<'EOF2' && ok "length cut -> continue; max_tokens 65536" || bad "length cut" "$out $(tail -2 "$W/o")"
 import json, sys
 r = [json.loads(l) for l in open(sys.argv[1])]
 assert sys.argv[2] == "finished", sys.argv[2]
-assert r[0]["max_tokens"] == 16384, r[0].get("max_tokens")
+assert r[0]["max_tokens"] == 65536, r[0].get("max_tokens")
 assert "output token limit" in r[1]["messages"][-1]["content"], r[1]["messages"][-1]
+EOF2
+stop
+# a reply cut off inside a tool call: nothing runs, the model is asked to redo the call
+echo '[{"tool_calls": [{"name": "write", "arguments": {"path": "cutfile.txt", "content": "half"}}], "finish": "length"}, {"content": "finished"}]' > "$W/cutcall.json"
+serve "$W/cutcall.json"
+out=$(cd "$W" && "$AWL" -p go 2>"$W/o")
+python3 - "$LOG" "$out" "$W/cutfile.txt" <<'EOF2' && ok "length cut inside a tool call -> not run, redo asked" || bad "length cut in call" "$out $(tail -2 "$W/o")"
+import json, os, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "finished", sys.argv[2]
+assert not os.path.exists(sys.argv[3]), "the cut call ran"
+assert "[not run:" in r[1]["messages"][-1]["content"], r[1]["messages"][-1]
 EOF2
 stop
 serve "$W/hi.json"

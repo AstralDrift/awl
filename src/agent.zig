@@ -49,10 +49,11 @@ pub fn init(cwd: []const u8) void {
         head.add(",\"reasoning_effort\":");
         bufm.str(&head, effort);
     }
-    // Output cap per reply (AWL_MAX_TOKENS, 0 = none). Without one, Qwen sometimes
-    // reasons in a loop: one Terminal-Bench reply ran 69K tokens and ate a task's
-    // whole time limit. pi sends the same 16384.
-    const cap = std.fmt.parseInt(u32, sys.getenv("AWL_MAX_TOKENS") orelse "16384", 10) catch 16384;
+    // Output cap per reply (AWL_MAX_TOKENS, 0 = none). Generous on purpose: heavy
+    // thinkers (Nanbeige4.3 ran past pi's 16384 on one reply) must not be cut off, and the
+    // model card suggests up to 65536 for agent loops. The cap is only a backstop against a
+    // runaway reasoning loop (a Qwen reply once ran 69K tokens and ate a task's time limit).
+    const cap = std.fmt.parseInt(u32, sys.getenv("AWL_MAX_TOKENS") orelse "65536", 10) catch 65536;
     if (cap > 0) head.print(",\"max_tokens\":{d}", .{cap});
     head.add(",\"tools\":[");
     tools.schema(&head);
@@ -318,6 +319,11 @@ pub fn run() Outcome {
             addUser(cut_note);
             continue;
         }
+        if (turn.n > 0 and turn.length_cut) { // cut off inside a tool call: its arguments are incomplete, run nothing
+            ui.note("reply cut off inside a tool call (AWL_MAX_TOKENS); asking the model to redo it", .{});
+            for (turn.calls[0..turn.n], 0..) |*c, i| pushResult(c, step, i, cut_call_note);
+            continue;
+        }
         if (turn.n == 0) {
             _ = secs;
             ui.status(cfg.model, @as(f64, @floatFromInt(sys.nowNs() - run_t0)) / 1e9, step + 1, tools.files_changed.n - changed0, ctx_tokens, ctx_limit);
@@ -344,6 +350,8 @@ pub fn run() Outcome {
 }
 
 const cut_note = "[Your last reply hit the output token limit before it finished. Think more briefly: make the next tool call now, or give your answer.]";
+
+const cut_call_note = "[not run: your reply hit the output token limit while writing this tool call, so its arguments were incomplete. Make the call again with less text in one call (write a long file in several smaller steps).]";
 
 pub var max_retries: u32 = 5;
 
