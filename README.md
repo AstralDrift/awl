@@ -186,3 +186,16 @@ Every harness goes through `arena/proxy.py`, which records turns, tokens, cached
 model time per run, and stops a harness that stalls. Tasks live in `arena/tasks/<id>/`
 (`prompt.txt`, `setup/`, `check.sh`, hidden tests, `solve.sh`); `arena/verify_tasks.sh` proves each
 check fails unsolved and passes solved. Every experiment gets a line in `arena/LOG.md`.
+
+### Self-improvement (`arena/evolve.py`, after Harness2's propose / probe / compose)
+
+    python3 arena/evolve.py init NAME                          # start from the built-in system prompt
+    python3 arena/evolve.py step NAME --steps 3 --upstream URL # propose, probe, confirm, adopt or reject
+    python3 arena/evolve.py heldout NAME --upstream URL        # held-out tier t5: best prompt vs the start
+    python3 arena/evolve.py show NAME
+
+The model under test reads its own failed or slow runs on six tune tasks and proposes one general edit
+to the system prompt (naming a task or task file gets the proposal rejected). The candidate runs the tune
+tasks; if it looks better, both prompts run again and it is adopted only if it still wins with both runs
+pooled (passes first, then >= 5% less wall time). Adopted and rejected edits go to `lessons.md` with their
+numbers; the proposer sees them next time. Tier t5 is never shown to the proposer. State: `arena/evolve/NAME/`.
