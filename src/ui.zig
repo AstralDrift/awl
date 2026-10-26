@@ -482,7 +482,7 @@ var bold = false;
 var code = false; // inside `inline code`
 var heading = false;
 
-const Lead = enum { wait, heading, bullet, fence, text };
+const Lead = enum { wait, heading, bullet, fence, quote, table, text };
 
 fn classify(p: []const u8, in_fence: bool) Lead {
     const s = std.mem.trimStart(u8, p, " ");
@@ -497,10 +497,99 @@ fn classify(p: []const u8, in_fence: bool) Lead {
         if (s.len == 1) return .wait;
         return if (s.len == 2 and s[1] == ' ') .bullet else .text;
     }
+    if (s[0] == '|') return .table;
+    if (s[0] == '>') return if (s.len == 1) .wait else if (s[1] == ' ') .quote else .text;
     return .text;
 }
 
+// Tables are held until they end, then printed with aligned columns: a bold header, a thin rule,
+// two spaces between columns, inline markers dropped. Too wide for the terminal: printed as sent.
+var tbl = @import("buf.zig").Buf.init(1 << 20);
+var tline = false; // this line is a table row being collected
+
+fn cellWidth(c: []const u8) usize {
+    var n: usize = 0;
+    for (c) |b| {
+        if ((b & 0xC0) != 0x80 and b != '`' and b != '*') n += 1;
+    }
+    return n;
+}
+
+fn isRule(cell: []const u8) bool {
+    const t = std.mem.trim(u8, cell, " :");
+    return t.len > 0 and std.mem.allEqual(u8, t, '-');
+}
+
+fn flushTable() void {
+    if (tbl.len == 0) return;
+    defer tbl.reset();
+    const text = tbl.items();
+    var widths: [16]usize = .{0} ** 16;
+    var ncols: usize = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        var cells = std.mem.splitScalar(u8, std.mem.trim(u8, std.mem.trim(u8, line, " "), "|"), '|');
+        var k: usize = 0;
+        var rule = true;
+        while (cells.next()) |c| : (k += 1) {
+            if (k == widths.len) return rawTable(text);
+            if (!isRule(c)) rule = false;
+            if (!isRule(c)) widths[k] = @max(widths[k], cellWidth(std.mem.trim(u8, c, " ")));
+        }
+        if (line.len > 0 and !rule) ncols = @max(ncols, k);
+    }
+    var total: usize = 2;
+    for (widths[0..ncols]) |w| total += w + 2;
+    if (ncols == 0 or total > sys.termCols()) return rawTable(text);
+    it = std.mem.splitScalar(u8, text, '\n');
+    var row: usize = 0;
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        var cells = std.mem.splitScalar(u8, std.mem.trim(u8, std.mem.trim(u8, line, " "), "|"), '|');
+        var peek = cells;
+        var rule = true;
+        while (peek.next()) |c| if (!isRule(c)) {
+            rule = false;
+        };
+        if (rule) continue;
+        put("  ");
+        if (row == 0) put("\x1b[1m");
+        var k: usize = 0;
+        while (cells.next()) |c0| : (k += 1) {
+            if (k == ncols) break;
+            const c = std.mem.trim(u8, c0, " ");
+            for (c) |b| if (b != '`' and b != '*') put(&[_]u8{b});
+            if (k + 1 < ncols) for (0..widths[k] - cellWidth(c) + 2) |_| put(" ");
+        }
+        if (row == 0) put(reset());
+        put("\n");
+        if (row == 0) {
+            put("  ");
+            put(muted());
+            for (0..total - 4) |_| put("─");
+            put(reset());
+            put("\n");
+        }
+        row += 1;
+    }
+}
+
+fn rawTable(text: []const u8) void {
+    put(std.mem.trimEnd(u8, text, "\n"));
+    put("\n");
+}
+
 fn md(c: u8) void {
+    if (tline) { // collecting a table row
+        tbl.byte(c);
+        if (c == '\n') {
+            tline = false;
+            lead = true;
+            bol = true;
+        }
+        return;
+    }
+    if (lead and pend_n == 0 and tbl.len > 0 and c != '|' and c != ' ') flushTable(); // the table ended
     if (c == '\n') {
         if (lead) flushPend();
         endLine();
@@ -527,6 +616,21 @@ fn md(c: u8) void {
             put(indent);
             put(muted());
             put("•");
+            put(reset());
+            put(" ");
+        },
+        .table => {
+            if (tbl.len == 0) bol = true;
+            tbl.add(p);
+            tline = true;
+            lead = false;
+            pend_n = 0;
+            return;
+        },
+        .quote => {
+            put(indent);
+            put(muted());
+            put("│");
             put(reset());
             put(" ");
         },
@@ -638,6 +742,11 @@ pub fn endMessage() void {
     started = false;
     form_n = 0;
     endThinking();
+    if (tline) {
+        tbl.byte('\n');
+        tline = false;
+    }
+    flushTable();
     if (lead and pend_n > 0) flushPend();
     endLine();
     lead = true;
@@ -972,6 +1081,39 @@ test "markdown-lite: headings, bullets, bold, code, fences" {
             "plain * star\n#include\n",
         got,
     );
+}
+
+test "markdown-lite: tables align, quotes get a bar, a table in a fence stays as typed" {
+    color = true;
+    defer color = false;
+    const got = try render(mdAll, .{"| a | long name |\n|---|:---:|\n| `x` | **y** |\nafter\n> q\n```\n| raw |\n```\n"});
+    try tt.expectEqualStrings(
+        "  a  long name\n  " ++ "─" ** 12 ++ "\n  x  y\nafter\n│ q\n```\n| raw |\n```\n",
+        try stripSgr(got),
+    );
+}
+
+test "markdown-lite: a table wider than the terminal prints as sent" {
+    color = true;
+    defer color = false;
+    const wide = "| " ++ "w" ** 90 ++ " | b |\n|---|---|\n";
+    try tt.expectEqualStrings(wide, try stripSgr(try render(mdAll, .{wide})));
+}
+
+var strip_b: [4096]u8 = undefined;
+fn stripSgr(s: []const u8) ![]const u8 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == 0x1b) {
+            while (i < s.len and s[i] != 'm') i += 1;
+            continue;
+        }
+        if (n == strip_b.len) return error.NoSpaceLeft;
+        strip_b[n] = s[i];
+        n += 1;
+    }
+    return strip_b[0..n];
 }
 
 test "markdown-lite: unfinished markers print as typed" {
