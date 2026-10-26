@@ -546,12 +546,25 @@ fn flushTable() void {
         }
         if (line.len > 0 and !rule) ncols = @max(ncols, k);
     }
+    if (ncols == 0) return rawTable(text);
+    // Fit the terminal: shrink the widest column one step at a time (never below 8); cells wrap at words.
+    const avail = @as(usize, sys.termCols()) -| (2 + 2 * (ncols - 1) + 1);
+    var sum: usize = 0;
+    for (widths[0..ncols]) |w| sum += w;
+    while (sum > avail) {
+        var wi: usize = 0;
+        for (widths[0..ncols], 0..) |w, k| if (w > widths[wi]) {
+            wi = k;
+        };
+        if (widths[wi] <= 8) return tableRecords(text, ncols);
+        widths[wi] -= 1;
+        sum -= 1;
+    }
     var total: usize = 2;
     for (widths[0..ncols]) |w| total += w + 2;
-    if (ncols == 0) return rawTable(text);
-    if (total > sys.termCols()) return tableRecords(text, ncols);
     it = std.mem.splitScalar(u8, text, '\n');
     var row: usize = 0;
+    var cb: [8192]u8 = undefined; // this row's cells, markers dropped
     while (it.next()) |line| {
         if (line.len == 0) continue;
         var cells = std.mem.splitScalar(u8, std.mem.trim(u8, std.mem.trim(u8, line, " "), "|"), '|');
@@ -561,17 +574,35 @@ fn flushTable() void {
             rule = false;
         };
         if (rule) continue;
-        put("  ");
-        if (row == 0) put("\x1b[1m");
+        var cell: [16][]const u8 = .{""} ** 16;
+        var n: usize = 0;
         var k: usize = 0;
         while (cells.next()) |c0| : (k += 1) {
             if (k == ncols) break;
-            const c = std.mem.trim(u8, c0, " ");
-            plainCell(c);
-            if (k + 1 < ncols) for (0..widths[k] - cellWidth(c) + 2) |_| put(" ");
+            const start_n = n;
+            for (std.mem.trim(u8, c0, " ")) |b| if (b != '`' and b != '*' and n < cb.len) {
+                cb[n] = b;
+                n += 1;
+            };
+            cell[k] = cb[start_n..n];
         }
-        if (row == 0) put(reset());
-        put("\n");
+        while (true) { // one screen line per pass, each column taking its next wrapped piece
+            var any = false;
+            for (cell[0..ncols]) |c| if (c.len > 0) {
+                any = true;
+            };
+            if (!any) break;
+            put("  ");
+            if (row == 0) put("\x1b[1m");
+            for (cell[0..ncols], 0..) |*c, kk| {
+                const piece = wrapPiece(c.*, widths[kk]);
+                put(piece);
+                c.* = std.mem.trimStart(u8, c.*[piece.len..], " ");
+                if (kk + 1 < ncols) for (0..widths[kk] - textCols(piece) + 2) |_| put(" ");
+            }
+            if (row == 0) put(reset());
+            put("\n");
+        }
         if (row == 0) {
             put("  ");
             put(muted());
@@ -581,6 +612,31 @@ fn flushTable() void {
         }
         row += 1;
     }
+}
+
+fn textCols(s: []const u8) usize {
+    var n: usize = 0;
+    for (s) |b| {
+        if ((b & 0xC0) != 0x80) n += 1;
+    }
+    return n;
+}
+
+/// The longest start of `s` that fits `w` columns, broken after a space when there is one.
+fn wrapPiece(s: []const u8, w: usize) []const u8 {
+    if (textCols(s) <= w) return s;
+    var end: usize = 0;
+    var c: usize = 0;
+    var last_space: usize = 0;
+    while (end < s.len) {
+        var e = end + 1;
+        while (e < s.len and (s[e] & 0xC0) == 0x80) e += 1;
+        if (c + 1 > w) break;
+        if (s[end] == ' ') last_space = end;
+        c += 1;
+        end = e;
+    }
+    return if (last_space > 0) s[0..last_space] else s[0..end];
 }
 
 /// A table too wide for the terminal: each row as a record, its first cell bold, then "Header: value" lines
@@ -1301,11 +1357,17 @@ test "tool output: read is one line, bash shows its end, search its top" {
     try tt.expectEqualStrings("  1\n  2\n  3\n  4\n  5\n  6\n  7\n  8\n  … 2 more lines\n", try stripSgr(try render(toolOutput, .{ ten, true })));
 }
 
-test "markdown-lite: a table wider than the terminal becomes records" {
+test "markdown-lite: a wide table wraps its cells to fit; too many columns become records" {
     color = true;
     defer color = false;
-    const wide = "| name | note |\n|---|---|\n| `a` | " ++ "w" ** 90 ++ " |\n| b | short |\n";
-    try tt.expectEqualStrings("a\n  note: " ++ "w" ** 90 ++ "\nb\n  note: short\n", try stripSgr(try render(mdAll, .{wide})));
+    const words = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen";
+    const got = try stripSgr(try render(mdAll, .{"| n | note |\n|---|---|\n| a | " ++ words ++ " " ++ words ++ " |\n"}));
+    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, got, "\n"), '\n');
+    var rows: usize = 0;
+    while (it.next()) |l| : (rows += 1) try tt.expect(textCols(l) <= 80);
+    try tt.expect(rows >= 4 and std.mem.startsWith(u8, got, "  n  note"));
+    const many = "| a | b | c | d | e | f | g | h | i |\n|-|-|-|-|-|-|-|-|-|\n| " ++ ("xxxxxxxxxxxx | " ** 8) ++ "x |\n";
+    try tt.expect(std.mem.indexOf(u8, try stripSgr(try render(mdAll, .{many})), "  b: xxxxxxxxxxxx\n") != null);
 }
 
 var strip_b: [4096]u8 = undefined;
