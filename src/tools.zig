@@ -146,13 +146,13 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
     const opts: std.json.ParseOptions = .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed };
     const eq = std.mem.eql;
     if (eq(u8, name, "read")) {
-        const p = std.json.parseFromSliceLeaky(struct { path: Str, offset: ?Int(usize) = null, limit: ?Int(usize) = null }, a, args, opts) catch return badArgs(out, name, &r);
+        const p = std.json.parseFromSliceLeaky(struct { path: Str, offset: ?Int(usize) = null, limit: ?Int(usize) = null }, a, args, opts) catch return badArgs(out, name, args, &r);
         const path = p.path.v;
         sum(&r, name, "{s}", .{path});
         r.ok = read(path, if (p.offset) |o| o.v else 1, if (p.limit) |l| l.v else 2000, out);
         if (r.ok) files_read.note(path);
     } else if (eq(u8, name, "write")) {
-        const p = std.json.parseFromSliceLeaky(struct { path: Str, content: Str }, a, args, opts) catch return badArgs(out, name, &r);
+        const p = std.json.parseFromSliceLeaky(struct { path: Str, content: Str }, a, args, opts) catch return badArgs(out, name, args, &r);
         const path = p.path.v;
         const content = p.content.v;
         sum(&r, name, "{s} ({d} lines)", .{ path, std.mem.count(u8, content, "\n") + @intFromBool(content.len > 0 and content[content.len - 1] != '\n') });
@@ -163,12 +163,12 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         if (r.ok) out.print("wrote {d} bytes to {s}", .{ content.len, path });
     } else if (eq(u8, name, "edit")) {
         const E = struct { old_string: ?Str = null, new_string: ?Str = null, old: ?Str = null, new: ?Str = null };
-        const p = std.json.parseFromSliceLeaky(struct { path: Str, old_string: ?Str = null, new_string: ?Str = null, old: ?Str = null, new: ?Str = null, replace_all: bool = false, edits: ?[]const E = null }, a, args, opts) catch return badArgs(out, name, &r);
+        const p = std.json.parseFromSliceLeaky(struct { path: Str, old_string: ?Str = null, new_string: ?Str = null, old: ?Str = null, new: ?Str = null, replace_all: bool = false, edits: ?[]const E = null }, a, args, opts) catch return badArgs(out, name, args, &r);
         const path = p.path.v;
         var pairs: [max_edits]Pair = undefined;
         var n: usize = 0;
         if (opt(p.old_string) orelse opt(p.old)) |old| {
-            pairs[0] = .{ .old = old, .new = opt(p.new_string) orelse opt(p.new) orelse return badArgs(out, name, &r) };
+            pairs[0] = .{ .old = old, .new = opt(p.new_string) orelse opt(p.new) orelse return badArgs(out, name, args, &r) };
             n = 1;
         }
         for (p.edits orelse &.{}) |e| {
@@ -177,10 +177,10 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
                 sum(&r, name, "{s}", .{path});
                 return r;
             }
-            pairs[n] = .{ .old = opt(e.old_string) orelse opt(e.old) orelse return badArgs(out, name, &r), .new = opt(e.new_string) orelse opt(e.new) orelse return badArgs(out, name, &r) };
+            pairs[n] = .{ .old = opt(e.old_string) orelse opt(e.old) orelse return badArgs(out, name, args, &r), .new = opt(e.new_string) orelse opt(e.new) orelse return badArgs(out, name, args, &r) };
             n += 1;
         }
-        if (n == 0) return badArgs(out, name, &r);
+        if (n == 0) return badArgs(out, name, args, &r);
         if (p.replace_all and n == 1) {
             sum(&r, name, "{s} (all)", .{path});
             const preview = mode != .auto;
@@ -201,16 +201,16 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         if (r.ok) files_changed.note(path);
         if (r.ok and !preview) for (pairs[0..n]) |pp| ui.diff(pp.old, pp.new);
     } else if (eq(u8, name, "todo")) {
-        const p = std.json.parseFromSliceLeaky(struct { items: []const struct { text: Str, status: Str = .{ .v = "pending" } } }, a, args, opts) catch return badArgs(out, name, &r);
+        const p = std.json.parseFromSliceLeaky(struct { items: []const struct { text: Str, status: Str = .{ .v = "pending" } } }, a, args, opts) catch return badArgs(out, name, args, &r);
         var done: usize = 0;
         for (p.items) |it| done += @intFromBool(eq(u8, it.status.v, "done") or eq(u8, it.status.v, "skip"));
         sum(&r, name, "{d}/{d} done", .{ done, p.items.len });
         r.ok = todo(p.items, out);
     } else if (eq(u8, name, "bash")) {
-        const p = std.json.parseFromSliceLeaky(struct { command: Str, timeout: ?Int(u32) = null, background: bool = false }, a, args, opts) catch return badArgs(out, name, &r);
+        const p = std.json.parseFromSliceLeaky(struct { command: Str, timeout: ?Int(u32) = null, background: bool = false }, a, args, opts) catch return badArgs(out, name, args, &r);
         if (p.background) sum(&r, name, "&{s}", .{p.command.v}) else sum(&r, name, "{s}", .{p.command.v});
         if (!try gate(name, false, out)) return r;
-        const cmd = a.dupeZ(u8, p.command.v) catch return badArgs(out, name, &r);
+        const cmd = a.dupeZ(u8, p.command.v) catch return badArgs(out, name, args, &r);
         if (p.background) {
             r.ok = startJob(cmd, out);
             return r;
@@ -218,7 +218,7 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         const argv = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
         r.ok = try spawn(&argv, @as(u64, if (p.timeout) |x| x.v else 120) * 1000, out, .bash);
     } else if (eq(u8, name, "grep") and have_rg) {
-        const p = std.json.parseFromSliceLeaky(struct { pattern: Str, path: ?Str = null, glob: ?Str = null, context: ?Int(u8) = null, ignore_case: bool = false, limit: ?Int(usize) = null }, a, args, opts) catch return badArgs(out, name, &r);
+        const p = std.json.parseFromSliceLeaky(struct { pattern: Str, path: ?Str = null, glob: ?Str = null, context: ?Int(u8) = null, ignore_case: bool = false, limit: ?Int(usize) = null }, a, args, opts) catch return badArgs(out, name, args, &r);
         const pattern = p.pattern.v;
         const path = opt(p.path) orelse ".";
         sum(&r, name, "{s} {s}", .{ pattern, path });
@@ -226,14 +226,14 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         var n: usize = 9;
         if (p.glob) |g| {
             argv[n] = "-g";
-            argv[n + 1] = a.dupeZ(u8, g.v) catch return badArgs(out, name, &r);
+            argv[n + 1] = a.dupeZ(u8, g.v) catch return badArgs(out, name, args, &r);
             n += 2;
         }
         if (p.context) |cx| if (cx.v > 0) {
             const c = cx.v;
             var cb: [8]u8 = undefined;
             argv[n] = "-C";
-            argv[n + 1] = a.dupeZ(u8, std.fmt.bufPrint(&cb, "{d}", .{@min(c, 20)}) catch "2") catch return badArgs(out, name, &r);
+            argv[n + 1] = a.dupeZ(u8, std.fmt.bufPrint(&cb, "{d}", .{@min(c, 20)}) catch "2") catch return badArgs(out, name, args, &r);
             n += 2;
         };
         if (p.ignore_case) {
@@ -241,18 +241,18 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
             n += 1;
         }
         argv[n] = "-e";
-        argv[n + 1] = a.dupeZ(u8, pattern) catch return badArgs(out, name, &r);
+        argv[n + 1] = a.dupeZ(u8, pattern) catch return badArgs(out, name, args, &r);
         argv[n + 2] = "--";
-        argv[n + 3] = a.dupeZ(u8, path) catch return badArgs(out, name, &r);
+        argv[n + 3] = a.dupeZ(u8, path) catch return badArgs(out, name, args, &r);
         r.ok = try spawn(&argv, 30_000, out, .grep);
         capLines(out, @min(if (p.limit) |l| l.v else 200, 1000), "lines");
     } else if (eq(u8, name, "find") and have_fd) {
-        const q = std.json.parseFromSliceLeaky(struct { pattern: ?Str = null, path: ?Str = null }, a, args, opts) catch return badArgs(out, name, &r);
+        const q = std.json.parseFromSliceLeaky(struct { pattern: ?Str = null, path: ?Str = null }, a, args, opts) catch return badArgs(out, name, args, &r);
         const p = .{ .pattern = opt(q.pattern), .path = opt(q.path) };
         sum(&r, name, "{s} {s}", .{ p.pattern orelse "*", p.path orelse "." });
         var argv: [8:null]?[*:0]const u8 = .{ fd_path, "--color", "never", "--max-results", "501" } ++ .{null} ** 3;
-        argv[5] = a.dupeZ(u8, p.pattern orelse "") catch return badArgs(out, name, &r);
-        argv[6] = a.dupeZ(u8, p.path orelse ".") catch return badArgs(out, name, &r);
+        argv[5] = a.dupeZ(u8, p.pattern orelse "") catch return badArgs(out, name, args, &r);
+        argv[6] = a.dupeZ(u8, p.path orelse ".") catch return badArgs(out, name, args, &r);
         r.ok = try spawn(&argv, 30_000, out, .find);
         capLines(out, 500, "entries");
     } else {
@@ -262,9 +262,34 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
     return r;
 }
 
-fn badArgs(out: *Buf, name: []const u8, r: *Result) Result {
-    out.print("invalid arguments for {s}; check the required fields", .{name});
+/// Say what is wrong so the model can fix the call in one step: not JSON (cut off?), or which fields are missing.
+fn badArgs(out: *Buf, name: []const u8, args: []const u8, r: *Result) Result {
     r.ok = false;
+    const eql = std.mem.eql;
+    if (!(std.json.validate(std.heap.page_allocator, args) catch false)) {
+        out.print("invalid arguments for {s}: not valid JSON (was the call cut off?)", .{name});
+        return r.*;
+    }
+    const need: []const []const u8 = if (eql(u8, name, "write")) &.{ "path", "content" } else if (eql(u8, name, "edit") or eql(u8, name, "read")) &.{"path"} else if (eql(u8, name, "bash")) &.{"command"} else if (eql(u8, name, "todo")) &.{"items"} else if (eql(u8, name, "grep")) &.{"pattern"} else &.{};
+    var mb: [96]u8 = undefined;
+    var m = std.ArrayListUnmanaged(u8).initBuffer(&mb);
+    for (need) |k| {
+        var kb: [32]u8 = undefined;
+        const q = std.fmt.bufPrint(&kb, "\"{s}\"", .{k}) catch continue;
+        if (std.mem.indexOf(u8, args, q) != null) continue;
+        if (m.items.len > 0) m.appendSliceBounded(", ") catch {};
+        m.appendSliceBounded(k) catch {};
+    }
+    const has = struct {
+        fn f(a: []const u8, k: []const u8) bool {
+            return std.mem.indexOf(u8, a, k) != null;
+        }
+    }.f;
+    if (eql(u8, name, "edit") and !has(args, "\"edits\"") and (!has(args, "\"old_string\"") or !has(args, "\"new_string\""))) {
+        if (m.items.len > 0) m.appendSliceBounded(", ") catch {};
+        m.appendSliceBounded("old_string + new_string (or edits)") catch {};
+    }
+    if (m.items.len > 0) out.print("invalid arguments for {s}: missing {s}", .{ name, m.items }) else out.print("invalid arguments for {s}: a field has the wrong type; check the tool's parameters", .{name});
     return r.*;
 }
 
@@ -432,7 +457,33 @@ fn editFile(path: []const u8, pairs: []const Pair, out: *Buf) bool {
             fixed[k] = .{ .old = conv.items()[o0..n0], .new = conv.items()[n0..] };
         }
     }
-    return editIn(path, m.bytes, fixed[0..pairs.len], out);
+    // Models writing raw tool arguments (XML formats) sometimes escape quotes as if in JSON: t[\"due\"].
+    // When the text as sent is not there but the unescaped text occurs exactly once, use that (new text too).
+    var unesc = false;
+    for (fixed[0..pairs.len]) |*f| {
+        if (std.mem.indexOf(u8, m.bytes, f.old) != null) continue;
+        if (std.mem.indexOf(u8, f.old, "\\\"") == null and std.mem.indexOf(u8, f.old, "\\'") == null) continue;
+        const o0 = conv.len;
+        dropQuoteEscapes(f.old, &conv);
+        const n0 = conv.len;
+        dropQuoteEscapes(f.new, &conv);
+        const o = conv.items()[o0..n0];
+        if (std.mem.count(u8, m.bytes, o) == 1) {
+            f.* = .{ .old = o, .new = conv.items()[n0..] };
+            unesc = true;
+        }
+    }
+    const ok = editIn(path, m.bytes, fixed[0..pairs.len], out);
+    if (ok and unesc) out.add(" (matched after removing backslashes before quotes; new_string unescaped the same way)");
+    return ok;
+}
+
+fn dropQuoteEscapes(s: []const u8, out: *Buf) void {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '\\' and i + 1 < s.len and (s[i + 1] == '"' or s[i + 1] == '\'')) continue;
+        out.byte(s[i]);
+    }
 }
 
 /// Replace every occurrence of `old` (exact text; CRLF files are matched like edit does).
@@ -973,6 +1024,46 @@ test "edit tool call with an edits list" {
     try t.expect(r.ok);
     try t.expectEqualStrings("X\nY\n", try sys.readFile(f, &fb));
     try t.expect(std.mem.endsWith(u8, out.items(), ": 2 changes at lines 1, 2 (-2 +2 lines)"));
+}
+
+test "edit: quotes escaped as in JSON still match once; real escapes are left alone" {
+    ui.quiet = true;
+    var db: [64]u8 = undefined;
+    const d = tmpdir(&db);
+    var pb: [128]u8 = undefined;
+    const f = try std.fmt.bufPrint(&pb, "{s}/esc.py", .{d});
+    var out = Buf.init(1 << 20);
+    var fb: [256]u8 = undefined;
+    try t.expect(write(f, &.{"x = t[\"due\"]\ny = 'a\\'b'\n"}, &out));
+    out.reset();
+    var ab: [512]u8 = undefined;
+    // the model sent t[\"due\"] (backslashes in the decoded string)
+    const args = try std.fmt.bufPrint(&ab, "{{\"path\":\"{s}\",\"old_string\":\"x = t[\\\\\\\"due\\\\\\\"]\",\"new_string\":\"x = t[\\\\\\\"when\\\\\\\"]\"}}", .{f});
+    const r = try run("edit", args, &out);
+    try t.expect(r.ok);
+    try t.expectEqualStrings("x = t[\"when\"]\ny = 'a\\'b'\n", try sys.readFile(f, &fb));
+    try t.expect(std.mem.endsWith(u8, out.items(), "new_string unescaped the same way)"));
+    // a backslash that is really in the file is matched as sent, untouched
+    out.reset();
+    const args2 = try std.fmt.bufPrint(&ab, "{{\"path\":\"{s}\",\"old_string\":\"'a\\\\'b'\",\"new_string\":\"'a\\\\'c'\"}}", .{f});
+    try t.expect((try run("edit", args2, &out)).ok);
+    try t.expectEqualStrings("x = t[\"when\"]\ny = 'a\\'c'\n", try sys.readFile(f, &fb));
+}
+
+test "bad tool arguments say what is wrong" {
+    ui.quiet = true;
+    var out = Buf.init(1 << 16);
+    _ = try run("edit", "{\"old_string\":\"a\",\"new_string\":\"b\"}", &out);
+    try t.expectEqualStrings("invalid arguments for edit: missing path", out.items());
+    out.reset();
+    _ = try run("edit", "{\"path\":\"x\"}", &out);
+    try t.expectEqualStrings("invalid arguments for edit: missing old_string + new_string (or edits)", out.items());
+    out.reset();
+    _ = try run("write", "{\"path\":\"x\",\"content\":\"abc", &out);
+    try t.expectEqualStrings("invalid arguments for write: not valid JSON (was the call cut off?)", out.items());
+    out.reset();
+    _ = try run("write", "{}", &out);
+    try t.expectEqualStrings("invalid arguments for write: missing path, content", out.items());
 }
 
 test "read marks the first line and every 10th line" {
