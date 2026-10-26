@@ -297,6 +297,7 @@ pub fn run() Outcome {
     defer run_secs = @as(f64, @floatFromInt(sys.nowNs() - run_t0)) / 1e9;
     var step: usize = 0;
     var forced = false; // one forced compaction per run after a "too long" rejection
+    var no_think = false; // the last reply was cut off mid-thought: ask for the next one without thinking
     while (step < max_steps) : (step += 1) {
         if (step > 0) {
             if (steer) |f| if (f()) |text| {
@@ -307,7 +308,8 @@ pub fn run() Outcome {
         }
         ui.liveStart();
         const t0 = sys.nowNs();
-        streamRetrying(msgs.items(), "]}") catch |e| {
+        // chat templates (Nanbeige4.3, Qwen3.x) read enable_thinking; other servers ignore unknown kwargs
+        streamRetrying(msgs.items(), if (no_think) "],\"chat_template_kwargs\":{\"enable_thinking\":false}}" else "]}") catch |e| {
             ui.endMessage();
             if (e == error.Status and llm.last_status == 400 and !forced and tooLong() and compact(true)) {
                 forced = true;
@@ -330,9 +332,11 @@ pub fn run() Outcome {
         ctx_tokens = turn.prompt_tokens + turn.completion_tokens;
         pushAssistant(step);
         elide();
-        if (turn.n == 0 and turn.length_cut) { // cut off mid-thought: let it go on
-            ui.note("reply cut off at the max token limit (AWL_MAX_TOKENS); asking the model to continue", .{});
+        no_think = false;
+        if (turn.n == 0 and turn.length_cut) { // cut off mid-thought: the next reply acts without thinking
+            ui.note("reply cut off at the token limit while thinking; asking for the next step without thinking", .{});
             addUser(cut_note);
+            no_think = true;
             continue;
         }
         if (turn.n > 0 and turn.length_cut) { // cut off inside a tool call: its arguments are incomplete, run nothing
@@ -720,7 +724,7 @@ fn pushAssistant(step: usize) void {
     defer m.free();
     m.add("{\"role\":\"assistant\",\"content\":");
     bufm.str(&m, turn.content.items());
-    if (keep_reasoning and turn.reasoning.len > 0) {
+    if (keep_reasoning and turn.reasoning.len > 0 and !turn.length_cut) { // a cut-off thought is incomplete and huge: not sent back
         m.add(",\"reasoning_content\":");
         bufm.str(&m, std.mem.trim(u8, turn.reasoning.items(), " \n"));
     }

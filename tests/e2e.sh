@@ -347,6 +347,8 @@ r = [json.loads(l) for l in open(sys.argv[1])]
 assert sys.argv[2] == "finished", sys.argv[2]
 assert r[0]["max_tokens"] == 65536, r[0].get("max_tokens")
 assert "output token limit" in r[1]["messages"][-1]["content"], r[1]["messages"][-1]
+assert r[1].get("chat_template_kwargs") == {"enable_thinking": False} and "chat_template_kwargs" not in r[0], [x.get("chat_template_kwargs") for x in r]
+assert all("reasoning_content" not in m for m in r[1]["messages"] if m["role"] == "assistant"), "cut-off reasoning was sent back"
 EOF2
 stop
 # max_tokens fits the window: sized per request, and shrunk to what a server says is left
