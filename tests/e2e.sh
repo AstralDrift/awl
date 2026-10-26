@@ -349,6 +349,22 @@ assert r[0]["max_tokens"] == 65536, r[0].get("max_tokens")
 assert "output token limit" in r[1]["messages"][-1]["content"], r[1]["messages"][-1]
 EOF2
 stop
+# the reasoning goes back with its turn (chat templates re-render it; prefix caches stay valid)
+echo '[{"reasoning": "  look at the file first\n", "tool_calls": [{"name": "bash", "arguments": {"command": "true"}}]}, {"content": "kept"}]' > "$W/keep.json"
+serve "$W/keep.json"
+out=$(cd "$W" && "$AWL" -p go 2>/dev/null)
+python3 - "$LOG" "$out" <<'EOF2' && ok "reasoning_content sent back with its turn" || bad "keep reasoning" "$out"
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+a = [m for m in r[1]["messages"] if m["role"] == "assistant"][-1]
+assert sys.argv[2] == "kept", sys.argv[2]
+assert a.get("reasoning_content") == "look at the file first", a
+EOF2
+stop
+serve "$W/keep.json"
+out=$(cd "$W" && AWL_KEEP_REASONING=0 "$AWL" -p go 2>/dev/null)
+python3 -c "import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; a=[m for m in r[1]['messages'] if m['role']=='assistant'][-1]; assert 'reasoning_content' not in a, a" "$LOG" && ok "AWL_KEEP_REASONING=0 sends none" || bad "keep reasoning off" "$out"
+stop
 # a reply cut off inside a tool call: nothing runs, the model is asked to redo the call
 echo '[{"tool_calls": [{"name": "write", "arguments": {"path": "cutfile.txt", "content": "half"}}], "finish": "length"}, {"content": "finished"}]' > "$W/cutcall.json"
 serve "$W/cutcall.json"

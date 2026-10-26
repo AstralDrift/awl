@@ -35,6 +35,7 @@ pub const Call = struct {
 
 pub const Turn = struct {
     content: Buf = Buf.init(32 << 20),
+    reasoning: Buf = Buf.init(32 << 20), // sent back with the turn (AWL_KEEP_REASONING)
     calls: [max_calls]Call = [_]Call{.{}} ** max_calls,
     n: usize = 0,
     prompt_tokens: u64 = 0,
@@ -44,6 +45,7 @@ pub const Turn = struct {
 
     pub fn reset(self: *Turn) void {
         self.content.reset();
+        self.reasoning.reset();
         for (self.calls[0..self.n]) |*c| {
             c.args.reset();
             c.id.n = 0;
@@ -140,6 +142,7 @@ fn event(data: []const u8, t: *Turn) Error!void {
         if (d.reasoning_content orelse d.reasoning) |rs| {
             const s = rs.v;
             t.reasoning_bytes += s.len;
+            t.reasoning.add(s);
             ui.reasoning(s);
         }
         if (d.content) |cs| if (cs.v.len > 0) {

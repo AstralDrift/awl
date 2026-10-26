@@ -647,11 +647,21 @@ fn callId(c: *const llm.Call, step: usize, i: usize, b: []u8) []const u8 {
     return std.fmt.bufPrint(b, "call_{d}_{d}", .{ step, i }) catch "call";
 }
 
+/// AWL_KEEP_REASONING (default on; 0 = off): the reasoning goes back with the turn as reasoning_content.
+/// Chat templates (Nanbeige4.3, Qwen3.x) re-render it in the turn's <think> block; without it the
+/// re-rendered history differs from the tokens the model generated, so the server's prefix cache
+/// misses from the first assistant turn on and every step prefills that again.
+pub var keep_reasoning = true;
+
 fn pushAssistant(step: usize) void {
-    var m = Buf.init(turn.content.len * 6 + (1 << 20));
+    var m = Buf.init(turn.content.len * 6 + turn.reasoning.len * 6 + (1 << 20));
     defer m.free();
     m.add("{\"role\":\"assistant\",\"content\":");
     bufm.str(&m, turn.content.items());
+    if (keep_reasoning and turn.reasoning.len > 0) {
+        m.add(",\"reasoning_content\":");
+        bufm.str(&m, std.mem.trim(u8, turn.reasoning.items(), " \n"));
+    }
     if (turn.n > 0) {
         m.add(",\"tool_calls\":[");
         for (turn.calls[0..turn.n], 0..) |*c, i| {

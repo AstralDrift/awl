@@ -32,6 +32,7 @@ const usage =
     \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MODE AWL_REASONING AWL_MAX_TOKENS AWL_MAX_STEPS
     \\     AWL_RETRIES AWL_SYSTEM AWL_AGENTS (off) AWL_WELCOME (off: one line)
     \\     AWL_MODELS (Ctrl-P cycles) AWL_STATUS (model,ctx,mode,branch,dir,session or off)
+    \\     AWL_KEEP_REASONING (0: do not send reasoning back with each turn)
     \\     AWL_THINK_ROWS (reasoning rows shown live, default 6; 0: timer only)
     \\     AWL_DEBUG_KEYS=FILE (log raw input, escaped: for keyboard / paste problems)
     \\
@@ -92,6 +93,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (sys.getenv("AWL_MAX_STEPS")) |s| agent.max_steps = std.fmt.parseInt(usize, s, 10) catch 200;
     if (sys.getenv("AWL_RETRIES")) |s| agent.max_retries = std.fmt.parseInt(u32, s, 10) catch 5;
     tui.keylog_path = sys.getenv("AWL_DEBUG_KEYS");
+    if (sys.getenv("AWL_KEEP_REASONING")) |s| agent.keep_reasoning = !std.mem.eql(u8, s, "0");
     if (sys.getenv("AWL_THINK_ROWS")) |s| ui.think_rows = @min(std.fmt.parseInt(usize, s, 10) catch 6, 64);
     if (sys.getenv("AWL_FULL")) |s| tui.start_full = tui.start_full or std.mem.eql(u8, s, "1");
     if (sys.getenv("AWL_MODE")) |s| tools.mode = std.meta.stringToEnum(tools.Mode, s) orelse die("AWL_MODE must be auto, ask or plan", .{});
