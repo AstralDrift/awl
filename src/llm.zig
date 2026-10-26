@@ -159,6 +159,7 @@ fn event(data: []const u8, t: *Turn) Error!void {
             if (tc.function) |f| {
                 if (f.name) |n| call.name.add(n.v);
                 if (f.arguments) |a| call.args.add(a.v);
+                ui.forming(call.name.get(), call.args.len);
             }
         };
         if (ch.finish_reason) |f| if (std.mem.eql(u8, f.v, "length")) {

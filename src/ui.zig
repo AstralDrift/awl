@@ -171,6 +171,8 @@ pub fn liveRows(b: *@import("buf.zig").Buf, w: usize) void {
     const secs = (sys.nowNs() - live_t0) / std.time.ns_per_s;
     b.print("{s}{s} {d}s", .{ muted(), if (thinking) "∴" else "⋯", secs });
     var cols: usize = 4 + std.fmt.count("{d}", .{secs});
+    var fb: [64]u8 = undefined;
+    b.add(formingLabel(&fb));
     if (queued > 0) {
         b.print(" · {d} queued", .{queued});
         cols += 11;
@@ -318,6 +320,9 @@ fn drawLive() void {
     const head = std.fmt.bufPrint(b[n..], "{s}{s} {d}s", .{ muted(), if (thinking) "∴" else "⋯", secs }) catch return;
     n += head.len;
     var cols: usize = 4 + std.fmt.count("{d}", .{secs});
+    const fl = formingLabel(b[n..]);
+    n += fl.len;
+    cols += fl.len;
     if (queued > 0) {
         const q = std.fmt.bufPrint(b[n..], " · {d} queued", .{queued}) catch "";
         n += q.len;
@@ -600,9 +605,38 @@ fn endLine() void {
     code = false;
 }
 
+/// A tool call is streaming in: its name and the argument bytes so far, shown on the live line
+/// ("⋯ 12s · write 14 KB") so a long write is visibly progressing, not a frozen timer.
+pub fn forming(name: []const u8, bytes: usize) void {
+    if (!color or oneshot) return;
+    if (thinking) endThinking();
+    const n = @min(name.len, form_name.len);
+    @memcpy(form_name[0..n], name[0..n]);
+    form_n = n;
+    form_bytes = bytes;
+    if (screen.on) return requestDraw();
+    const now = sys.nowNs();
+    if (now -| last_live < 100 * std.time.ns_per_ms) return;
+    last_live = now;
+    if (!bol) put("\n");
+    bol = true;
+    flush();
+    drawLive();
+}
+var form_name: [32]u8 = undefined;
+var form_n: usize = 0;
+var form_bytes: usize = 0;
+
+fn formingLabel(b: []u8) []const u8 {
+    if (form_n == 0) return b[0..0];
+    const kb = (form_bytes + 512) / 1024;
+    return (if (kb > 0) std.fmt.bufPrint(b, " · {s} {d} KB", .{ form_name[0..form_n], kb }) else std.fmt.bufPrint(b, " · {s}", .{form_name[0..form_n]})) catch b[0..0];
+}
+
 /// End of an assistant message: close any open line and color.
 pub fn endMessage() void {
     started = false;
+    form_n = 0;
     endThinking();
     if (lead and pend_n > 0) flushPend();
     endLine();

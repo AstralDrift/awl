@@ -746,6 +746,43 @@ def think_view():
 think_view()
 
 
+def forming_view():
+    """A tool call streaming in shows its name and size on the live line; the reasoning folds first."""
+    d = tempfile.mkdtemp()
+    body = "x" * 12000
+    sp9 = os.path.join(d, "s.json")
+    json.dump([{"reasoning": "plan the page", "tool_calls": [{"name": "write", "arguments": {"path": "big.html", "content": body}}], "pace": 0.0012},
+               {"content": "formed ok"}], open(sp9, "w"))
+    srv9 = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp9], stdout=subprocess.PIPE)
+    port9 = srv9.stdout.readline().decode().strip()
+    p9, f9 = pty.fork()
+    if p9 == 0:
+        os.chdir(d)
+        os.execve(AWL, [AWL], dict(env, AWL_URL=f"http://127.0.0.1:{port9}", XDG_STATE_HOME=os.path.join(d, "state")))
+    fcntl.ioctl(f9, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    out = b""
+    end = time.time() + 2
+    while b"\xe2\x80\xba " not in out and time.time() < end:
+        if select.select([f9], [], [], 0.05)[0]:
+            out += os.read(f9, 65536)
+    os.write(f9, b"go\r")
+    out = b""
+    end = time.time() + 15
+    while b"formed ok" not in out and time.time() < end:
+        if select.select([f9], [], [], 0.05)[0]:
+            out += os.read(f9, 65536)
+    plain = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", out)
+    check("forming tool call: name and size on the live line", re.search(rb"\xc2\xb7 write \d+ KB", plain) is not None, plain[-300:])
+    check("forming tool call: reasoning folded before it", plain.find("∴ thought".encode()) != -1 and plain.find("∴ thought".encode()) < plain.find(b"\xc2\xb7 write"), plain[:300])
+    check("forming tool call: the call still runs", os.path.exists(os.path.join(d, "big.html")) and b"formed ok" in out, plain[-200:])
+    os.kill(p9, signal.SIGKILL)
+    os.waitpid(p9, 0)
+    srv9.kill()
+
+
+forming_view()
+
+
 def full_screen():
     """--full: alternate screen, conversation drawn above the input, PgUp scrolls,
     the transcript is printed on the normal screen at exit; /full toggles."""
