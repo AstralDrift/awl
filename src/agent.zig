@@ -309,7 +309,7 @@ pub fn run() Outcome {
         ui.liveStart();
         const t0 = sys.nowNs();
         // chat templates (Nanbeige4.3, Qwen3.x) read enable_thinking; other servers ignore unknown kwargs
-        streamRetrying(msgs.items(), if (no_think) "],\"chat_template_kwargs\":{\"enable_thinking\":false}}" else "]}") catch |e| {
+        streamRetrying(msgs.items(), if (no_think or !thinking) "],\"chat_template_kwargs\":{\"enable_thinking\":false}}" else "]}") catch |e| {
             ui.endMessage();
             if (e == error.Status and llm.last_status == 400 and !forced and tooLong() and compact(true)) {
                 forced = true;
@@ -712,6 +712,10 @@ fn callId(c: *const llm.Call, step: usize, i: usize, b: []u8) []const u8 {
     if (c.id.n > 0) return c.id.get();
     return std.fmt.bufPrint(b, "call_{d}_{d}", .{ step, i }) catch "call";
 }
+
+/// AWL_THINKING=off: every request asks the chat template for no thinking (enable_thinking=false), for models
+/// that think long on every turn (Nanbeige4.3) when speed matters more than deliberation.
+pub var thinking = true;
 
 /// AWL_KEEP_REASONING (default on; 0 = off): the reasoning goes back with the turn as reasoning_content.
 /// Chat templates (Nanbeige4.3, Qwen3.x) re-render it in the turn's <think> block; without it the

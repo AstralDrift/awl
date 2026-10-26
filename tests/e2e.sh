@@ -362,6 +362,11 @@ serve "$W/shrink.json"
 out=$(cd "$W" && "$AWL" -p go 2>"$W/o")
 python3 -c "import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; assert len(r) == 2 and r[1]['max_tokens'] == 49152 - 1034 - 64, [x.get('max_tokens') for x in r]" "$LOG" && [ "$out" = "shrunk ok" ] && ! grep -q compacted "$W/o" && ok "400 'exceeds context' -> max_tokens shrunk, no compaction" || bad "shrink" "$out $(tail -2 "$W/o")"
 stop
+# AWL_THINKING=off asks every request for no thinking
+serve "$W/hi.json"
+out=$(cd "$W" && AWL_THINKING=off "$AWL" -p go 2>/dev/null)
+python3 -c "import json,sys; r=json.loads(open(sys.argv[1]).readline()); assert r.get('chat_template_kwargs') == {'enable_thinking': False}, r.get('chat_template_kwargs')" "$LOG" && ok "AWL_THINKING=off sends enable_thinking false" || bad "thinking off" "$out"
+stop
 # a call cut off mid-arguments goes back to the server as {} (templates iterate arguments as a mapping)
 echo '[{"tool_calls": [{"name": "write", "arguments": "{\"path\": \"cut2.txt\""}], "finish": "length"}, {"content": "finished"}]' > "$W/cutargs.json"
 serve "$W/cutargs.json"
