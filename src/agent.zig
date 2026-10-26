@@ -190,10 +190,26 @@ const elided = "[old tool output elided to save context; rerun the tool if you n
 /// When the prompt passes 60% of the window, replace the oldest large tool
 /// outputs with a placeholder until the estimate drops under 40%. The last
 /// 8 messages are never touched. The session log keeps the full text.
+/// Only when it frees at least 5% of the window: editing an old message makes
+/// the server's prefix cache miss from there on, so a small saving every step
+/// would cost a long re-prefill every step (compaction handles real pressure).
 fn elide() void {
     if (ctx_limit == 0 or n_msgs > max_index) return;
     if (ctx_tokens * 10 < ctx_limit * 6) return;
     const before = msgs.len;
+    {
+        const all = msgs.items();
+        var room: usize = 0; // bytes the eligible outputs hold
+        for (0..n_msgs) |i| {
+            const m = all[offs[i] + 1 .. if (i + 1 < n_msgs) offs[i + 1] else all.len];
+            if (i + 8 < n_msgs and m.len > 400 and std.mem.startsWith(u8, m, tool_prefix) and
+                std.mem.indexOf(u8, m[0..@min(m.len, 200)], "\"content\":\"" ++ tools.todo_marker) == null) room += m.len;
+        }
+        if (ctx_tokens * room / before < ctx_limit / 20) {
+            if (ctx_tokens * 10 > ctx_limit * 9) ui.note("context nearly full ({d}k of {d}k); /clear to start fresh", .{ ctx_tokens / 1000, ctx_limit / 1000 });
+            return;
+        }
+    }
     const target = ctx_limit * 4 / 10;
     var nb = Buf.init(msgs.cap);
     const items = msgs.items();
