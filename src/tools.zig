@@ -250,9 +250,16 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         const q = std.json.parseFromSliceLeaky(struct { pattern: ?Str = null, path: ?Str = null }, a, args, opts) catch return badArgs(out, name, args, &r);
         const p = .{ .pattern = opt(q.pattern), .path = opt(q.path) };
         sum(&r, name, "{s} {s}", .{ p.pattern orelse "*", p.path orelse "." });
-        var argv: [8:null]?[*:0]const u8 = .{ fd_path, "--color", "never", "--max-results", "501" } ++ .{null} ** 3;
-        argv[5] = a.dupeZ(u8, p.pattern orelse "") catch return badArgs(out, name, args, &r);
-        argv[6] = a.dupeZ(u8, p.path orelse ".") catch return badArgs(out, name, args, &r);
+        var argv: [9:null]?[*:0]const u8 = .{ fd_path, "--color", "never", "--max-results", "501" } ++ .{null} ** 4;
+        var pat = p.pattern orelse "";
+        var i: usize = 5;
+        if (pat.len > 0 and pat[0] == '*') { // a glob (*.py, *.py$): never a valid regex, so read it as the glob it is
+            pat = std.mem.trimEnd(u8, pat, "$");
+            argv[i] = "--glob";
+            i += 1;
+        }
+        argv[i] = a.dupeZ(u8, pat) catch return badArgs(out, name, args, &r);
+        argv[i + 1] = a.dupeZ(u8, p.path orelse ".") catch return badArgs(out, name, args, &r);
         r.ok = try spawn(&argv, 30_000, out, .find);
         capLines(out, 500, "entries");
     } else {
@@ -1064,6 +1071,25 @@ test "bad tool arguments say what is wrong" {
     out.reset();
     _ = try run("write", "{}", &out);
     try t.expectEqualStrings("invalid arguments for write: missing path, content", out.items());
+}
+
+test "find reads a leading-* pattern as a glob" {
+    detect();
+    if (!have_fd) return error.SkipZigTest;
+    ui.quiet = true;
+    var db: [64]u8 = undefined;
+    const d = tmpdir(&db);
+    var pb: [128]u8 = undefined;
+    var out = Buf.init(1 << 16);
+    try t.expect(write(try std.fmt.bufPrint(&pb, "{s}/a.py", .{d}), &.{"x"}, &out));
+    try t.expect(write(try std.fmt.bufPrint(&pb, "{s}/b.txt", .{d}), &.{"x"}, &out));
+    var ab: [256]u8 = undefined;
+    for ([_][]const u8{ "*.py", "*.py$" }) |g| {
+        out.reset();
+        const r = try run("find", try std.fmt.bufPrint(&ab, "{{\"pattern\":\"{s}\",\"path\":\"{s}\"}}", .{ g, d }), &out);
+        try t.expect(r.ok);
+        try t.expect(std.mem.indexOf(u8, out.items(), "a.py") != null and std.mem.indexOf(u8, out.items(), "b.txt") == null);
+    }
 }
 
 test "read marks the first line and every 10th line" {
