@@ -167,7 +167,7 @@ pub fn repl() u8 {
     out("\x1b[?2004h\x1b[?1004h"); // bracketed paste; focus in/out reports
     if (start_full) enterFull();
     welcome();
-    var ed = Editor{};
+    var ed = Editor{ .text = text_mem };
     editor = &ed;
     session.loadHistory(&ed.hist);
     while (true) {
@@ -456,9 +456,20 @@ fn notify(o: agent.Outcome, secs: f64) void {
 const input_cap = 4 << 20;
 
 // Type-ahead while the agent runs: keys are read on each tick, never blocking.
-var draft_mem: [input_cap]u8 = undefined;
+var draft_mem: *[input_cap]u8 = undefined; // these three: lazy mmaps, see bigBuffersLazy
 var draft_n: usize = 0;
-var q_mem: [input_cap]u8 = undefined;
+var q_mem: *[input_cap]u8 = undefined;
+
+/// The three 4 MiB input buffers as lazy anonymous mappings outside .bss: with THP "always" a .bss this
+/// big was backed by 2 MB pages at load (idle RSS 4.4 MB instead of ~0.3 MB). Called first thing in main.
+pub fn bigBuffersLazy() void {
+    for ([_]**[input_cap]u8{ &draft_mem, &q_mem, &text_mem }) |slot| {
+        const rc = linux.mmap(null, input_cap, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .NORESERVE = true }, -1, 0);
+        if (linux.errno(rc) != .SUCCESS) @panic("mmap");
+        _ = linux.madvise(@ptrFromInt(rc), input_cap, linux.MADV.NOHUGEPAGE);
+        slot.* = @ptrFromInt(rc);
+    }
+}
 var q_n: usize = 0;
 var q_count: usize = 0;
 var esc: enum { none, esc, seq } = .none;
@@ -1127,12 +1138,12 @@ fn keylog(bytes: []const u8) void {
 const prompt = "› ";
 const indent = "  ";
 
-// Big buffers live in .bss so they cost nothing in the binary or until touched.
-var text_mem: [input_cap]u8 = undefined;
+// Big buffers cost nothing in the binary or until touched (text_mem: see bigBuffersLazy).
+var text_mem: *[input_cap]u8 = undefined;
 var in_mem: [4096]u8 = undefined;
 
 const Editor = struct {
-    text: *[input_cap]u8 = &text_mem,
+    text: *[input_cap]u8 = undefined, // text_mem
     dropped: usize = 0, // bytes of the current paste that did not fit
     len: usize = 0,
     cur: usize = 0,

@@ -147,6 +147,7 @@ ghostty, alacritty, and over ssh).
 | `AWL_STATUS` | `model,ctx,mode,branch` | items of the status line under the prompt, in order: `model`, `ctx`, `mode`, `branch`, `dir`, `session`; `off` hides it |
 | `AWL_WELCOME` | on | `off` shrinks the startup screen to one line |
 | `AWL_MODELS` | unset | comma-separated models that Ctrl-P cycles through |
+| `AWL_THINK_ROWS` | `6` | rows of the model's newest reasoning shown live (word-wrapped, above the timer); they fold into one `∴ thought Ns` line when it answers. `0`: timer only |
 | `AWL_DEBUG_KEYS` | unset | file to append every raw input chunk to, escaped (`\e` = Esc): shows exactly what the terminal sends on a keypress or paste |
 | `AWL_FULL` | unset | `1` starts in full-screen mode (same as `--full`) |
 

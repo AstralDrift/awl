@@ -162,6 +162,12 @@ pub fn liveRows(b: *@import("buf.zig").Buf, w: usize) void {
         b.add(r);
         b.byte('\n');
     };
+    var tb: [8192]u8 = undefined;
+    var tr = std.mem.splitSequence(u8, thoughtRows(&tb, w), "\r\n");
+    while (tr.next()) |r| if (r.len > 0) {
+        b.add(r);
+        b.byte('\n');
+    };
     const secs = (sys.nowNs() - live_t0) / std.time.ns_per_s;
     b.print("{s}{s} {d}s", .{ muted(), if (thinking) "∴" else "⋯", secs });
     var cols: usize = 4 + std.fmt.count("{d}", .{secs});
@@ -172,13 +178,6 @@ pub fn liveRows(b: *@import("buf.zig").Buf, w: usize) void {
     if (held.len > 0) {
         b.print(" · then {s}", .{held[0..@min(held.len, 40)]});
         cols += 8 + @min(held.len, 40);
-    }
-    if (thinking) {
-        const room = @min(w -| (cols + 1), tail_n);
-        var st = tail_n - room;
-        while (st < tail_n and (tail[st] & 0xC0) == 0x80) st += 1;
-        b.byte(' ');
-        b.add(tail[st..tail_n]);
     }
     b.add(reset());
 }
@@ -198,8 +197,10 @@ var fence = false;
 var ticks: u8 = 0;
 var thinking = false;
 var think_start: u64 = 0;
-var tail: [256]u8 = undefined;
+var tail: [4096]u8 = undefined; // the newest reasoning text, for the live rows
 var tail_n: usize = 0;
+pub var think_rows: usize = 6; // AWL_THINK_ROWS: reasoning rows shown while the model thinks (0: timer only)
+var thought_rows: usize = 0; // rows the last thoughtRows() wrote
 
 pub fn reasoning(s: []const u8) void {
     if (!color or oneshot) return;
@@ -212,24 +213,62 @@ pub fn reasoning(s: []const u8) void {
     for (s) |c0| {
         const c = if (c0 < 0x20 or c0 == 0x7f) ' ' else c0; // no control codes on the live line
         if (tail_n == tail.len) {
-            std.mem.copyForwards(u8, tail[0 .. tail.len - 64], tail[64..]);
-            tail_n -= 64;
+            std.mem.copyForwards(u8, tail[0 .. tail.len - 1024], tail[1024..]);
+            tail_n -= 1024;
         }
         tail[tail_n] = c;
         tail_n += 1;
     }
     if (screen.on) return;
-    if (draft.len > 0 or queued > 0 or held.len > 0 or panelRows() > 0) return drawLive();
-    if (live and live_rows > 1) put(""); // a panel was up: clear it first
-    const w = @min(@as(usize, sys.termCols()) -| 6, tail_n);
-    var start = tail_n - w;
-    while (start < tail_n and (tail[start] & 0xC0) == 0x80) start += 1; // utf-8 boundary
-    put("\r\x1b[K");
-    put(muted());
-    put("∴ ");
-    put(tail[start..tail_n]);
-    put(reset());
+    const now = sys.nowNs();
+    if (now -| last_live < 33 * std.time.ns_per_ms) return; // ~30 frames/s at most; tick() catches up
+    last_live = now;
     flush();
+    drawLive();
+}
+var last_live: u64 = 0;
+
+/// The end of the reasoning, word-wrapped to `w` columns, as the last `think_rows` rows
+/// ("\r\n" after each). Widths are counted in bytes: never more than the columns a row
+/// really takes, so a row cannot spill onto a second line and break the redraw.
+fn thoughtRows(b: []u8, w: usize) []const u8 {
+    thought_rows = 0;
+    const room = @min(think_rows, @as(usize, sys.termRows()) -| (panel_rows + 4));
+    if (!thinking or room == 0 or w < 12) return b[0..0];
+    const ww = w - 2;
+    var st: usize = 0;
+    while (st < tail_n and (tail[st] & 0xC0) == 0x80) st += 1; // utf-8 boundary
+    if (tail_n == tail.len or st > 0) { // the buffer was shifted: start at a word
+        while (st < tail_n and tail[st] != ' ') st += 1;
+    }
+    while (st < tail_n and tail[st] == ' ') st += 1;
+    // row starts/ends in a ring of the newest `room` rows
+    var rs: [64][2]usize = undefined;
+    var nrows: usize = 0;
+    var i = st;
+    while (i < tail_n) {
+        var end = @min(i + ww, tail_n);
+        if (end < tail_n) { // break at the last space, else mid-word on a utf-8 boundary
+            var sp = end;
+            while (sp > i and tail[sp] != ' ') sp -= 1;
+            if (sp > i) end = sp else while (end > i and (tail[end] & 0xC0) == 0x80) end -= 1;
+            if (end == i) end = @min(i + ww, tail_n);
+        }
+        rs[nrows % rs.len] = .{ i, end };
+        nrows += 1;
+        i = end;
+        while (i < tail_n and tail[i] == ' ') i += 1;
+    }
+    const show = @min(nrows, @min(room, rs.len));
+    var n: usize = 0;
+    var k = nrows - show;
+    while (k < nrows) : (k += 1) {
+        const r = rs[k % rs.len];
+        const s = std.fmt.bufPrint(b[n..], "{s}  {s}{s}\r\n", .{ muted(), tail[r[0]..r[1]], reset() }) catch break;
+        n += s.len;
+        thought_rows += 1;
+    }
+    return b[0..n];
 }
 
 // Live area: while the model or a tool works and nothing else is printing, the
@@ -252,10 +291,7 @@ pub fn liveStart() void {
 pub fn tick() void {
     if (!color or oneshot or quiet or capture != null) return;
     if (screen.on) return drawNow(); // the timer, the draft, any output held back
-    if (thinking) {
-        if (draft.len > 0 or queued > 0 or held.len > 0 or panel_rows > 0) drawLive();
-        return;
-    }
+    if (thinking) return drawLive(); // the timer runs on while the reasoning rows stand still
     if (!bol or on > 0) return;
     const now = sys.nowNs();
     const changed = draft_changed;
@@ -267,27 +303,21 @@ pub fn tick() void {
 }
 
 fn drawLive() void {
-    var b: [4096]u8 = undefined;
+    var b: [16384]u8 = undefined;
     var n: usize = 0;
     const secs = (sys.nowNs() - live_t0) / std.time.ns_per_s;
     const w = @as(usize, sys.termCols()) -| 1;
     // back to the top of the area drawn last time, then the checklist
-    const top = if (live and live_rows > 1) (std.fmt.bufPrint(&b, "\x1b[{d}A\r\x1b[J", .{live_rows - 1}) catch return) else (std.fmt.bufPrint(&b, "\r\x1b[K", .{}) catch return);
+    // one synchronized frame (DEC 2026; ignored where unsupported): no flicker while it repaints
+    const top = if (live and live_rows > 1) (std.fmt.bufPrint(&b, "\x1b[?2026h\x1b[{d}A\r\x1b[J", .{live_rows - 1}) catch return) else (std.fmt.bufPrint(&b, "\x1b[?2026h\r\x1b[K", .{}) catch return);
     n = top.len;
-    const rows = panel(b[n .. b.len - 1024], w);
+    const rows = panel(b[n .. b.len - 9216], w);
     n += rows.len;
+    const trows = thoughtRows(b[n .. b.len - 1024], w);
+    n += trows.len;
     const head = std.fmt.bufPrint(b[n..], "{s}{s} {d}s", .{ muted(), if (thinking) "∴" else "⋯", secs }) catch return;
     n += head.len;
     var cols: usize = 4 + std.fmt.count("{d}", .{secs});
-    if (thinking and draft.len == 0 and queued == 0 and held.len == 0) { // the reasoning tail
-        const room = @min(w -| (cols + 1), tail_n);
-        var start = tail_n - room;
-        while (start < tail_n and (tail[start] & 0xC0) == 0x80) start += 1;
-        b[n] = ' ';
-        n += 1;
-        @memcpy(b[n .. n + (tail_n - start)], tail[start..tail_n]);
-        n += tail_n - start;
-    }
     if (queued > 0) {
         const q = std.fmt.bufPrint(b[n..], " · {d} queued", .{queued}) catch "";
         n += q.len;
@@ -314,9 +344,12 @@ fn drawLive() void {
     const r = reset();
     @memcpy(b[n .. n + r.len], r);
     n += r.len;
+    const e = "\x1b[?2026l";
+    @memcpy(b[n .. n + e.len], e);
+    n += e.len;
     sys.writeAll(sys.stdout, b[0..n]) catch {};
     live = true;
-    live_rows = panel_rows + 1;
+    live_rows = panel_rows + thought_rows + 1;
 }
 
 // The model's checklist, from its latest todo call: one line per item, "[x] text".
@@ -403,7 +436,7 @@ fn endThinking() void {
     if (!thinking) return;
     thinking = false;
     const secs = @as(f64, @floatFromInt(sys.nowNs() - think_start)) / 1e9;
-    if (!screen.on) put("\r\x1b[K");
+    if (!screen.on) put(if (live) "" else "\r\x1b[K"); // put() clears a live area of any height
     print("{s}∴ thought {d:.1}s{s}\n", .{ muted(), secs, reset() });
 }
 

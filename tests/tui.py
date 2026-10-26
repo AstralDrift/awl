@@ -645,6 +645,107 @@ def todo_panel():
 todo_panel()
 
 
+class Screen:
+    """Just enough of a terminal for awl's inline live area: text, CR, LF, CSI A/J/K, SGR and DEC modes ignored."""
+    def __init__(self, rows, cols):
+        self.rows, self.cols, self.lines, self.y, self.x = rows, cols, [""], 0, 0
+
+    def feed(self, data):
+        s = data.decode("utf-8", "replace")
+        i = 0
+        while i < len(s):
+            c = s[i]
+            if c == "\x1b":
+                m = re.match(r"\x1b\[([?0-9;]*)([A-Za-z])", s[i:])
+                if not m:
+                    i += 1
+                    continue
+                arg, op = m.group(1), m.group(2)
+                n = int(arg) if arg.isdigit() else 1
+                if op == "A":
+                    self.y = max(0, self.y - n)
+                elif op == "J":
+                    self.lines = self.lines[:self.y + 1]
+                    self.lines[self.y] = self.lines[self.y][:self.x]
+                elif op == "K":
+                    self.lines[self.y] = self.lines[self.y][:self.x]
+                i += len(m.group(0))
+                continue
+            if c == "\r":
+                self.x = 0
+            elif c == "\n":
+                self.y += 1
+                if self.y == len(self.lines):
+                    self.lines.append("")
+            elif c >= " ":
+                l = self.lines[self.y].ljust(self.x)
+                self.lines[self.y] = l[:self.x] + c + l[self.x + 1:]
+                self.x += 1
+                if self.x > self.cols:
+                    self.overflow = True
+            i += 1
+
+    def tail(self, n):
+        return [l.rstrip() for l in self.lines[-n:]]
+
+
+def think_view():
+    """Issue #1: while the model reasons, the newest reasoning shows as word-wrapped rows above the timer line,
+    the rows never run past the terminal width, and the whole area collapses to one "∴ thought" line afterward."""
+    d = tempfile.mkdtemp()
+    words = ("parse the header then check every field against the spec and note where the length "
+             "prefix disagrees with the payload size before deciding on a fix ").split()
+    reasoning = " ".join(words[i % len(words)] + (str(i) if i % 7 == 0 else "") for i in range(260))
+    sp8 = os.path.join(d, "s.json")
+    json.dump([{"reasoning": reasoning, "content": "think done", "pace": 0.008}], open(sp8, "w"))
+    for rows_env, label in (("", "default rows"), ("0", "AWL_THINK_ROWS=0")):
+        srv8 = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp8], stdout=subprocess.PIPE)
+        port8 = srv8.stdout.readline().decode().strip()
+        e8 = dict(env, AWL_URL=f"http://127.0.0.1:{port8}", XDG_STATE_HOME=os.path.join(d, "state"))
+        if rows_env:
+            e8["AWL_THINK_ROWS"] = rows_env
+        p8, f8 = pty.fork()
+        if p8 == 0:
+            os.chdir(d)
+            os.execve(AWL, [AWL], e8)
+        fcntl.ioctl(f8, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        scr = Screen(24, 80)
+        mid, most, widest = None, 0, 0
+        def pump(until_pat, secs):
+            nonlocal mid, most, widest
+            got = b""
+            end = time.time() + secs
+            while until_pat not in got and time.time() < end:
+                if select.select([f8], [], [], 0.05)[0]:
+                    chunk = os.read(f8, 65536)
+                    got += chunk
+                    scr.feed(chunk)
+                    shown = [l for l in scr.tail(10) if l.startswith("  ") and len(l) > 20]
+                    if "∴" in "".join(scr.tail(1)) and len(shown) > most:
+                        most, mid = len(shown), list(scr.tail(10))
+                    widest = max(widest, max(len(l) for l in scr.lines))
+            return got
+        pump(b"\xe2\x80\xba ", 2)
+        os.write(f8, b"go\r")
+        out = pump(b"think done", 10)
+        final = [l for l in scr.tail(8) if l]
+        if not rows_env:
+            check("live reasoning: several wrapped rows above the timer", most >= 4 and most <= 6, f"{most} rows; {mid}")
+            check("live reasoning: no row wider than the terminal", widest <= 80 and not getattr(scr, "overflow", False), widest)
+            rows8 = [l[2:] for l in (mid or []) if l.startswith("  ") and not l.startswith("   ")]
+            check("live reasoning: rows are consecutive text, wrapped at words", len(rows8) >= 4 and " ".join(rows8[:-1]) in reasoning, rows8)
+            check("live reasoning: frames are synchronized", b"\x1b[?2026h" in out and b"\x1b[?2026l" in out, out[:200])
+            check("live reasoning: collapses to one line after the turn", any("∴ thought" in l for l in final) and not any(l.startswith("  ") and "parse" in l for l in final), final)
+        else:
+            check("AWL_THINK_ROWS=0: timer line only", most == 0 and any("∴ thought" in l for l in final), f"{most} rows; {final}")
+        os.kill(p8, signal.SIGKILL)
+        os.waitpid(p8, 0)
+        srv8.kill()
+
+
+think_view()
+
+
 def full_screen():
     """--full: alternate screen, conversation drawn above the input, PgUp scrolls,
     the transcript is printed on the normal screen at exit; /full toggles."""

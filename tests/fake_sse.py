@@ -4,7 +4,8 @@
 Usage: fake_sse.py SCRIPT.json [--port N] [--log FILE] [--split N] [--mode chunked|length|close] [--comments 1]
 SCRIPT is a list of turns, served in order (the last one repeats):
   {"reasoning": "...", "content": "...", "tool_calls": [{"name": "read", "arguments": {...}}],
-   "status": 200, "delay": 0.0, "hang": false}
+   "status": 200, "delay": 0.0, "hang": false, "pace": 0.0}
+"pace" (chunked mode) sends one event per chunk with that many seconds between them, like a live model.
 Prints the bound port on stdout, then serves until killed.
 Each request body is appended to --log as one JSON line, plus "_path" and "_auth" (the
 Authorization header). --comments 1 interleaves OpenRouter-style ": OPENROUTER PROCESSING" lines.
@@ -26,7 +27,7 @@ served = 0
 lock = threading.Lock()
 
 
-def events(turn, model):
+def events(turn, model, parts=False):
     def ev(delta, finish=None):
         return {"id": "x", "object": "chat.completion.chunk", "model": model,
                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
@@ -46,6 +47,8 @@ def events(turn, model):
     out.append(ev({}, turn.get("finish") or ("tool_calls" if turn.get("tool_calls") else "stop")))
     out.append({"id": "x", "choices": [], "usage": turn.get("usage") or {"prompt_tokens": 100 + served, "completion_tokens": 10}})
     sep = b": OPENROUTER PROCESSING\n\n" if int(opt["--comments"]) else b""
+    if parts:
+        return [b"data: " + json.dumps(e).encode() + b"\n\n" for e in out] + [b"data: [DONE]\n\n"]
     body = sep + b"".join(b"data: " + json.dumps(e).encode() + b"\n\n" + sep for e in out)
     return body + b"data: [DONE]\n\n"
 
@@ -96,6 +99,13 @@ def handle(conn):
         if status != 200:
             body = json.dumps({"error": {"message": turn.get("content", "boom")}}).encode()
             conn.sendall(b"HTTP/1.1 %d Err\r\nContent-Length: %d\r\n\r\n" % (status, len(body)) + body)
+            return
+        if turn.get("pace") and mode == "chunked":
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+            for part in events(turn, req.get("model", ""), parts=True):
+                conn.sendall(b"%x\r\n" % len(part) + part + b"\r\n")
+                time.sleep(turn["pace"])
+            conn.sendall(b"0\r\n\r\n")
             return
         data = events(turn, req.get("model", ""))
         if mode == "chunked":
