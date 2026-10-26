@@ -106,6 +106,12 @@ ghostty, alacritty, and over ssh).
 
 ## Safety
 
+- **Sandbox** (bubblewrap, on by default when `/usr/bin/bwrap` exists): the model's commands see the whole
+  filesystem read-only; they can write only to the project (git root or cwd), `/tmp`, build caches and
+  `AWL_SANDBOX_WRITE` dirs. `~/.ssh`, `~/.gnupg`, cloud/gh credentials, keyrings, the Local AI key and the
+  docker socket are hidden. `AWL_SANDBOX_NET=off` cuts their network (fully offline; local test servers still
+  work on their private localhost). write/edit follow the same rule. `AWL_SANDBOX=off` turns it off; your
+  own `!cmd` is never sandboxed.
 - `/undo` puts back the files the last turn wrote or edited (and removes files it created);
   repeat it to go further back. The model is told what was undone. Changes made by shell
   commands are not tracked.

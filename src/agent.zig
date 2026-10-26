@@ -6,6 +6,7 @@ const sys = @import("sys.zig");
 const llm = @import("llm.zig");
 const http = @import("http.zig");
 const tools = @import("tools.zig");
+const sandbox = @import("sandbox.zig");
 const ui = @import("ui.zig");
 const session = @import("session.zig");
 const skills = @import("skills.zig");
@@ -69,6 +70,8 @@ pub fn init(cwd: []const u8) void {
     const md = yd.calculateMonthDay();
     var tb: [600]u8 = undefined;
     bufm.escape(&head, std.fmt.bufPrint(&tb, "\nTools: {s}.\nWorking directory: {s}\nDate: {d}-{d:0>2}-{d:0>2}", .{ tools.names(), cwd, yd.year, md.month.numeric(), md.day_index + 1 }) catch "");
+    var sb: [160]u8 = undefined;
+    if (sandbox.on) bufm.escape(&head, std.fmt.bufPrint(&tb, "\nCommands run in a sandbox: {s}.", .{sandbox.describe(&sb)["sandbox: ".len..]}) catch "");
     addAgentsMd(cwd);
     var hb: [1024]u8 = undefined;
     var rb: [1024]u8 = undefined;

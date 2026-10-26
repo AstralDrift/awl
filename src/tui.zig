@@ -250,6 +250,8 @@ fn welcome() void {
     if (br.len > 0) rest.print(" · ⎇ {s}", .{br});
     if (agent.n_agents_md > 0) rest.print(" · {d} AGENTS.md", .{agent.n_agents_md});
     if (agent.n_skills > 0) rest.print(" · {d} skill{s}", .{ agent.n_skills, if (agent.n_skills == 1) "" else "s" });
+    const sx = @import("sandbox.zig");
+    rest.print(" · {s}", .{if (sx.on) (if (sx.net) "sandboxed" else "sandboxed, offline") else "no sandbox"});
     const rest_w = std.unicode.utf8CountCodepoints(rest.items()) catch rest.len;
     const room = @as(usize, sys.termCols()) -| (rest_w + 1);
     const short = tailCols(dir, @max(room, 12));

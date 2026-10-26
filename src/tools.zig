@@ -156,6 +156,7 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         const path = p.path.v;
         const content = p.content.v;
         sum(&r, name, "{s} ({d} lines)", .{ path, std.mem.count(u8, content, "\n") + @intFromBool(content.len > 0 and content[content.len - 1] != '\n') });
+        if (outside(path, out)) return r;
         if (!try gate(name, true, out)) return r;
         save(path);
         r.ok = write(path, &.{content}, out);
@@ -165,6 +166,10 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         const E = struct { old_string: ?Str = null, new_string: ?Str = null, old: ?Str = null, new: ?Str = null };
         const p = std.json.parseFromSliceLeaky(struct { path: Str, old_string: ?Str = null, new_string: ?Str = null, old: ?Str = null, new: ?Str = null, replace_all: bool = false, edits: ?[]const E = null }, a, args, opts) catch return badArgs(out, name, args, &r);
         const path = p.path.v;
+        if (outside(path, out)) {
+            sum(&r, name, "{s}", .{path});
+            return r;
+        }
         var pairs: [max_edits]Pair = undefined;
         var n: usize = 0;
         if (opt(p.old_string) orelse opt(p.old)) |old| {
@@ -215,8 +220,10 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
             r.ok = startJob(cmd, out);
             return r;
         }
-        const argv = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
-        r.ok = try spawn(&argv, @as(u64, if (p.timeout) |x| x.v else 120) * 1000, out, .bash);
+        var av: [96:null]?[*:0]const u8 = undefined;
+        var zs = sandbox.ZStrings{};
+        _ = sandbox.argv(cmd, workdir(), &av, &zs);
+        r.ok = try spawn(&av, @as(u64, if (p.timeout) |x| x.v else 120) * 1000, out, .bash);
     } else if (eq(u8, name, "grep") and have_rg) {
         const p = std.json.parseFromSliceLeaky(struct { pattern: Str, path: ?Str = null, glob: ?Str = null, context: ?Int(u8) = null, ignore_case: bool = false, limit: ?Int(usize) = null }, a, args, opts) catch return badArgs(out, name, args, &r);
         const pattern = p.pattern.v;
@@ -270,6 +277,25 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
 }
 
 /// Say what is wrong so the model can fix the call in one step: not JSON (cut off?), or which fields are missing.
+const sandbox = @import("sandbox.zig");
+
+fn workdir() []const u8 {
+    const S = struct {
+        var b: [4096]u8 = undefined;
+    };
+    const rc = linux.getcwd(&S.b, S.b.len);
+    return if (linux.errno(rc) == .SUCCESS) std.mem.sliceTo(&S.b, 0) else ".";
+}
+
+/// write/edit outside what the sandbox allows: refuse, and say what is writable.
+fn outside(path: []const u8, out: *Buf) bool {
+    var nb: [4096]u8 = undefined;
+    const abs = sandbox.normalize(path, workdir(), &nb);
+    if (sandbox.writable(abs)) return false;
+    out.print("not written: {s} is outside the sandbox (writable: the project {s}, /tmp, build caches; the user can add AWL_SANDBOX_WRITE=dir)", .{ abs, sandbox.root });
+    return true;
+}
+
 fn badArgs(out: *Buf, name: []const u8, args: []const u8, r: *Result) Result {
     r.ok = false;
     const eql = std.mem.eql;
@@ -723,8 +749,10 @@ fn startJob(cmd: [*:0]const u8, out: *Buf) bool {
         _ = linux.dup2(lfd, 2);
         sys.unblockAll();
         var env: [1024]?[*:0]const u8 = undefined;
-        const argv = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
-        _ = linux.execve("/bin/bash", &argv, sys.childEnvp(sys.envp, &env));
+        var av: [96:null]?[*:0]const u8 = undefined;
+        var zs = sandbox.ZStrings{};
+        _ = sandbox.argv(cmd, workdir(), &av, &zs);
+        _ = linux.execve(av[0].?, &av, sys.childEnvp(sys.envp, &env));
         linux.exit_group(127);
     }
     sys.close(lfd);

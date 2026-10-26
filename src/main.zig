@@ -32,6 +32,7 @@ const usage =
     \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MODE AWL_REASONING AWL_MAX_TOKENS AWL_MAX_STEPS
     \\     AWL_RETRIES AWL_SYSTEM AWL_AGENTS (off) AWL_WELCOME (off: one line)
     \\     AWL_MODELS (Ctrl-P cycles) AWL_STATUS (model,ctx,mode,branch,dir,session or off)
+    \\     AWL_SANDBOX (off) AWL_SANDBOX_NET (off: no network for commands) AWL_SANDBOX_WRITE=dir:dir
     \\     AWL_THINK_BUDGET=N (SGLang --enable-strict-thinking: cap reasoning per reply)
     \\     AWL_THINKING (off: ask the chat template for no thinking on every request)
     \\     AWL_KEEP_REASONING (0: do not send reasoning back with each turn)
@@ -88,6 +89,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var cwd_b: [4096]u8 = undefined;
     const cwd_rc = linux.getcwd(&cwd_b, cwd_b.len);
     const cwd = if (linux.errno(cwd_rc) == .SUCCESS) std.mem.sliceTo(&cwd_b, 0) else ".";
+    @import("sandbox.zig").setup(agent.projectRoot(cwd));
 
     agent.cfg = .{ .url = http.parseUrl(sys.getenv("AWL_URL") orelse "http://127.0.0.1:12434") catch die("AWL_URL must look like http://127.0.0.1:12434", .{}) };
     var key_b: [512]u8 = undefined;
@@ -184,6 +186,7 @@ test {
     _ = @import("session.zig");
     _ = @import("tui.zig");
     _ = @import("screen.zig");
+    _ = @import("sandbox.zig");
     _ = @import("agent.zig");
     _ = @import("ui.zig");
 }
