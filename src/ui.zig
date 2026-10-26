@@ -764,14 +764,16 @@ fn md(c: u8) void {
             put(reset());
             put(" ");
         },
-        .fence => {
+        .fence => { // no ``` on screen: the language (if any) in muted text, then the code indented and green
             fence = !fence;
             put(indent);
-            put(sgr(&th.green));
-            put("```");
-            if (!fence) put(reset());
+            put(if (fence) muted() else reset());
         },
         .text => {
+            if (fence) {
+                put("  ");
+                put(sgr(&th.green));
+            }
             lead = false;
             flushPend();
             return;
@@ -892,6 +894,7 @@ fn restyle() void {
 
 fn endLine() void {
     if (link_n > 0) flushLink();
+    if (fence) put(reset());
     if (star) put("*");
     star = false;
     if (heading or bold or code) put(reset());
@@ -1315,19 +1318,19 @@ test "markdown-lite: headings, bullets, bold, code, fences" {
     try tt.expectEqualStrings(
         "\x1b[1mTitle\x1b[0m\n" ++
             "•\x1b[0m item \x1b[1mbold\x1b[22m and x\x1b[0m\n" ++
-            "```zig\nconst a = 1; // **no**\n" ++
-            "```\x1b[0m\n" ++
+            "zig\x1b[0m\n  const a = 1; // **no**\x1b[0m\n" ++
+            "\x1b[0m\n" ++
             "plain * star\n#include\n",
         got,
     );
 }
 
-test "markdown-lite: tables align, quotes get a bar, a table in a fence stays as typed" {
+test "markdown-lite: tables align, quotes get a bar, a table in a fence stays as typed (fences hidden)" {
     color = true;
     defer color = false;
     const got = try render(mdAll, .{"| a | long name |\n|---|:---:|\n| `x` | **y** |\nafter\n> q\n```\n| raw |\n```\n"});
     try tt.expectEqualStrings(
-        "  a  long name\n  " ++ "─" ** 12 ++ "\n  x  y\nafter\n│ q\n```\n| raw |\n```\n",
+        "  a  long name\n  " ++ "─" ** 12 ++ "\n  x  y\nafter\n│ q\n\n  | raw |\n\n",
         try stripSgr(got),
     );
 }
