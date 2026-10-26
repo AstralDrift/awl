@@ -55,6 +55,9 @@ pub fn init(cwd: []const u8) void {
     // runaway reasoning loop (a Qwen reply once ran 69K tokens and ate a task's time limit).
     cap_max = std.fmt.parseInt(u32, sys.getenv("AWL_MAX_TOKENS") orelse "65536", 10) catch 65536;
     if (cap_max > 0) head.print(",\"max_tokens\":{d: >10}", .{cap_max}); // fixed width: setCap() rewrites it in place
+    // AWL_THINK_BUDGET=N: SGLang's per-request thinking cap (server started with --enable-strict-thinking forces
+    // </think> after N reasoning tokens). Off by default: other servers may not accept custom_params.
+    if (sys.getenv("AWL_THINK_BUDGET")) |v| if (std.fmt.parseInt(u32, v, 10) catch null) |n| head.print(",\"custom_params\":{{\"thinking_budget\":{d}}}", .{n});
     head.add(",\"tools\":[");
     tools.schema(&head);
     head.add("],\"messages\":[{\"role\":\"system\",\"content\":\"");

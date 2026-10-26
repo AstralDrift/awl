@@ -32,6 +32,7 @@ const usage =
     \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MODE AWL_REASONING AWL_MAX_TOKENS AWL_MAX_STEPS
     \\     AWL_RETRIES AWL_SYSTEM AWL_AGENTS (off) AWL_WELCOME (off: one line)
     \\     AWL_MODELS (Ctrl-P cycles) AWL_STATUS (model,ctx,mode,branch,dir,session or off)
+    \\     AWL_THINK_BUDGET=N (SGLang --enable-strict-thinking: cap reasoning per reply)
     \\     AWL_THINKING (off: ask the chat template for no thinking on every request)
     \\     AWL_KEEP_REASONING (0: do not send reasoning back with each turn)
     \\     AWL_THINK_ROWS (reasoning rows shown live, default 6; 0: timer only)

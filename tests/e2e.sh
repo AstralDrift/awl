@@ -362,6 +362,11 @@ serve "$W/shrink.json"
 out=$(cd "$W" && "$AWL" -p go 2>"$W/o")
 python3 -c "import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; assert len(r) == 2 and r[1]['max_tokens'] == 49152 - 1034 - 64, [x.get('max_tokens') for x in r]" "$LOG" && [ "$out" = "shrunk ok" ] && ! grep -q compacted "$W/o" && ok "400 'exceeds context' -> max_tokens shrunk, no compaction" || bad "shrink" "$out $(tail -2 "$W/o")"
 stop
+# AWL_THINK_BUDGET sends SGLang's per-request thinking cap
+serve "$W/hi.json"
+out=$(cd "$W" && AWL_THINK_BUDGET=1024 "$AWL" -p go 2>/dev/null)
+python3 -c "import json,sys; r=json.loads(open(sys.argv[1]).readline()); assert r.get('custom_params') == {'thinking_budget': 1024}, r.get('custom_params')" "$LOG" && ok "AWL_THINK_BUDGET sends custom_params" || bad "think budget" "$out"
+stop
 # AWL_THINKING=off asks every request for no thinking
 serve "$W/hi.json"
 out=$(cd "$W" && AWL_THINKING=off "$AWL" -p go 2>/dev/null)
