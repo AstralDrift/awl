@@ -102,7 +102,21 @@ fn options(a: *Args, with_net: bool) void {
         const p = std.fmt.bufPrint(&pb, "{s}{s}", .{ home, c }) catch continue;
         if (sys.exists(p)) a.addAll(&.{ "--tmpfs", a.zs.z(p) });
     };
-    for (sockets) |s| if (sys.exists(s)) a.addAll(&.{ "--ro-bind", "/dev/null", a.zs.z(s) });
+    // /var/run is usually a link to /run: mask each real socket once, at its real path (bwrap
+    // fails to start when asked to cover the same file twice)
+    var seen: [sockets.len][]const u8 = undefined;
+    var n_seen: usize = 0;
+    for (sockets) |s| if (sys.exists(s)) {
+        var real_b: [4096]u8 = undefined;
+        const real = std.mem.span(a.zs.z(resolve(s, &real_b)));
+        const dup = for (seen[0..n_seen]) |x| {
+            if (std.mem.eql(u8, x, real)) break true;
+        } else false;
+        if (dup) continue;
+        seen[n_seen] = real;
+        n_seen += 1;
+        a.addAll(&.{ "--ro-bind", "/dev/null", real.ptr });
+    };
     for (guarded) |g| a.bindIf("--ro-bind", std.fmt.bufPrint(&pb, "{s}{s}", .{ root, g }) catch continue);
 }
 
