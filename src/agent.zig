@@ -35,7 +35,7 @@ const base_prompt =
     \\- Read a file before you edit it. Use edit for changes, write for new files.
     \\- Use grep and find to search; they are faster than bash.
     \\- Check your work: run the tests or the program. Say something works only when tool output shows it.
-    \\- Keep replies short. When done, say what you changed.
+    \\- Keep replies short. When done, end with a brief list of changed files and one line with the test/run result — no extra sections.
 ;
 
 pub fn init(cwd: []const u8) void {
@@ -370,12 +370,42 @@ pub fn run() Outcome {
             ui.toolOutput(out.items(), r.ok);
             repeats.note(c.name.get(), c.args.items(), &out);
             if (turn.overflow and i + 1 == turn.n) out.add(overflow_note);
+            if (i + 1 == turn.n and wrapAt() == step + 1) {
+                var nb: [200]u8 = undefined;
+                out.add(std.fmt.bufPrint(&nb, wrap_note, .{max_steps - step - 1}) catch "");
+                ui.note("{d} steps left (AWL_MAX_STEPS); the model was told to wrap up", .{max_steps - step - 1});
+            }
             pushResult(c, step, i, out.items());
         }
         if (turn.overflow) ui.note("reply stopped after {d} tool calls; the model was told", .{llm.max_calls});
     }
-    ui.err("stopped after {d} steps (AWL_MAX_STEPS)", .{max_steps});
+    ui.err("stopped after {d} steps (AWL_MAX_STEPS); asking the model for a final report", .{max_steps});
+    finalReport();
     return .max_steps;
+}
+
+/// The step before the last few: the model is told how many remain so it can stop checking and report.
+fn wrapAt() usize {
+    const w = @min(10, max_steps / 10);
+    return if (w == 0) 0 else max_steps - w;
+}
+
+/// At the step limit: one more reply with tools off, so the run ends with a report of what was done and what was not.
+fn finalReport() void {
+    var t = Buf.init(4096);
+    defer t.free();
+    t.add(final_note);
+    if (tools.files_changed.n > 0) tools.files_changed.list(&t) else t.add("none\n");
+    t.add(final_note_end);
+    addUser(t.items());
+    ui.liveStart();
+    streamRetrying(msgs.items(), "],\"tool_choice\":\"none\"}") catch {
+        ui.endMessage();
+        return;
+    };
+    ui.endMessage();
+    turn.n = 0; // calls in this reply are not run: dropped so the history stays valid for a later continue
+    pushAssistant(max_steps);
 }
 
 /// Loop detector: the same call (tool + arguments) giving the same output again. A stuck model repeats a
@@ -417,6 +447,9 @@ const repeats = struct {
 
 const overflow_note = "\n[awl stopped your reply here: at most 16 tool calls run per reply, so the calls after this one were not run. Make fewer calls, and check each result before repeating a similar command.]";
 
+const wrap_note = "\n[awl: {d} steps are left in this run. Stop checking and polishing: finish the essential work, then end with your final report.]";
+const final_note = "[awl: the step limit is reached and no more tools will run. Files changed with write/edit in this session:\n";
+const final_note_end = "Write a short final report based only on the tool results above: what is done, what was verified and how, what is unfinished. Do not write code or file contents: nothing you write now is applied.]";
 const cut_note = "[Your last reply hit the output token limit before it finished. Think more briefly: make the next tool call now, or give your answer.]";
 
 const cut_call_note = "[not run: your reply hit the output token limit while writing this tool call, so its arguments were incomplete. Make the call again with less text in one call (write a long file in several smaller steps).]";
@@ -817,4 +850,15 @@ fn pushResult(c: *const llm.Call, step: usize, i: usize, text: []const u8) void 
     bufm.str(&m, text);
     m.byte('}');
     push(&m);
+}
+
+test "wrap-up warning: ten steps before the limit, scaled down for small limits, none below ten" {
+    const saved = max_steps;
+    defer max_steps = saved;
+    max_steps = 200;
+    try std.testing.expectEqual(@as(usize, 190), wrapAt());
+    max_steps = 30;
+    try std.testing.expectEqual(@as(usize, 27), wrapAt());
+    max_steps = 9;
+    try std.testing.expectEqual(@as(usize, 0), wrapAt());
 }
