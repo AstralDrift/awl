@@ -12,6 +12,9 @@ const Buf = @import("buf.zig").Buf;
 const tools = @import("tools.zig");
 const llm = @import("llm.zig");
 const screen = @import("screen.zig");
+const agents = @import("agents.zig");
+const dash = @import("dash.zig");
+const prompts = @import("prompts.zig");
 
 var orig: linux.termios = undefined;
 var have_orig = false;
@@ -39,6 +42,32 @@ pub fn restore() void {
     leaveFull();
     _ = linux.ioctl(sys.stdin, linux.T.CSETSW, @intFromPtr(&orig));
     out("\x1b[?2004l\x1b[?1004l\x1b[0m");
+    if (title_on) out("\x1b[23;2t"); // the title the terminal had before
+}
+
+var title_on = false; // AWL_TITLE=off keeps the terminal's title
+
+/// The terminal's title: a state mark (⋯ working, ? waiting for you) and the folder's name.
+fn setTitle(mark: []const u8) void {
+    if (!title_on) return;
+    var nb: [128]u8 = undefined;
+    var n: usize = 0;
+    const name = std.fs.path.basename(session.start_cwd);
+    var i: usize = 0;
+    while (i < name.len and n + 4 < nb.len) { // the name goes inside an escape sequence: no controls, no bidi marks
+        const len = std.unicode.utf8ByteSequenceLength(name[i]) catch 1;
+        const ch = name[i .. @min(i + len, name.len)];
+        const bad = ch[0] < 0x20 or ch[0] == 0x7f or (ch.len == 2 and ch[0] == 0xC2 and ch[1] < 0xA0) or
+            (ch.len == 3 and ch[0] == 0xE2 and ch[1] == 0x80 and ch[2] >= 0xAA and ch[2] <= 0xAE) or
+            (ch.len == 3 and ch[0] == 0xE2 and ch[1] == 0x81 and ch[2] >= 0xA6 and ch[2] <= 0xA9) or len == 1 and ch[0] >= 0x80;
+        if (!bad) {
+            @memcpy(nb[n .. n + ch.len], ch);
+            n += ch.len;
+        }
+        i += ch.len;
+    }
+    var b: [200]u8 = undefined;
+    out(std.fmt.bufPrint(&b, "\x1b]2;{s}{s}{s} · awl\x07", .{ mark, if (mark.len > 0) " " else "", nb[0..n] }) catch return);
 }
 
 fn out(s: []const u8) void {
@@ -165,6 +194,8 @@ pub fn repl() u8 {
     have_orig = linux.errno(linux.ioctl(sys.stdin, linux.T.CGETS, @intFromPtr(&orig))) == .SUCCESS;
     defer restore();
     out("\x1b[?2004h\x1b[?1004h"); // bracketed paste; focus in/out reports
+    title_on = if (sys.getenv("AWL_TITLE")) |v| !std.mem.eql(u8, v, "off") else true;
+    if (title_on) out("\x1b[22;2t"); // keep the terminal's title to put back
     if (start_full) enterFull();
     welcome();
     var ed = Editor{ .text = text_mem };
@@ -174,12 +205,15 @@ pub fn repl() u8 {
         setMode(false);
         const line = if (cmd_n > 0) heldCommand() else ed.read() orelse return 0;
         setMode(true);
-        const text = std.mem.trim(u8, line, " \t\r\n");
+        var text = std.mem.trim(u8, line, " \t\r\n");
         if (text.len == 0) continue;
         if (text[0] == '/') if (command(text)) |quit| {
             if (quit) return 0;
             continue;
         };
+        var expanded = Buf.init(8 << 20);
+        defer expanded.free();
+        if (text[0] == '/' and promptCommand(text, &expanded)) text = expanded.items();
         if (text[0] == '!') {
             shell(text[1..]);
             continue;
@@ -251,7 +285,7 @@ fn welcome() void {
     if (agent.n_agents_md > 0) rest.print(" · {d} AGENTS.md", .{agent.n_agents_md});
     if (agent.n_skills > 0) rest.print(" · {d} skill{s}", .{ agent.n_skills, if (agent.n_skills == 1) "" else "s" });
     const sx = @import("sandbox.zig");
-    rest.print(" · {s}", .{if (sx.on) (if (sx.net) "sandboxed" else "sandboxed, offline") else "no sandbox"});
+    rest.print(" · {s}", .{if (sx.on) (if (sx.net) "sandboxed, network on" else "sandboxed, offline") else if (sx.missing) "no bwrap: commands refused" else "no sandbox"});
     const rest_w = std.unicode.utf8CountCodepoints(rest.items()) catch rest.len;
     const room = @as(usize, sys.termCols()) -| (rest_w + 1);
     const short = tailCols(dir, @max(room, 12));
@@ -312,8 +346,8 @@ fn cutCols(s: []const u8, w: usize) []const u8 {
 }
 
 /// The status line under the prompt. AWL_STATUS picks the items, in order, from
-/// model, ctx, mode, branch, dir, session (default "model,ctx,mode,branch"); "off" hides it.
-var status_items: []const u8 = "model,ctx,mode,branch";
+/// model, ctx, mode, branch, dir, session, agents (default "model,ctx,mode,branch,agents"); "off" hides it.
+var status_items: []const u8 = "model,ctx,mode,branch,agents";
 var branch_b: [128]u8 = undefined;
 var branch: []const u8 = "";
 
@@ -325,6 +359,10 @@ fn footer(b: *Buf, w: usize) void {
     const m = ui.muted();
     const start = b.len;
     var cols: usize = 0;
+    if (esc_armed != 0) {
+        b.print("{s}esc again to rewind{s}", .{ ui.accent(), ui.plain() });
+        return;
+    }
     var it = std.mem.tokenizeScalar(u8, status_items, ',');
     var first = true;
     var item_b: [512]u8 = undefined;
@@ -339,6 +377,17 @@ fn footer(b: *Buf, w: usize) void {
             } else if (eq(u8, name, "branch")) (if (branch.len > 0) std.fmt.bufPrint(&item_b, "⎇ {s}", .{branch}) catch "" else "") //
             else if (eq(u8, name, "dir")) homeDir(&item_b) //
             else if (eq(u8, name, "session")) std.fs.path.basename(session.path) //
+            else if (eq(u8, name, "agents")) blk: {
+                if (agent_sum.waiting > 0) {
+                    color = ui.yellow();
+                    var rb: [32]u8 = undefined;
+                    const running = if (agent_sum.running > 0) (std.fmt.bufPrint(&rb, " · ◆ {d} running", .{agent_sum.running}) catch "") else "";
+                    break :blk std.fmt.bufPrint(&item_b, "? {d} need{s} you{s} · ←", .{ agent_sum.waiting, if (agent_sum.waiting == 1) "s" else "", running }) catch "";
+                }
+                if (agent_sum.running == 0) break :blk "";
+                color = ui.accent();
+                break :blk std.fmt.bufPrint(&item_b, "◆ {d} agent{s} running · ←", .{ agent_sum.running, if (agent_sum.running == 1) "" else "s" }) catch "";
+            } //
             else if (eq(u8, name, "ctx")) blk: {
                 const k = @as(f64, @floatFromInt(agent.ctx_tokens)) / 1000;
                 if (agent.ctx_limit == 0) break :blk if (agent.ctx_tokens == 0) "" else std.fmt.bufPrint(&item_b, "ctx {d:.1}k", .{k}) catch "";
@@ -366,6 +415,9 @@ fn runAgent(ed: *Editor) void {
     hist = &ed.hist;
     ui.busy = true;
     defer ui.busy = false;
+    agents.set(.running);
+    defer agents.set(.idle);
+    setTitle("⋯");
     tools.ask = &askUser;
     defer tools.ask = null;
     sys.tick = &pump;
@@ -485,7 +537,11 @@ var hist: ?*Buf = null; // the editor's history: queued messages are added to it
 /// ask mode a = allow this and everything after (switches to auto).
 fn askUser() tools.Answer {
     pump(); // keys typed before the question belong to the draft, not the answer
-    ui.ask(if (tools.mode == .ask) "  allow? y/n · a = all from now on (auto mode) " else "  allow? y/n ");
+    const pre = if (tools.asking_once) "" else tools.commandPrefix(tools.ask_command);
+    var qb: [200]u8 = undefined;
+    ui.ask(if (pre.len > 0) (std.fmt.bufPrint(&qb, "  allow? y/n · p = always `{s}` here · a = all (auto mode) ", .{cutCols(pre, 40)}) catch "  allow? y/n ") else if (tools.mode == .ask and !tools.asking_once) "  allow? y/n · a = all from now on (auto mode) " else "  allow? y/n ");
+    setTitle("?");
+    defer setTitle("⋯");
     ui.drawNow();
     while (true) {
         var p = [2]linux.pollfd{
@@ -514,7 +570,13 @@ fn askUser() tools.Answer {
                 ui.answered("declined");
                 return .no;
             },
-            'a', 'A' => {
+            'p', 'P' => if (pre.len > 0) {
+                tools.allowPrefix(pre);
+                var ab: [120]u8 = undefined;
+                ui.answered(std.fmt.bufPrint(&ab, "allowed · `{s}` runs without asking from now on", .{cutCols(pre, 40)}) catch "allowed");
+                return .yes;
+            },
+            'a', 'A' => if (!tools.asking_once) {
                 ui.answered(if (tools.mode == .ask) "allowed · mode is now auto" else "allowed");
                 return .always;
             },
@@ -606,6 +668,7 @@ fn key(c: u8) void {
             draft_n = 0;
             ui.draft_changed = true;
         },
+        20 => _ = ui.togglePlan(), // Ctrl-T
         else => if (c >= 32 or c == '\t' or c >= 0x80) addDraft(&[_]u8{c}),
     }
 }
@@ -655,6 +718,57 @@ fn queueDraft() void {
     q_count += 1;
     draft_n = 0;
     ui.draft_changed = true;
+}
+
+/// /diff: every change git sees, new files included, colored.
+fn showDiff() void {
+    var pb: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&pb, "/tmp/awl-diff-{d}.txt", .{linux.getpid()}) catch return;
+    var cb: [400]u8 = undefined;
+    const cmd = std.fmt.bufPrintZ(&cb, "{{ git --no-pager diff HEAD 2>/dev/null || git --no-pager diff; git ls-files --others --exclude-standard -z | xargs -0 -r -n1 git --no-pager diff --no-index -- /dev/null; }} >{s} 2>&1", .{path}) catch return;
+    var o = Buf.init(64 << 10);
+    defer o.free();
+    _ = tools.userShell(cmd, &o) catch {};
+    var d = Buf.init(64 << 20);
+    defer d.free();
+    const f = sys.open(path, .{ .CLOEXEC = true }, 0) catch return;
+    while (true) {
+        const dst = d.extend(1 << 16);
+        const got = sys.read(f, dst) catch 0;
+        d.truncate(d.len - (dst.len - got));
+        if (got == 0) break;
+    }
+    sys.close(f);
+    var zb: [64]u8 = undefined;
+    _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&zb, path), 0);
+    const text = std.mem.trimEnd(u8, d.items(), "\n");
+    if (text.len == 0) return ui.note("no changes", .{});
+    if (std.mem.startsWith(u8, text, "fatal:")) return ui.note("{s}", .{text[0..@min(text.len, 200)]});
+    var b = Buf.init(d.len * 2 + 4096);
+    defer b.free();
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var files: usize = 0;
+    while (it.next()) |l| {
+        const st = std.mem.startsWith;
+        if (st(u8, l, "diff --git")) files += 1;
+        const color = if (st(u8, l, "diff --git")) "\x1b[1m" else if (st(u8, l, "+++") or st(u8, l, "---") or st(u8, l, "index ") or st(u8, l, "new file") or st(u8, l, "deleted file")) ui.muted() else if (st(u8, l, "@@")) ui.accent() else if (st(u8, l, "+")) ui.green() else if (st(u8, l, "-")) ui.red() else "";
+        b.print("{s}{s}{s}\n", .{ color, l, ui.plain() });
+    }
+    b.truncate(b.len - 1);
+    ui.raw(b.items());
+    ui.note("{d} file{s} changed", .{ files, if (files == 1) "" else "s" });
+}
+
+/// `/name args` for a prompt command (prompts.zig): its text, filled in, in `out`.
+fn promptCommand(text: []const u8, dst: *Buf) bool {
+    const end = std.mem.indexOfAny(u8, text, " \t\n") orelse text.len;
+    const name = text[1..end];
+    var raw = Buf.init(1 << 20);
+    defer raw.free();
+    if (!prompts.load(agent.projectRoot(session.start_cwd), name, &raw)) return false;
+    prompts.expand(prompts.split(raw.items()).body, std.mem.trim(u8, text[end..], " \t\n"), dst);
+    ui.note("/{s} · {d} line{s} of prompt", .{ name, std.mem.count(u8, dst.items(), "\n") + 1, if (std.mem.count(u8, dst.items(), "\n") == 0) "" else "s" });
+    return true;
 }
 
 /// `!cmd`: run it, show the output, and pass both to the model with the next message.
@@ -735,15 +849,7 @@ fn command(text: []const u8) ?bool {
             }
             var pb: [512]u8 = undefined;
             const p = session.pathOf(&l[k - 1], &pb) orelse return false;
-            agent.clear();
-            ui.clearPlan();
-            session.close();
-            const n = agent.resume_(p) catch {
-                ui.err("cannot read {s}", .{p});
-                session.restart();
-                return false;
-            };
-            ui.note("resumed {d} messages · {s}", .{ n, l[k - 1].prompt() });
+            openSession(p);
         }
     } else if (eq(u8, text, "/copy") or eq(u8, text, "/copy code")) {
         const all = ui.reply.items();
@@ -802,6 +908,20 @@ fn command(text: []const u8) ?bool {
             for (0..tools.files_read.n) |i| o.print("{s}{s}", .{ if (i > 0) ", " else "", tools.files_read.buf[i][0..tools.files_read.len[i]] });
         }
         ui.note("{s}", .{o.items()});
+    } else if (eq(u8, text, "/diff")) {
+        showDiff();
+    } else if (eq(u8, text, "/rewind")) {
+        if (editor) |e| e.rewind() else ui.note("/rewind needs a terminal", .{});
+    } else if (eq(u8, text, "/agents")) {
+        if (editor) |e| e.dashboard() else ui.note("/agents needs a terminal", .{});
+    } else if (eq(u8, text, "/bg") or std.mem.startsWith(u8, text, "/bg ")) {
+        const task = std.mem.trim(u8, text[3..], " ");
+        if (task.len == 0) {
+            ui.note("/bg TASK starts a background agent on TASK in this folder; ← shows it", .{});
+        } else if (agents.spawn(task, null, agent.cfg.model, @tagName(tools.mode))) {
+            ui.note("◆ background agent started · ← to watch it", .{});
+            watch_until = sys.nowNs() + 15 * std.time.ns_per_s;
+        } else ui.err("could not start a background agent", .{});
     } else if (eq(u8, text, "/full")) {
         if (screen.on) leaveFull() else {
             enterFull();
@@ -814,6 +934,7 @@ fn command(text: []const u8) ?bool {
         ui.note("theme reloaded", .{});
     } else if (eq(u8, text, "/help")) {
         var pb: [4096]u8 = undefined;
+        var pn: [2048]u8 = undefined;
         const home = sys.getenv("HOME") orelse "";
         const sp = session.path;
         const spath = if (home.len > 1 and std.mem.startsWith(u8, sp, home)) std.fmt.bufPrint(&pb, "~{s}", .{sp[home.len..]}) catch sp else sp;
@@ -822,18 +943,162 @@ fn command(text: []const u8) ?bool {
             \\  Enter send · Alt-Enter or Ctrl-J newline · ↑↓ history · Ctrl-R search
             \\  Tab completes; after @ or / it opens a picker · Ctrl-P switch model
             \\  Ctrl-O shows a long draft, or the last tool output · Ctrl-L clears
+            \\  Ctrl-T shows or hides the task checklist (also while it works)
+            \\  ← at an empty prompt: agents & sessions (background agents, resume, fork)
+            \\  Esc Esc at an empty prompt: rewind to an earlier prompt · Ctrl-G: write it in $EDITOR
             \\  Ctrl-C clears the line (twice quits) · Ctrl-D quits
             \\while it works
             \\  type and Enter to queue a message · Esc or Ctrl-C stops
             \\in a message
             \\  @file attaches a file · !cmd runs a command (the model sees it too)
             \\commands
-            \\  /new  /resume  /model  /mode auto|ask|plan  /undo  /compact  /context
-            \\  /copy  /copy code  /expand  /full  /theme  /quit
+            \\  /new  /resume  /rewind  /diff  /agents  /bg TASK  /model  /mode auto|ask|plan  /undo
+            \\  /compact  /context  /copy  /copy code  /expand  /full  /theme  /quit
+            \\prompts (~/.config/awl/prompts/NAME.md, .agents/prompts/NAME.md; $ARGUMENTS fills in)
+            \\  {s}
             \\session {s}
-        , .{spath});
+        , .{ promptNames(&pn), spath });
     } else return null;
     return false;
+}
+
+var esc_armed: u64 = 0; // when Esc was pressed at an empty prompt (a second one rewinds)
+
+/// A user message as typed: without a leading [note] and the attached files.
+fn promptText(t0: []const u8) []const u8 {
+    var t = t0;
+    if (std.mem.startsWith(u8, t, "[")) if (std.mem.indexOf(u8, t, "]\n\n")) |k| {
+        t = t[k + 3 ..];
+    };
+    if (std.mem.indexOf(u8, t, "\n\n<file path=\"")) |k| t = t[0..k];
+    return t;
+}
+
+/// Continue the session at `p` here (the current one stays saved). Refused while another
+/// awl (a background agent, or a TUI in another terminal) has it open.
+fn openSession(p: []const u8) void {
+    if (agents.busyElsewhere(p)) |o| {
+        ui.note("that session is in use by {s} (pid {d}); ← shows it", .{ if (o.kind == .bg) "a background agent" else "awl in another terminal", o.pid });
+        return;
+    }
+    agent.clear();
+    ui.clearPlan();
+    session.close();
+    const n = agent.resume_(p) catch {
+        ui.err("cannot read {s}", .{p});
+        session.restart();
+        return;
+    };
+    var tb: [160]u8 = undefined;
+    var sb: [16384]u8 = undefined;
+    ui.note("resumed {d} messages · {s}", .{ n, agents.titleOf(p, &tb, &sb) });
+}
+
+// ---- background agents, seen from the prompt ----
+
+var agent_sum: agents.Summary = .{};
+var watch_until: u64 = 0; // poll often for a while after starting an agent
+var last_poll: u64 = 0;
+var modal = false; // a picker or the dashboard owns the screen: no notes now
+
+fn watching() bool {
+    return agent_sum.running + agent_sum.waiting > 0 or sys.nowNs() < watch_until;
+}
+
+/// Read the agents' status files; print a note for each one that finished or needs an
+/// answer. True when the status line changed (or a note was printed).
+fn pollAgents() bool {
+    return pollAgentsAs(false);
+}
+
+/// `quiet`: just catch up (the dashboard already showed what changed).
+fn pollAgentsAs(quiet: bool) bool {
+    last_poll = sys.nowNs();
+    var evb: [8]agents.Event = undefined;
+    const r = agents.poll(&evb);
+    const changed = r.sum.running != agent_sum.running or r.sum.waiting != agent_sum.waiting;
+    agent_sum = r.sum;
+    var db: [400]u8 = undefined;
+    const d = session.dirPath(&db) orelse return changed;
+    if (quiet) return changed;
+    for (r.events) |*e| {
+        var pb: [600]u8 = undefined;
+        const p = std.fmt.bufPrint(&pb, "{s}/{s}.jsonl", .{ d, e.name_b[0..e.name_n] }) catch continue;
+        var tb: [160]u8 = undefined;
+        var sb: [16384]u8 = undefined;
+        const t = cutCols(agents.titleOf(p, &tb, &sb), 50);
+        switch (e.state) {
+            .waiting => ui.note("{s}? agent “{s}” needs your approval · ← to answer{s}", .{ ui.yellow(), t, ui.plain() }),
+            .done => ui.note("{s}✓ agent “{s}” finished · ← to see it{s}", .{ ui.green(), t, ui.plain() }),
+            .failed => ui.note("{s}✗ agent “{s}” failed · ← to see it{s}", .{ ui.red(), t, ui.plain() }),
+            .stopped => ui.note("■ agent “{s}” stopped", .{t}),
+            else => {},
+        }
+    }
+    return changed or r.events.len > 0;
+}
+
+/// The dashboard reads keys through the editor's input buffer.
+fn dashKey(ms: i32) dash.Key {
+    const ed = editor orelse return .eof;
+    if (ed.in_i == ed.in_n and !(http.wait(sys.stdin, ms) catch return .eof)) return .none;
+    const c = ed.byte() orelse return .eof;
+    switch (c) {
+        27 => {
+            const c2 = ed.peekSoon() orelse return .esc;
+            if (c2 == 27) { // Esc Esc: two keys
+                ed.in_i -= 1;
+                return .esc;
+            }
+            if (c2 != '[' and c2 != 'O') return .none; // Alt-x: not used here
+            var seq: [16]u8 = undefined;
+            var k: usize = 0;
+            while (ed.byte()) |x| {
+                if (k < seq.len) seq[k] = x;
+                k += 1;
+                if (x >= 0x40 and x <= 0x7e) break;
+            }
+            const sq = seq[0..@min(k, seq.len)];
+            const eq = std.mem.eql;
+            if (eq(u8, sq, "A")) return .up;
+            if (eq(u8, sq, "B")) return .down;
+            if (eq(u8, sq, "C")) return .right;
+            if (eq(u8, sq, "D")) return .left;
+            if (eq(u8, sq, "H") or eq(u8, sq, "1~")) return .home;
+            if (eq(u8, sq, "F") or eq(u8, sq, "4~")) return .end;
+            if (eq(u8, sq, "5~")) return .pgup;
+            if (eq(u8, sq, "6~")) return .pgdn;
+            if (eq(u8, sq, "3~")) return .del;
+            if (eq(u8, sq, "200~")) return .paste_start;
+            if (eq(u8, sq, "201~")) return .paste_end;
+            if (eq(u8, sq, "I") or eq(u8, sq, "O")) focused = sq[0] == 'I';
+            return .none;
+        },
+        '\r' => return .enter,
+        '\t' => return .tab,
+        127, 8 => return .back,
+        else => return if (c < 32) .{ .ctrl = c } else .{ .char = c },
+    }
+}
+
+/// "/review  /init  …" for /help.
+fn promptNames(into: []u8) []const u8 {
+    var pl = Buf.init(1 << 16);
+    defer pl.free();
+    prompts.list(agent.projectRoot(session.start_cwd), &pl);
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, pl.items(), '\n');
+    while (it.next()) |l| {
+        const name = l[0 .. std.mem.indexOfScalar(u8, l, '\t') orelse continue];
+        if (n + name.len + 2 > into.len) break;
+        if (n > 0) {
+            @memcpy(into[n .. n + 2], "  ");
+            n += 2;
+        }
+        @memcpy(into[n .. n + name.len], name);
+        n += name.len;
+    }
+    return into[0..n];
 }
 
 // ---- pickers: a filtered list chosen with the arrow keys ----
@@ -872,6 +1137,8 @@ fn pick(title: []const u8, items: []const []const u8, query: []const u8, opts: P
     if (items.len == 0) return null;
     setMode(false);
     defer setMode(true);
+    modal = true;
+    defer modal = false;
     var q: [128]u8 = undefined;
     var qn = @min(query.len, q.len);
     @memcpy(q[0..qn], query[0..qn]);
@@ -1077,7 +1344,7 @@ test "picker ranking" {
 }
 
 const commands = [_][]const u8{
-    "/help", "/new", "/resume", "/model", "/mode", "/undo", "/copy", "/copy code", "/expand", "/context", "/compact", "/full", "/theme", "/quit",
+    "/help", "/new", "/resume", "/rewind", "/diff", "/agents", "/bg", "/model", "/mode", "/undo", "/copy", "/copy code", "/expand", "/context", "/compact", "/full", "/theme", "/quit",
 };
 
 /// Piped stdin: one prompt per line.
@@ -1170,12 +1437,18 @@ const Editor = struct {
                 var size = [2]u16{ sys.termRows(), sys.termCols() };
                 while (!(http.wait(sys.stdin, 250) catch return 3)) {
                     const now = [2]u16{ sys.termRows(), sys.termCols() };
-                    if (now[0] != size[0] or now[1] != size[1]) {
-                        size = now;
-                        fullDraw();
-                    }
+                    var redraw = now[0] != size[0] or now[1] != size[1];
+                    size = now;
+                    if (!modal and watching() and sys.nowNs() -| last_poll > std.time.ns_per_s) redraw = pollAgents() or redraw;
+                    if (redraw) fullDraw();
                 }
-            } else _ = http.wait(sys.stdin, -1) catch return 3;
+            } else while (!(http.wait(sys.stdin, if (!modal and watching()) 1000 else -1) catch return 3)) {
+                if (modal) continue;
+                // a background agent finished or needs an answer: a note above the prompt
+                self.aside();
+                _ = pollAgents();
+                self.render();
+            }
             const n = sys.read(sys.stdin, self.in) catch 0;
             if (n == 0) return null;
             keylog(self.in[0..n]);
@@ -1205,11 +1478,14 @@ const Editor = struct {
         ui.themeTick();
         branch = gitBranch(&branch_b);
         if (sys.getenv("AWL_STATUS")) |v| status_items = v;
+        _ = pollAgents();
+        setTitle(if (agent_sum.waiting > 0) "?" else "");
         self.render();
         while (true) {
             const c = self.byte() orelse return null;
             if (c != 3) self.ctrl_c = false;
             if (c != 18) self.search_n = null;
+            if (c != 27) esc_armed = 0;
             switch (c) {
                 '\r' => {
                     if (self.pasting) {
@@ -1262,6 +1538,13 @@ const Editor = struct {
                     self.cut(s, self.cur);
                 },
                 18 => self.search(), // Ctrl-R
+                7 => self.externalEditor(), // Ctrl-G
+                20 => { // Ctrl-T: show or hide the model's checklist
+                    self.aside();
+                    if (ui.togglePlan()) {
+                        if (!ui.showPlan()) ui.note("tasks shown while the model works (none yet)", .{});
+                    } else ui.note("tasks hidden · Ctrl-T shows them", .{});
+                },
                 16 => { // Ctrl-P: next favorite model (AWL_MODELS) or the model picker
                     self.aside();
                     cycleModel();
@@ -1297,7 +1580,7 @@ const Editor = struct {
     }
 
     fn escape(self: *Editor) void {
-        const c = self.peekSoon() orelse return;
+        const c = self.peekSoon() orelse return self.loneEsc();
         if (c == '\r') return self.insert("\n"); // Alt-Enter
         if (c != '[' and c != 'O') return;
         var seq: [16]u8 = undefined;
@@ -1315,7 +1598,9 @@ const Editor = struct {
             self.dropped = 0;
         } //
         else if (eq(u8, s, "201~")) self.pasteEnd() //
-        else if (eq(u8, s, "D")) self.cur = self.prev(self.cur) //
+        else if (eq(u8, s, "D")) (if (self.len == 0) self.dashboard() else {
+            self.cur = self.prev(self.cur);
+        }) //
         else if (eq(u8, s, "C")) self.cur = self.next(self.cur) //
         else if (eq(u8, s, "H") or eq(u8, s, "1~")) self.cur = self.lineStart() //
         else if (eq(u8, s, "F") or eq(u8, s, "4~")) self.cur = self.lineEnd() //
@@ -1324,6 +1609,145 @@ const Editor = struct {
         else if (eq(u8, s, "O")) focused = false //
         else if (eq(u8, s, "A")) self.history(-1) //
         else if (eq(u8, s, "B")) self.history(1);
+    }
+
+    /// Esc at an empty prompt arms rewind (the status line says so); a second Esc opens it.
+    fn loneEsc(self: *Editor) void {
+        if (self.len > 0) return;
+        const now = sys.nowNs();
+        if (esc_armed != 0 and now -| esc_armed < 2 * std.time.ns_per_s) {
+            esc_armed = 0;
+            return self.rewind();
+        }
+        esc_armed = now;
+    }
+
+    /// Esc Esc or /rewind: go back to before an earlier prompt of this conversation. The
+    /// conversation as it was is kept as its own session; files changed since can be put
+    /// back; the prompt returns to the input line, to edit and send again.
+    fn rewind(self: *Editor) void {
+        var idx: [512]usize = undefined;
+        const um = agent.userMessages(&idx);
+        if (um.len == 0) return ui.note("nothing to rewind yet", .{});
+        var text = Buf.init(1 << 20);
+        defer text.free();
+        var names: [512][]const u8 = undefined;
+        var ends: [512]usize = undefined;
+        var body = Buf.init(4 << 20);
+        defer body.free();
+        const bb = body.extend(4 << 20);
+        for (0..um.len) |k| {
+            const m = agent.message(um[um.len - 1 - k]);
+            const t = promptText(agents.field(m, "content", bb));
+            const line = std.mem.trim(u8, t[0 .. std.mem.indexOfScalar(u8, t, '\n') orelse t.len], " ");
+            text.print("{s}{s}", .{ cutCols(line, @as(usize, sys.termCols()) -| 20), if (k == 0) "  (last)" else "" });
+            ends[k] = text.len;
+        }
+        var start: usize = 0;
+        for (0..um.len) |k| {
+            names[k] = text.items()[start..ends[k]];
+            start = ends[k];
+        }
+        self.aside();
+        const k = pick("rewind to before this prompt", names[0..um.len], "", .{}) orelse return;
+        const i = um[um.len - 1 - k];
+        const turn = agent.turnFrom(i);
+        var put_back = false;
+        if (turn > 0 and @import("undo.zig").newest() >= turn) {
+            const opts = [_][]const u8{ "conversation and files: put back the files changed since", "conversation only: files stay as they are now" };
+            put_back = (pick("rewind", &opts, "", .{}) orelse return) == 0;
+        }
+        const prompt_text = promptText(agents.field(agent.message(i), "content", bb));
+        // the conversation as it was stays, as its own session
+        var ob: [600]u8 = undefined;
+        const old = ob[0..session.path.len];
+        @memcpy(old, session.path);
+        var tb: [160]u8 = undefined;
+        var sb: [16384]u8 = undefined;
+        const title = agents.titleOf(old, &tb, &sb);
+        var nb: [200]u8 = undefined;
+        if (!std.mem.endsWith(u8, title, "(before rewind)")) _ = agents.putSidecar(old, ".title", std.fmt.bufPrint(&nb, "{s} (before rewind)", .{cutCols(title, 150)}) catch title);
+        session.restart();
+        for (0..i) |j| session.append(agent.message(j));
+        agent.rewind(i);
+        ui.clearPlan();
+        if (put_back) {
+            var o = Buf.init(64 << 10);
+            defer o.free();
+            const n = tools.undoFrom(turn, &o);
+            ui.note("{s}put back {d} file{s}", .{ o.items(), n, if (n == 1) "" else "s" });
+        } else if (turn > 0) {
+            agent.pending_note.print("[The user rewound the conversation to here. Files you changed after this point were kept as they are now; read before you edit.]", .{});
+        }
+        ui.note("rewound · the conversation before it is kept in ← as “{s} (before rewind)”", .{cutCols(title, 40)});
+        const n = @min(prompt_text.len, self.text.len);
+        @memcpy(self.text[0..n], prompt_text[0..n]);
+        self.len = n;
+        self.cur = n;
+        self.row = 0;
+        if (screen.on) fullDraw();
+    }
+
+    /// Ctrl-G: write the prompt in $VISUAL / $EDITOR (vi if neither is set).
+    fn externalEditor(self: *Editor) void {
+        var pb: [64]u8 = undefined;
+        const path = std.fmt.bufPrintZ(&pb, "/tmp/awl-prompt-{d}.md", .{linux.getpid()}) catch return;
+        const f = sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600) catch return ui.note("cannot write {s}", .{path});
+        sys.writeAll(f, self.text[0..self.len]) catch {};
+        sys.close(f);
+        defer _ = linux.unlinkat(linux.AT.FDCWD, path, 0);
+        self.aside();
+        // the editor gets the terminal as we found it
+        out("\x1b[?2004l\x1b[?1004l");
+        if (screen.on) out("\x1b[?1000l\x1b[?1006l");
+        _ = linux.ioctl(sys.stdin, linux.T.CSETSW, @intFromPtr(&orig));
+        var st: u32 = 0;
+        const pid = linux.fork();
+        if (pid == 0) {
+            sys.unblockAll();
+            var env: [1024]?[*:0]const u8 = undefined;
+            const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "exec ${VISUAL:-${EDITOR:-vi}} \"$1\"", "sh", path };
+            _ = linux.execve("/bin/sh", &argv, sys.childEnvp(sys.envp, &env));
+            linux.exit(127);
+        }
+        if (linux.errno(pid) == .SUCCESS) _ = linux.wait4(@intCast(pid), &st, 0, null);
+        setMode(false);
+        out("\x1b[?2004h\x1b[?1004h");
+        if (screen.on) out("\x1b[?1049h\x1b[?1000h\x1b[?1006h"); // the editor may have left the alternate screen
+        const code = (st >> 8) & 0xff;
+        if (linux.errno(pid) != .SUCCESS or code != 0) {
+            ui.note("the editor exited with {d}; the prompt is unchanged", .{code});
+        } else {
+            const g = sys.open(path, .{ .CLOEXEC = true }, 0) catch return;
+            defer sys.close(g);
+            var n: usize = 0;
+            while (n < self.text.len) {
+                const r = sys.read(g, self.text[n..]) catch break;
+                if (r == 0) break;
+                n += r;
+            }
+            while (n > 0 and (self.text[n - 1] == '\n' or self.text[n - 1] == ' ')) n -= 1;
+            self.len = n;
+            self.cur = n;
+        }
+        self.row = 0;
+        if (screen.on) fullDraw();
+    }
+
+    /// ← at an empty prompt (or /agents): the agents & sessions view.
+    fn dashboard(self: *Editor) void {
+        self.aside();
+        modal = true;
+        const a = dash.run(&dashKey);
+        modal = false;
+        switch (a) {
+            .close => {},
+            .open => |p| openSession(p),
+        }
+        watch_until = sys.nowNs() + 15 * std.time.ns_per_s; // an agent may have been started
+        _ = pollAgentsAs(true);
+        self.row = 0;
+        if (screen.on) fullDraw();
     }
 
     fn pasteEnd(self: *Editor) void {
@@ -1483,9 +1907,39 @@ const Editor = struct {
 
     /// Tab after "/x" at the start: complete a command, or pick one.
     fn completeCommand(self: *Editor, word: []const u8) void {
+        // the built-in commands, then prompt commands with their descriptions
+        var pl = Buf.init(1 << 16);
+        defer pl.free();
+        prompts.list(agent.projectRoot(session.start_cwd), &pl);
+        var names: [commands.len + 128][]const u8 = undefined;
+        var labels: [commands.len + 128][]const u8 = undefined;
+        var lb = Buf.init(1 << 16);
+        defer lb.free();
+        var n: usize = 0;
+        for (commands) |c| {
+            names[n] = c;
+            labels[n] = c;
+            n += 1;
+        }
+        var ends: [128]usize = undefined;
+        var it = std.mem.splitScalar(u8, pl.items(), '\n');
+        const first_prompt = n;
+        while (it.next()) |l| {
+            const tab = std.mem.indexOfScalar(u8, l, '\t') orelse continue;
+            if (n == names.len) break;
+            names[n] = l[0..tab];
+            lb.print("{s:<12} {s}", .{ l[0..tab], l[tab + 1 ..] });
+            ends[n - first_prompt] = lb.len;
+            n += 1;
+        }
+        var start: usize = 0;
+        for (first_prompt..n) |k| {
+            labels[k] = lb.items()[start..ends[k - first_prompt]];
+            start = ends[k - first_prompt];
+        }
         var only: ?[]const u8 = null;
         var count: usize = 0;
-        for (commands) |c| if (std.mem.startsWith(u8, c, word)) {
+        for (names[0..n]) |c| if (std.mem.startsWith(u8, c, word)) {
             only = c;
             count += 1;
         };
@@ -1494,14 +1948,16 @@ const Editor = struct {
             const qn = @min(word.len, q.len);
             @memcpy(q[0..qn], word[0..qn]);
             self.aside();
-            const k = pick("commands", &commands, q[0..qn], .{}) orelse return;
-            break :blk commands[k];
+            const k = pick("commands", labels[0..n], q[0..qn], .{}) orelse return;
+            break :blk names[k];
         };
         self.cut(0, self.cur);
         self.insert(choice);
-        const takes_arg = for ([_][]const u8{ "/resume", "/model", "/mode" }) |a| {
+        const takes_arg = for ([_][]const u8{ "/resume", "/model", "/mode", "/bg" }) |a| {
             if (std.mem.eql(u8, a, choice)) break true;
-        } else false;
+        } else for (commands) |c| {
+            if (std.mem.eql(u8, c, choice)) break false;
+        } else true; // prompt commands take arguments
         if (takes_arg) self.insert(" ");
     }
 

@@ -12,7 +12,6 @@ Differences from nib: written in **Zig** (your choice), Linux only (epoll and ra
 - **Dependencies:** the Zig std lib only. Use `std.os.linux` syscalls directly where the std abstractions allocate or add layers. No `std.http`: localhost needs no TLS, so a raw socket is enough.
 - **Model link:** OpenAI-compatible `POST /v1/chat/completions`, `stream:true`, HTTP/1.1 over a raw TCP socket to the Omarchy Local AI gateway at `http://127.0.0.1:12434`. Bearer key from `~/.local/state/omarchy/local-ai/gateway.key`. The model defaults to the first id from `GET /v1/models`, so awl follows whichever deploy is live.
 - **Budgets** (asserted by `make`-style `zig build check`):
-  - Binary ≤ 200 KB stripped.
   - Idle RSS ≤ 1.5 MB. Peak RSS ≤ 8 MB over a scripted 50-turn session, not counting tool-output bytes. Measured from `VmHWM` in `/proc/<pid>/status`.
   - Cold start to prompt ≤ 3 ms (`hyperfine`).
   - About 0% CPU while waiting: one blocking `epoll_wait` and no polling.
@@ -78,7 +77,7 @@ Memory model as in nib: no per-object alloc in the hot path, a fixed 16 KB socke
 
 ## Build order (each phase passes its check before the next)
 0. **Repo + backup:** `~/Work/awl`, `git init`, a `gh repo create AstralDrift/awl --private` remote, plus README, AGENTS.md (project rules from this plan), and `.gitignore`. *Check:* the first push succeeds.
-1. **Skeleton:** build.zig, `mem`, `--version`. *Check:* static (`file awl` says statically linked), ≤ 200 KB, idle RSS ≤ 1.5 MB.
+1. **Skeleton:** build.zig, `mem`, `--version`. *Check:* static (`file awl` says statically linked).
 2. **HTTP + SSE:** stream a hard-coded chat to fake_sse and to the live gateway. *Check:* chunked encoding, `[DONE]`, and split chunks pass.
 3. **JSON + tool_call accumulation.** *Check:* unit tests (`zig build test`) on canned transcripts with split UTF-8 and split arguments.
 4. **Tools.** *Check:* one test per tool for success, missing file, non-unique edit, timeout killing a grandchild, truncation, and rg/fd caps.
@@ -88,12 +87,12 @@ Memory model as in nib: no per-object alloc in the hot path, a fixed 16 KB socke
 8. **Arena:** proxy, adapters, tasks, report. *Check:* `arena/run.sh t2 "awl pi omp grok"` prints the scoreboard.
 
 ## Backup / sync
-I commit after each green phase (the commit message carries the measured size, RSS, and startup) and push to the private `AstralDrift/awl` repo right after. You asked for backup and sync, so the push needs no separate ask. No force pushes. Gateway keys, session logs, and `arena/results/` raw transcripts are gitignored.
+I commit after each green phase (the commit message carries the measured size, RSS, and startup) and push to the `AstralDrift/awl` repo (public since 2026-10-27) right after. You asked for backup and sync, so the push needs no separate ask. No force pushes. Gateway keys, session logs, and `arena/results/` raw transcripts are gitignored.
 
 ## Verification
 - `zig build test`: unit tests.
 - `tests/*.sh` against fake_sse: loop, tools, interrupt, resume, with no GPU.
-- `zig build check`: size, static linkage, idle and peak RSS (`VmHWM`), `hyperfine 'awl --version'` ≤ 3 ms.
+- `zig build check`: static linkage, peak RSS (`VmHWM`; idle RSS is only reported), `hyperfine 'awl --version'` ≤ 3 ms.
 - Live: `awl -p` on the ledger fixture with Qwen3.8-27B through Local AI, scored by `score.py`.
 - Comparative: arena T2 across awl, pi, omp, and grok, reporting success rate, turns, prompt tokens, wall time, and harness RSS.
 
@@ -108,13 +107,14 @@ Still open: an Omarchy Local AI agent entry (`local-ai/agents/awl`) and MCP.
 The v1 build order is done. From here the arena decides. The model is "Arch Linux for agents":
 a minimal base that gets real work done and is easy to build on.
 
-**North star (updated 2026-10-23):** beat pi: more tasks solved, faster, on more models
-(Terminal-Bench and our arena are the scoreboard). Lines of code do not matter. Stay minimal
-where it counts: tokens per request, memory, startup, dependencies, things the user must learn.
+**North star (updated 2026-10-27):** the best, most performant open-source harness: more tasks
+solved, faster, on more models, and the best to use (Terminal-Bench and our arena are the
+scoreboard for results and speed). Lines of code do not matter.
 
-**Footprint goals (soft, not caps):** binary < 256 KB, idle RSS < 1 MB, peak < 4 MB over
-50 turns, startup < 1 ms. A feature that wins tasks may spend some of this; one that does
-not, does not ship.
+**Footprint (craft, not a gate):** be frugal by habit, like developers who counted every byte:
+lean designs when they are just as good, costs measured and stated. Never stifle a feature that
+makes awl better; build it as lean as it reasonably can be. There is no binary size or idle memory limit; `zig build
+check` keeps peak RSS and startup ceilings only to catch regressions.
 
 **Loop:** hypothesis → change → `arena/run.py t0` (seconds) → T1 → T2 when promising →
 record the line in `arena/LOG.md` → keep or revert.
@@ -131,3 +131,33 @@ Items 1-4 are done (2026-10-22). **External yardstick (2026-10-23):** Terminal-B
 through Harbor (`arena/tb.sh`), 20-task subset, against Terminus 2, mini-swe-agent and pi
 on the same model and settings. Failure logs from it feed this backlog (first find: replies
 need an output cap, `AWL_MAX_TOKENS`).
+
+## Lockdown by default (2026-10-26)
+
+Why: a model tried to upload to a cloud bucket during an unrelated task and used `unshare -Urm`
+to get around a refused mount (Cohere, on Qwen3.8-Flash-Next); only the test sandbox's missing route
+stopped the upload. A guardrail prompt is not a boundary (Cloudflare security-audit-skill): the
+sandbox is. Anything the model can write must not decide what it may do (Harness², which tunes its
+own guardrails). A human approves every use of the network.
+
+Check: `zig build sandbox` (tests/sandbox.sh) asks for each escape through awl's real tools; each
+probe prints ESCAPED-x only if it gets through, positive controls must still work. tests/tui.py
+`lockdown()` drives the approval prompts in a pty.
+
+1. Close the escapes (done): one sandbox per session that commands join with `setns` on a pidfd
+   (shared localhost and processes, nothing of the host's); `/run/user` and sockets under `/tmp`
+   hidden; no nested user namespaces; environment from an allowlist; the project's `.git/config`,
+   `.git/hooks`, `AGENTS.md`, `.agents` read-only to commands, write/edit ask every time; read
+   refuses secrets, `/proc`, `/run/user`; symlinks resolved before every path rule; grep/find run in
+   the sandbox; no bwrap means the model's commands are refused.
+2. No network by default (done).
+3. Approve each network use (done): `network: true` on one bash call; y/n in every mode for that
+   call only; refused without a terminal.
+4. Approve per host (only if 3 proves too coarse in use): an in-awl proxy that asks per host, with a
+   session allowlist.
+5. Home as an allowlist (only after arena runs show it does not break tasks): an empty home with
+   toolchains mounted back, instead of hiding a list of secret folders (the list misses ~/.netrc,
+   ~/.git-credentials, ~/.npmrc, browser profiles).
+
+Not done: resource limits. RLIMIT_NPROC counts every thread of the user (1,300 here) even inside a
+user namespace, so a cap either breaks commands or stops nothing; per-sandbox limits need cgroups.

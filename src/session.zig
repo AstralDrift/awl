@@ -8,6 +8,10 @@ pub var fd: sys.fd_t = -1;
 pub var path_b: [512]u8 = undefined;
 pub var path: []const u8 = "";
 
+pub fn dirPath(buf: []u8) ?[]const u8 {
+    return dir(buf);
+}
+
 fn dir(buf: []u8) ?[]const u8 {
     if (sys.getenv("XDG_STATE_HOME")) |x| return std.fmt.bufPrint(buf, "{s}/awl/sessions", .{x}) catch null;
     const home = sys.getenv("HOME") orelse return null;
@@ -36,8 +40,15 @@ pub fn restart() void {
 
 /// Start a new session file. Failure leaves sessions off (fd = -1).
 pub fn create(meta: []const u8) void {
+    fd = newFile(&path_b, &path) orelse return;
+    append(meta);
+    @import("agents.zig").begin();
+}
+
+/// A new, empty session file named for the current UTC time (`out` gets its path).
+pub fn newFile(buf: []u8, out: *[]const u8) ?sys.fd_t {
     var db: [400]u8 = undefined;
-    const d = dir(&db) orelse return;
+    const d = dir(&db) orelse return null;
     mkdirs(d);
     const es = std.time.epoch.EpochSeconds{ .secs = @intCast(sys.wallSec()) };
     const day = es.getEpochDay().calculateYearDay();
@@ -47,15 +58,13 @@ pub fn create(meta: []const u8) void {
     while (seq < 100) : (seq += 1) { // another session in the same second: _1, _2 (sorts after the first)
         var sb: [8]u8 = undefined;
         const suffix = if (seq == 0) "" else std.fmt.bufPrint(&sb, "_{d}", .{seq}) catch "";
-        path = std.fmt.bufPrint(&path_b, "{s}/{d}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}-{d}{s}.jsonl", .{ d, day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(), linux.getpid(), suffix }) catch return;
-        fd = sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .APPEND = true, .CLOEXEC = true }, 0o600) catch |e| {
+        out.* = std.fmt.bufPrint(buf, "{s}/{d}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}-{d}{s}.jsonl", .{ d, day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(), linux.getpid(), suffix }) catch return null;
+        return sys.open(out.*, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .APPEND = true, .CLOEXEC = true }, 0o600) catch |e| {
             if (e == error.Exists) continue;
-            return;
+            return null;
         };
-        break;
     }
-    if (fd < 0) return;
-    append(meta);
+    return null;
 }
 
 pub fn append(json: []const u8) void {
@@ -86,6 +95,7 @@ pub fn load(p: []const u8, comptime onMsg: fn ([]const u8) void) !usize {
     path = path_b[0..@min(p.len, path_b.len)];
     @memcpy(@constCast(path), p[0..path.len]);
     fd = sys.open(p, .{ .ACCMODE = .WRONLY, .APPEND = true, .CLOEXEC = true }, 0) catch -1;
+    @import("agents.zig").begin();
     return count;
 }
 
@@ -288,6 +298,7 @@ pub fn appendHistory(entry: []const u8) void {
 
 /// Stop writing to the current session file.
 pub fn close() void {
+    @import("agents.zig").end();
     if (fd >= 0) sys.close(fd);
     fd = -1;
     path = "";

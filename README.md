@@ -1,7 +1,9 @@
 # awl
 
+[![CI](https://github.com/AstralDrift/awl/actions/workflows/ci.yml/badge.svg)](https://github.com/AstralDrift/awl/actions/workflows/ci.yml)
+
 A coding agent for the terminal, built to beat the popular ones on results, speed and cost with
-the smallest possible footprint. One static Zig binary (no libc, no runtime, ~230 KB) that talks
+the smallest possible footprint. One static Zig binary (no libc, no runtime, ~340 KB) that talks
 to any OpenAI-compatible server: Omarchy Local AI on your GPU, or OpenRouter in the cloud.
 
 The model gets seven tools: read, write, edit (one change or an `edits` list, all or nothing),
@@ -87,7 +89,7 @@ ghostty, alacritty, and over ssh).
 - A status line under the prompt shows the model, context use (amber from 60%, when old tool
   output starts being trimmed; red from 80%, near summarizing), the mode and the git branch.
 - When the model keeps a checklist (the todo tool), it stays pinned above the timer while the
-  model and tools work: finished items fold into a count, the one in progress is highlighted.
+  model and tools work: finished items fold into a count, the one in progress is highlighted. Ctrl-T hides it (a `☰ 2/5` count stays on the timer line) and shows it again.
 - Full-screen mode (`awl --full`, `AWL_FULL=1`, or `/full` to switch either way): the
   conversation scrolls above a fixed input and status line (PgUp/PgDn or the mouse wheel; an
   arrow at the top right says how far up you are; Shift-drag selects text). Leaving it prints
@@ -100,23 +102,71 @@ ghostty, alacritty, and over ssh).
   from the server's list. Ctrl-P switches to the next model in `AWL_MODELS`, or opens the model picker.
 - `@path` attaches a small text file to the message (Tab completes names); `!cmd` runs a shell
   command yourself and passes its output to the model with your next message.
+- Ctrl-G writes the prompt in `$VISUAL` / `$EDITOR` (vi when neither is set). Esc Esc at an empty
+  prompt (or `/rewind`) goes back to before an earlier prompt: pick it, then choose whether the
+  files changed since go back too (tracked like `/undo`). The prompt returns to the input line, and
+  the conversation as it was stays in ← as "… (before rewind)".
+- Prompt commands: `~/.config/awl/prompts/NAME.md` or `<project>/.agents/prompts/NAME.md` runs as
+  `/NAME args` (`$ARGUMENTS`, `$1`..`$9`; an optional `description:` front matter shows in the
+  picker and `/help`). `/review` (the uncommitted changes, read only) and `/init` (an AGENTS.md)
+  are built in; a file with the same name replaces them.
+- `/diff` shows every uncommitted change, new files included, colored.
+- The terminal title shows the folder, with `⋯` while awl works and `?` while it waits for you;
+  the old title comes back on exit (`AWL_TITLE=off` leaves it alone).
 - `/model NAME` switches model, `/compact` summarizes the conversation now, `/context` shows the
   window use and the files read and changed. A `/command` typed while the model works runs when
   the turn ends.
 
+## Agents and sessions (←)
+
+Press ← at an empty prompt (or `/agents`) for a full-screen view of this folder's conversations
+and background agents. It updates live, groups what needs you first (**Needs you**, **Running**,
+**Sessions**), and previews the selected one: its state, any question it is waiting on, and the
+end of its conversation. Wide terminals show the preview beside the list, narrow ones below it.
+
+- **Background agents** run on their own while you keep working: `n` in the view, or `/bg TASK`
+  at the prompt. Each is a separate `awl --bg` process with its own sandbox, using the current
+  model and mode. It keeps running if you close awl, and sends a desktop notification when it
+  finishes or needs you.
+- `m` messages the selected one: a running agent reads it before its next step (steering); a
+  finished or saved session continues in the background with it.
+- `y` / `d` answer an agent's question (a command in ask mode, the network, a guarded file).
+- `x` stops an agent; `⏎` opens a session here (or zooms a running agent's live transcript);
+  `space` zooms the preview; `r` renames; `f` forks a copy and opens it; `⌫` deletes (asks
+  first); `/` searches; `⇥` switches between this folder and all folders; `esc` or `←` goes back.
+- The status line shows `◆ 2 agents running` or `? 1 needs you`, and a note above the prompt
+  says when an agent finished or is waiting.
+- A session is open in one place at a time: one in use by a background agent or another
+  terminal cannot be resumed (`-r`, `-c`, `/resume`, the view) until that one is done.
+- How it works: every running awl keeps a small `<session>.live` status file and holds a lock
+  on it, so a crashed agent never shows as running. A background agent reads messages from
+  `<session>.inbox` and answers from `<session>.answer`; its own output goes to `<session>.log`.
+
 ## Safety
 
-- **Sandbox** (bubblewrap, on by default when `/usr/bin/bwrap` exists): the model's commands see the whole
-  filesystem read-only; they can write only to the project (git root or cwd), `/tmp`, build caches and
-  `AWL_SANDBOX_WRITE` dirs. `~/.ssh`, `~/.gnupg`, cloud/gh credentials, keyrings, the Local AI key and the
-  docker socket are hidden. `AWL_SANDBOX_NET=off` cuts their network (fully offline; local test servers still
-  work on their private localhost). write/edit follow the same rule. `AWL_SANDBOX=off` turns it off; your
-  own `!cmd` is never sandboxed.
+- **Sandbox** (bubblewrap, required by default): the model's commands (bash, background jobs, grep, find)
+  run in one sandbox per session. They see the filesystem read-only and can write only to the project
+  (git root or cwd), `/tmp`, build caches and `AWL_SANDBOX_WRITE` dirs. Hidden from them: `~/.ssh`,
+  `~/.gnupg`, cloud/gh credentials, keyrings, the Local AI key, `/run/user` (D-Bus, Hyprland, keyring
+  sockets), sockets under `/tmp`, the docker socket, other processes, and any environment variable not on
+  a short allowlist (names with TOKEN, KEY, SECRET, PASS, AUTH, ... never pass). They cannot create user
+  namespaces. The project's `.git/config`, `.git/hooks`, `AGENTS.md` and `.agents/` are read-only to them,
+  since git runs hooks and fsmonitor outside the sandbox and the next session reads those instructions.
+- **No network unless you say yes.** Commands share a private localhost (a dev server started in the
+  background is reachable from the next command) but nothing beyond it. When the model needs the
+  internet it sets `network: true` on one bash call; awl shows the command and asks `allow? y/n` in every
+  mode, for that call only. With no terminal (`awl -p`) the answer is no. `AWL_SANDBOX_NET=on` gives
+  every command the network without asking.
+- write/edit follow the same write rule after resolving symlinks, and ask before every change to `.git`,
+  `AGENTS.md` or `.agents/`; read refuses the hidden paths. Without `/usr/bin/bwrap` the model's commands
+  are refused (install bubblewrap); `AWL_SANDBOX=off` turns all of it off. Your own `!cmd` is never
+  sandboxed.
 - `/undo` puts back the files the last turn wrote or edited (and removes files it created);
   repeat it to go further back. The model is told what was undone. Changes made by shell
   commands are not tracked.
 - `/mode auto` (default) runs everything; `/mode ask` shows each edit's diff and each command
-  and waits for y/n (a = allow the rest: switches to auto); `/mode plan` keeps files read-only and asks before
+  and waits for y/n (p = always allow this command's prefix, e.g. `zig build`, for the session;
+  a command that chains, substitutes or redirects still asks; a = allow the rest: switches to auto); `/mode plan` keeps files read-only and asks before
   commands, so the model investigates and proposes. `AWL_MODE` sets the starting mode.
 
 ## What it loads
@@ -151,7 +201,7 @@ ghostty, alacritty, and over ssh).
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |
 | `AWL_AGENTS` | on | `off` loads no AGENTS.md files (clean evals and benchmarks) |
 | `AWL_MODE` | `auto` | `auto`, `ask` (approve commands and edits) or `plan` (read-only) |
-| `AWL_STATUS` | `model,ctx,mode,branch` | items of the status line under the prompt, in order: `model`, `ctx`, `mode`, `branch`, `dir`, `session`; `off` hides it |
+| `AWL_STATUS` | `model,ctx,mode,branch,agents` | items of the status line under the prompt, in order: `model`, `ctx`, `mode`, `branch`, `dir`, `session`, `agents` (background agents running or waiting); `off` hides it |
 | `AWL_WELCOME` | on | `off` shrinks the startup screen to one line |
 | `AWL_MODELS` | unset | comma-separated models that Ctrl-P cycles through |
 | `AWL_THINK_BUDGET` | unset | `N`: send `custom_params: {thinking_budget: N}` (SGLang started with `--enable-strict-thinking` ends reasoning after N tokens) |
@@ -159,6 +209,7 @@ ghostty, alacritty, and over ssh).
 | `AWL_KEEP_REASONING` | on | send each turn's reasoning back as `reasoning_content`; chat templates (Nanbeige4.3, Qwen3.x) re-render it, so the history matches what the model generated and the server's prefix cache keeps hitting. `0`: off |
 | `AWL_THINK_ROWS` | `6` | rows of the model's newest reasoning shown live (word-wrapped, above the timer); they fold into one `∴ thought Ns` line when it answers. `0`: timer only |
 | `AWL_DEBUG_KEYS` | unset | file to append every raw input chunk to, escaped (`\e` = Esc): shows exactly what the terminal sends on a keypress or paste |
+| `AWL_TITLE` | on | `off`: leave the terminal's title alone |
 | `AWL_FULL` | unset | `1` starts in full-screen mode (same as `--full`) |
 
 ## Benchmarks
@@ -208,3 +259,9 @@ to the system prompt (naming a task or task file gets the proposal rejected). Th
 tasks; if it looks better, both prompts run again and it is adopted only if it still wins with both runs
 pooled (passes first, then >= 5% less wall time). Adopted and rejected edits go to `lessons.md` with their
 numbers; the proposer sees them next time. Tier t5 is never shown to the proposer. State: `arena/evolve/NAME/`.
+
+## License
+
+MIT (see [LICENSE](LICENSE)). The skills adapted from pstack keep pstack's MIT notice next to them.
+Releases: push a tag like `v0.2.0` and the Release workflow attaches the static `awl-x86_64-linux`
+binary and its SHA-256 to a GitHub release.

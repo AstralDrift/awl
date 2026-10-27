@@ -16,6 +16,29 @@ pub fn newTurn() void {
     turn += 1;
 }
 
+pub fn current() u32 {
+    return turn;
+}
+
+/// The newest turn with saved files (0: none).
+pub fn newest() u32 {
+    var off: usize = 0;
+    var last: u32 = 0;
+    while (off < log.len) {
+        const r = at(off);
+        last = r.turn;
+        off = r.end;
+    }
+    return last;
+}
+
+/// Undo every turn from `from` on, newest first (rewind). Returns files restored or removed.
+pub fn undoFrom(from: u32, write: *const fn ([]const u8, []const []const u8, *Buf) bool, out: *Buf) usize {
+    var n: usize = 0;
+    while (from > 0 and log.len > 0 and newest() >= from) n += undo(write, out);
+    return n;
+}
+
 const Rec = struct { turn: u32, existed: bool, path: []const u8, bytes: []const u8, end: usize };
 
 fn at(off: usize) Rec {

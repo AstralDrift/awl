@@ -261,7 +261,54 @@ pub var mode_note: []const u8 = ""; // the latest /mode change, said once
 
 pub fn user(text: []const u8) void {
     undo.newTurn();
+    if (n_starts < starts.len) {
+        starts[n_starts] = .{ .msg = n_msgs, .turn = undo.current() };
+        n_starts += 1;
+    }
     addUser(text);
+}
+
+/// Where each turn of this run started: its first message and its /undo group (for rewind).
+const Start = struct { msg: usize, turn: u32 };
+var starts: [512]Start = undefined;
+var n_starts: usize = 0;
+
+/// The user messages of the conversation, oldest first: index and JSON text.
+pub fn userMessages(into: []usize) []usize {
+    const all = msgs.items();
+    var n: usize = 0;
+    for (0..@min(n_msgs, max_index)) |i| {
+        const m = all[offs[i] + 1 .. if (i + 1 < n_msgs) offs[i + 1] else all.len];
+        if (n < into.len and std.mem.startsWith(u8, m, "{\"role\":\"user\"")) {
+            into[n] = i;
+            n += 1;
+        }
+    }
+    return into[0..n];
+}
+
+/// The JSON text of message `i`.
+pub fn message(i: usize) []const u8 {
+    const all = msgs.items();
+    if (i >= n_msgs or i >= max_index) return "";
+    return all[offs[i] + 1 .. if (i + 1 < n_msgs) offs[i + 1] else all.len];
+}
+
+/// The /undo group of the first turn that started at or after message `i` (0: none this run).
+pub fn turnFrom(i: usize) u32 {
+    for (starts[0..n_starts]) |st| if (st.msg >= i) return st.turn;
+    return 0;
+}
+
+/// Drop message `i` and everything after it.
+pub fn rewind(i: usize) void {
+    if (i >= n_msgs or i >= max_index) return;
+    msgs.truncate(offs[i]);
+    n_msgs = i;
+    var k: usize = 0;
+    while (k < n_starts and starts[k].msg < i) k += 1;
+    n_starts = k;
+    ctx_tokens = (head.len + msgs.len) / 4; // an estimate until the next reply says
 }
 
 /// A message steered in mid-run: same /undo group as the turn it joins.
@@ -313,6 +360,7 @@ pub fn run() Outcome {
             _ = compact(false);
         }
         ui.liveStart();
+        @import("agents.zig").progress(step + 1);
         const t0 = sys.nowNs();
         // chat templates (Nanbeige4.3, Qwen3.x) read enable_thinking; other servers ignore unknown kwargs
         streamRetrying(msgs.items(), if (no_think or !thinking) "],\"chat_template_kwargs\":{\"enable_thinking\":false}}" else "]}") catch |e| {
@@ -790,6 +838,7 @@ fn compact(force: bool) bool {
     msgs.free();
     msgs = nb;
     n_msgs = noffs;
+    n_starts = 0; // message numbers changed: rewind can no longer tie turns to file changes
     ctx_tokens = if (before > 0) ctx_tokens * msgs.len / before else 0;
     session.append(sm.items());
     ui.note("compacted: {d} older messages replaced by a summary (~{d}k tokens now)", .{ dropped, ctx_tokens / 1000 });

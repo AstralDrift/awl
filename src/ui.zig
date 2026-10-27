@@ -173,6 +173,7 @@ pub fn liveRows(b: *@import("buf.zig").Buf, w: usize) void {
     var cols: usize = 4 + std.fmt.count("{d}", .{secs});
     var fb: [64]u8 = undefined;
     b.add(formingLabel(&fb));
+    b.add(tasksLabel(&fb));
     if (queued > 0) {
         b.print(" · {d} queued", .{queued});
         cols += 11;
@@ -323,6 +324,9 @@ fn drawLive() void {
     const fl = formingLabel(b[n..]);
     n += fl.len;
     cols += fl.len;
+    const tl = tasksLabel(b[n..]);
+    n += tl.len;
+    cols += tl.len -| 2; // "☰" is 3 bytes, 1 column
     if (queued > 0) {
         const q = std.fmt.bufPrint(b[n..], " · {d} queued", .{queued}) catch "";
         n += q.len;
@@ -361,6 +365,41 @@ fn drawLive() void {
 var plan_b: [4096]u8 = undefined;
 var plan_n: usize = 0;
 var panel_rows: usize = 0; // rows the last panel() wrote
+pub var plan_hidden = false; // Ctrl-T: the checklist folds into a count on the timer line
+
+/// Items finished (done or skipped) and in all.
+fn planCounts() [2]usize {
+    var c = [2]usize{ 0, 0 };
+    var it = std.mem.splitScalar(u8, plan_b[0..plan_n], '\n');
+    while (it.next()) |l| {
+        if (l.len < 4) continue;
+        if (l[1] == 'x' or l[1] == '-') c[0] += 1;
+        c[1] += 1;
+    }
+    return c;
+}
+
+/// " · ☰ 2/5" on the timer line while the checklist is hidden and unfinished.
+fn tasksLabel(b: []u8) []const u8 {
+    if (!plan_hidden or plan_n == 0) return b[0..0];
+    const c = planCounts();
+    if (c[0] == c[1]) return b[0..0];
+    return std.fmt.bufPrint(b, " · ☰ {d}/{d}", .{ c[0], c[1] }) catch b[0..0];
+}
+
+/// Ctrl-T. Returns the new state (true: shown).
+pub fn togglePlan() bool {
+    plan_hidden = !plan_hidden;
+    draft_changed = true; // redraw the live area now
+    return !plan_hidden;
+}
+
+/// The whole checklist, on request (Ctrl-T at the prompt). False when there is none.
+pub fn showPlan() bool {
+    if (plan_n == 0) return false;
+    checklist();
+    return true;
+}
 
 /// Forget the checklist (a new conversation).
 pub fn clearPlan() void {
@@ -376,6 +415,11 @@ fn setPlan(text: []const u8) void {
 
 /// The whole checklist after a todo call: ✓ done, ▸ in progress, ○ to do, – skipped.
 fn checklist() void {
+    if (plan_hidden) { // one line instead of the list
+        const c = planCounts();
+        print("  {s}☰ tasks {d}/{d} done · Ctrl-T shows them{s}\n", .{ muted(), c[0], c[1], reset() });
+        return flush();
+    }
     const w = @as(usize, sys.termCols()) -| 4;
     var it = std.mem.splitScalar(u8, plan_b[0..plan_n], '\n');
     while (it.next()) |l| {
@@ -401,7 +445,7 @@ fn panelRows() usize {
 /// the item in progress and the next few. Nothing once every item is finished.
 fn panel(b: []u8, w: usize) []const u8 {
     panel_rows = 0;
-    if (plan_n == 0 or !color or oneshot) return b[0..0];
+    if (plan_n == 0 or !color or oneshot or plan_hidden) return b[0..0];
     var done: usize = 0;
     var open: usize = 0;
     var it = std.mem.splitScalar(u8, plan_b[0..plan_n], '\n');
@@ -961,6 +1005,7 @@ var tool_name: [16]u8 = undefined;
 var tool_name_n: usize = 0;
 
 pub fn tool(name: []const u8, summary: []const u8) void {
+    @import("agents.zig").activity(name, summary);
     endMessage();
     tool_name_n = @min(name.len, tool_name.len);
     @memcpy(tool_name[0..tool_name_n], name[0..tool_name_n]);

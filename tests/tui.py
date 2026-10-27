@@ -406,6 +406,93 @@ def safety():
 safety()
 
 
+def lockdown():
+    """Auto mode still asks before a command uses the network and before AGENTS.md changes; y/n only."""
+    d = tempfile.mkdtemp()
+    agents = os.path.join(d, "AGENTS.md")
+    open(agents, "w").write("# rules\n")
+    pf = os.path.join(d, "port")
+    probe = 'curl -s -o /dev/null -w REACHED-%{http_code} "http://127.0.0.1:$(cat ' + pf + ')/v1/models"'
+    turns = [
+        {"tool_calls": [{"name": "bash", "arguments": {"command": probe, "network": True}}]},
+        {"content": "net declined"},
+        {"tool_calls": [{"name": "bash", "arguments": {"command": probe, "network": True}}]},
+        {"content": "net used"},
+        {"tool_calls": [{"name": "bash", "arguments": {"command": probe}}]},
+        {"content": "no net"},
+        {"tool_calls": [{"name": "write", "arguments": {"path": "AGENTS.md", "content": "planted\n"}}]},
+        {"content": "agents declined"},
+        {"tool_calls": [{"name": "write", "arguments": {"path": "AGENTS.md", "content": "# rules v2\n"}}]},
+        {"content": "agents written"},
+    ]
+    sp8 = os.path.join(d, "s.json")
+    json.dump(turns, open(sp8, "w"))
+    log8 = os.path.join(d, "req.jsonl")
+    srv8 = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp8, "--log", log8], stdout=subprocess.PIPE)
+    port8 = srv8.stdout.readline().decode().strip()
+    open(pf, "w").write(port8)
+    p8, f8 = pty.fork()
+    if p8 == 0:
+        os.chdir(d)
+        os.execve(AWL, [AWL], dict(env, AWL_URL=f"http://127.0.0.1:{port8}", AWL_MODE="auto"))
+    out = [b""]
+
+    def until(pat, t=5.0):
+        end = time.time() + t
+        while pat.encode() not in out[0] and time.time() < end:
+            r, _, _ = select.select([f8], [], [], 0.05)
+            if r:
+                try:
+                    out[0] += os.read(f8, 65536)
+                except OSError:
+                    break
+        return pat.encode() in out[0]
+
+    def last_tool():
+        m = [json.loads(l) for l in open(log8)][-1]["messages"]
+        return [x for x in m if x["role"] == "tool"][-1]["content"]
+    until("› ")
+    os.write(f8, b"fetch\r")
+    asked = until("allow? y/n")
+    check("network: asked in auto mode, y/n only", asked and b"a = all" not in out[0].split(b"wants the network")[-1], out[0][-200:])
+    os.write(f8, b"n")
+    check("network: declined, nothing reached", until("net declined") and "REACHED" not in last_tool(), last_tool()[:200])
+    time.sleep(0.3)
+    out[0] = b""
+    os.write(f8, b"again\r")
+    until("allow? y/n")
+    os.write(f8, b"y")
+    until("net used")
+    t = last_tool()
+    check("network: approved command reaches the host", re.search(r"REACHED-[1-5]", t) is not None and "approved by the user for this command only" in t, t[:200])
+    time.sleep(0.3)
+    out[0] = b""
+    os.write(f8, b"without\r")
+    until("no net")
+    t = last_tool()
+    check("network: without the flag nothing reaches the host", "REACHED-000" in t and b"allow?" not in out[0], t[:200])
+    time.sleep(0.3)
+    out[0] = b""
+    os.write(f8, b"plant\r")
+    check("AGENTS.md: asked in auto mode", until("allow? y/n"), out[0][-200:])
+    os.write(f8, b"a")  # "all" is not an answer here
+    time.sleep(0.3)
+    os.write(f8, b"n")
+    check("AGENTS.md: declined, unchanged", until("agents declined") and open(agents).read() == "# rules\n", open(agents).read())
+    time.sleep(0.3)
+    out[0] = b""
+    os.write(f8, b"update\r")
+    until("allow? y/n")
+    os.write(f8, b"y")
+    check("AGENTS.md: allowed, written", until("agents written") and open(agents).read() == "# rules v2\n", open(agents).read() + " | " + last_tool()[:200])
+    os.kill(p8, signal.SIGKILL)
+    os.waitpid(p8, 0)
+    srv8.kill()
+
+
+lockdown()
+
+
 def inputs():
     """@file attach + Tab, !cmd, /model, /new + /resume, history across restarts + Ctrl-R."""
     d = tempfile.mkdtemp()
@@ -645,6 +732,60 @@ def todo_panel():
 todo_panel()
 
 
+def todo_hidden():
+    """Ctrl-T while it works folds the pinned checklist into a count on the timer line; at the prompt it shows the list."""
+    d = tempfile.mkdtemp()
+    items = lambda st: [{"text": "read the parser", "status": st[0]}, {"text": "fix tokenize", "status": st[1]}, {"text": "add a test", "status": st[2]}]
+    turns = [
+        {"tool_calls": [{"name": "todo", "arguments": {"items": items(["done", "doing", "pending"])}}]},
+        {"tool_calls": [{"name": "bash", "arguments": {"command": "sleep 2.5"}}]},
+        {"tool_calls": [{"name": "todo", "arguments": {"items": items(["done", "done", "doing"])}}]},
+        {"content": "hidden done"},
+    ]
+    spx = os.path.join(d, "s.json")
+    json.dump(turns, open(spx, "w"))
+    srvx = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), spx], stdout=subprocess.PIPE)
+    portx = srvx.stdout.readline().decode().strip()
+    px, fx = pty.fork()
+    if px == 0:
+        os.chdir(d)
+        os.execve(AWL, [AWL], dict(env, AWL_URL=f"http://127.0.0.1:{portx}", XDG_STATE_HOME=os.path.join(d, "state")))
+    fcntl.ioctl(fx, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    out = [b""]
+
+    def until(pat, t=4.0):
+        end = time.time() + t
+        while pat.encode() not in out[0] and time.time() < end:
+            if select.select([fx], [], [], 0.05)[0]:
+                out[0] += os.read(fx, 65536)
+        return pat.encode() in out[0]
+
+    until("› ")
+    os.write(fx, b"go\r")
+    until("sleep 2.5")
+    out[0] = b""
+    os.write(fx, b"\x14")  # Ctrl-T
+    seen = until("☰ 1/3", 2.0)
+    plain = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", out[0])
+    check("Ctrl-T while working: count on the timer line, no pinned rows", seen and "▸ fix tokenize".encode() not in plain, plain[-300:])
+    out[0] = b""
+    until("hidden done")
+    plain = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", out[0])
+    check("hidden: a todo call prints one line, not the list", "☰ tasks 2/3 done · Ctrl-T shows them".encode() in plain and "▸ add a test".encode() not in plain, plain[-400:])
+    until("› ")
+    out[0] = b""
+    os.write(fx, b"\x14")
+    plain_ok = until("add a test")
+    plain = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", out[0])
+    check("Ctrl-T at the prompt shows the checklist again", plain_ok and "✓ read the parser".encode() in plain, plain[-300:])
+    os.kill(px, signal.SIGKILL)
+    os.waitpid(px, 0)
+    srvx.kill()
+
+
+todo_hidden()
+
+
 class Screen:
     """Just enough of a terminal for awl's inline live area: text, CR, LF, CSI A/J/K, SGR and DEC modes ignored."""
     def __init__(self, rows, cols):
@@ -865,5 +1006,396 @@ def full_screen():
 
 
 full_screen()
+
+
+def agents_view():
+    """Background agents (--bg) and the ← view: status files, steering, approvals, stop, crash, and the dashboard's actions."""
+    d = tempfile.mkdtemp()
+    proj = os.path.join(d, "proj")
+    os.makedirs(proj)
+    state = os.path.join(d, "state")
+    sess = os.path.join(state, "awl", "sessions")
+    slow = os.path.join(d, "slow.json")
+    json.dump([{"tool_calls": [{"name": "bash", "arguments": {"command": "sleep 1"}}]}], open(slow, "w"))
+    quick = os.path.join(d, "quick.json")
+    json.dump([{"content": "quick answer"}], open(quick, "w"))
+    srv_s = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), slow], stdout=subprocess.PIPE)
+    srv_q = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), quick], stdout=subprocess.PIPE)
+    slow_url = "http://127.0.0.1:" + srv_s.stdout.readline().decode().strip()
+    quick_url = "http://127.0.0.1:" + srv_q.stdout.readline().decode().strip()
+    base = dict(env, XDG_STATE_HOME=state, AWL_SANDBOX="off")
+    procs = []
+
+    def bg(prompt, url, **extra):
+        p = subprocess.Popen([AWL, "--bg", "-p", prompt], cwd=proj, env=dict(base, AWL_URL=url, **extra),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        procs.append(p)
+        return p
+
+    def session_of(prompt, t=5.0):
+        end = time.time() + t
+        while time.time() < end:
+            for f in sorted(os.listdir(sess)) if os.path.isdir(sess) else []:
+                if f.endswith(".jsonl") and prompt in open(os.path.join(sess, f)).read():
+                    return os.path.join(sess, f)[:-6]
+            time.sleep(0.1)
+        return None
+
+    def live(b):
+        try:
+            return json.load(open(b + ".live"))
+        except (OSError, ValueError):
+            return {}
+
+    def wait_state(b, want, t=6.0):
+        end = time.time() + t
+        while time.time() < end:
+            if live(b).get("state") == want:
+                return True
+            time.sleep(0.1)
+        return False
+
+    # --bg on its own: status file, steering through the inbox, a clean finish
+    bg("steer me", slow_url, AWL_MAX_STEPS="3")
+    b1 = session_of("steer me")
+    check("--bg: status file says running, kind bg", b1 is not None and wait_state(b1, "running") and live(b1).get("kind") == "bg", live(b1) if b1 else "no session")
+    open(b1 + ".inbox", "w").write("and also this")
+    end = time.time() + 6
+    while time.time() < end and "and also this" not in open(b1 + ".jsonl").read():
+        time.sleep(0.1)
+    check("--bg: a message in the inbox reaches the model as a user turn", '"content":"and also this"' in open(b1 + ".jsonl").read() and not os.path.exists(b1 + ".inbox"), open(b1 + ".jsonl").read()[-300:])
+    check("--bg: max steps ends as failed, status kept", wait_state(b1, "failed", 8), live(b1))
+    # an approval answered through the answer file
+    ask = bg("needs approval", slow_url, AWL_MODE="ask")
+    b2 = session_of("needs approval")
+    check("--bg ask mode: waits with the question in its status", b2 is not None and wait_state(b2, "waiting") and "run a command: bash sleep 1" in live(b2).get("ask", ""), live(b2) if b2 else "")
+    open(b2 + ".answer", "w").write("y")
+    check("--bg: answer y lets the command run", wait_state(b2, "running", 3) or '"role":"tool"' in open(b2 + ".jsonl").read(), live(b2))
+    # killed hard: nobody holds the lock, so the dashboard must not say running
+    victim = bg("killed hard", slow_url)
+    b3 = session_of("killed hard")
+    wait_state(b3, "running")
+    victim.kill()
+    victim.wait()
+
+    try:
+        tui_part(proj, base, quick_url, slow_url, sess, bg, session_of, live, wait_state, b1, b2)
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+        srv_s.kill()
+        srv_q.kill()
+
+
+def tui_part(proj, base, quick_url, slow_url, sess, bg, session_of, live, wait_state, b1, b2):
+    pid, f = pty.fork()
+    if pid == 0:
+        os.chdir(proj)
+        os.execve(AWL, [AWL], dict(base, AWL_URL=quick_url))
+    fcntl.ioctl(f, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))
+    out = [b""]
+    import threading
+
+    def drain():  # read the terminal all the time: the view redraws while the test waits on files
+        while True:
+            try:
+                if select.select([f], [], [], 0.05)[0]:
+                    out[0] += os.read(f, 1 << 20)
+            except OSError:
+                return
+
+    threading.Thread(target=drain, daemon=True).start()
+
+    def until(pat, t=4.0):
+        end = time.time() + t
+        while pat.encode() not in out[0] and time.time() < end:
+            time.sleep(0.03)
+        return pat.encode() in out[0]
+
+    def plain():
+        return re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", out[0]).decode("utf-8", "replace")
+
+    check("status line counts agents that need you", until("? 1 needs you"), plain()[-300:])
+    out[0] = b""
+    os.write(f, b"\x1b[D")  # ← at an empty prompt
+    check("← opens the agents view on the alternate screen", until("agents & sessions") and b"\x1b[?1049h" in out[0], plain()[-300:])
+    check("view: groups, the waiting agent first, its question", until("NEEDS YOU") and until("wants to run a command: bash sleep 1"), plain()[-600:])
+    check("view: a killed agent shows as failed, not running", until("killed hard") and ("ended unexpectedly" in plain() or "✗ killed hard" in plain()), plain()[-800:])
+    out[0] = b""
+    os.write(f, b"y")
+    check("y answers the waiting agent", until("allowed") and wait_state(b2, "running", 3), live(b2))
+    # stop: select the running agent (the one that just got its answer stays selected)
+    out[0] = b""
+    os.write(f, b"x")
+    check("x stops a running background agent", until("stopping") and wait_state(b2, "stopped", 6), live(b2))
+    # a new agent from the view
+    out[0] = b""
+    os.write(f, b"n")
+    until("new background agent")
+    os.write(f, b"brand new task\r")
+    b4 = session_of("brand new task")
+    check("n starts a background agent in this folder", until("started a background agent") and b4 is not None and wait_state(b4, "done", 6), live(b4) if b4 else plain()[-300:])
+    out[0] = b""
+    check("the new agent is selected when it shows up", until("brand new task", 4) and until("✓ done", 4), plain()[-600:])
+    os.write(f, b"r\x15renamed task\r")
+    time.sleep(0.6)
+    check("r renames (a .title file)", b4 is not None and os.path.exists(b4 + ".title") and open(b4 + ".title").read() == "renamed task", "")
+    out[0] = b""
+    os.write(f, b"f")
+    check("f forks and opens the fork here", until("resumed") and until("renamed task (fork)"), plain()[-400:])
+    os.write(f, b"\x1b[D")
+    until("agents & sessions")
+    os.write(f, b"/renamed task (fork)\r")
+    time.sleep(0.3)
+    out[0] = b""
+    os.write(f, b"\x7f")
+    until("delete this session?")
+    os.write(f, b"y")
+    check("⌫ then y: refused for the session at the prompt", until("in use") or until("delete this session?", 0.5) is False, plain()[-300:])
+    os.write(f, b"\x1b")
+    os.write(f, b"\x1b")
+    time.sleep(0.4)
+    out[0] = b""
+    os.write(f, b"\x1b[D")
+    until("agents & sessions")
+    os.write(f, b"/steer me\r")
+    time.sleep(0.3)
+    out[0] = b""
+    os.write(f, b"\x7f")
+    until("delete this session?")
+    os.write(f, b"y")
+    check("⌫ then y deletes a finished session and its files", until("deleted") and not os.path.exists(b1 + ".jsonl") and not os.path.exists(b1 + ".live"), plain()[-300:])
+    os.write(f, b"\x1b")  # the first Esc clears the search
+    time.sleep(0.3)
+    out[0] = b""
+    os.write(f, b"\x1b")
+    check("Esc leaves the view: normal screen, prompt again", until("\x1b[?1049l") and until("› "), out[0][-200:])
+    # opening a session that a background agent is still using is refused
+    busy = bg("still busy", slow_url)
+    b5 = session_of("still busy")
+    wait_state(b5, "running")
+    r = subprocess.run([AWL, "-r", b5 + ".jsonl"], cwd=proj, env=dict(base, AWL_URL=quick_url), capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+    check("awl -r on a session a background agent is using: refused", r.returncode != 0 and "in use by another awl" in r.stderr, r.stderr)
+    busy.kill()
+    # /bg from the prompt, and the note when it finishes
+    out[0] = b""
+    os.write(f, b"/bg tell me a joke\r")
+    check("/bg starts an agent; a note says when it finished", until("background agent started") and until("finished · ← to see it", 8), plain()[-400:])
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+
+
+agents_view()
+
+
+def rewind_and_editor():
+    """Ctrl-G writes the prompt in $EDITOR; Esc Esc rewinds to an earlier prompt, puts files back, keeps the old conversation."""
+    d = tempfile.mkdtemp()
+    proj = os.path.join(d, "proj")
+    os.makedirs(proj)
+    state = os.path.join(d, "state")
+    sess = os.path.join(state, "awl", "sessions")
+    ed = os.path.join(d, "ed.sh")
+    open(ed, "w").write('#!/bin/sh\nprintf "%s and more from the editor\\n\\n" "$(cat "$1")" > "$1"\n')
+    os.chmod(ed, 0o755)
+    turns = [
+        {"tool_calls": [{"name": "write", "arguments": {"path": "a.txt", "content": "one\n"}}]},
+        {"content": "wrote one"},
+        {"tool_calls": [{"name": "edit", "arguments": {"path": "a.txt", "old_string": "one", "new_string": "two"}}]},
+        {"content": "made it two"},
+        {"content": "again"},
+    ]
+    sp = os.path.join(d, "s.json")
+    json.dump(turns, open(sp, "w"))
+    lg = os.path.join(d, "req.jsonl")
+    srv_r = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp, "--log", lg], stdout=subprocess.PIPE)
+    url = "http://127.0.0.1:" + srv_r.stdout.readline().decode().strip()
+    pid, f = pty.fork()
+    if pid == 0:
+        os.chdir(proj)
+        os.execve(AWL, [AWL], dict(env, XDG_STATE_HOME=state, AWL_SANDBOX="off", AWL_URL=url, EDITOR=ed, VISUAL=""))
+    fcntl.ioctl(f, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    out = [b""]
+    import threading
+
+    def drain():
+        while True:
+            try:
+                if select.select([f], [], [], 0.05)[0]:
+                    out[0] += os.read(f, 1 << 20)
+            except OSError:
+                return
+
+    threading.Thread(target=drain, daemon=True).start()
+
+    def until(pat, t=4.0):
+        end = time.time() + t
+        while pat.encode() not in out[0] and time.time() < end:
+            time.sleep(0.03)
+        return pat.encode() in out[0]
+
+    try:
+        until("› ")
+        os.write(f, b"start")
+        time.sleep(0.2)
+        os.write(f, b"\x07")  # Ctrl-G
+        check("Ctrl-G: the prompt comes back from $EDITOR", until("start and more from the editor"), out[0][-300:])
+        os.write(f, b"\r")
+        until("wrote one")
+        reqs = [json.loads(l) for l in open(lg)]
+        check("Ctrl-G: the edited prompt is what is sent", reqs and reqs[0]["messages"][-1]["content"] == "start and more from the editor", reqs[0]["messages"][-1] if reqs else "")
+        until("› ", 2)
+        os.write(f, b"make it two\r")
+        until("made it two")
+        check("setup: a.txt changed twice", open(os.path.join(proj, "a.txt")).read() == "two\n", "")
+        time.sleep(0.3)
+        out[0] = b""
+        os.write(f, b"\x1b")
+        time.sleep(0.3)
+        check("Esc at an empty prompt: the status line says esc again to rewind", until("esc again to rewind"), out[0][-200:])
+        os.write(f, b"\x1b")
+        check("Esc Esc: picker of earlier prompts, newest first", until("rewind to before this prompt") and until("make it two  (last)"), out[0][-300:])
+        os.write(f, b"\r")  # before "make it two"
+        check("then: conversation and files, or conversation only", until("conversation and files"), out[0][-300:])
+        os.write(f, b"\r")
+        check("rewind put the file back and kept the old conversation", until("put back 1 file") and until("(before rewind)"), out[0][-400:])
+        check("rewind: a.txt as it was before that prompt", open(os.path.join(proj, "a.txt")).read() == "one\n", open(os.path.join(proj, "a.txt")).read())
+        titles = [open(os.path.join(sess, x)).read() for x in os.listdir(sess) if x.endswith(".title")]
+        check("rewind: the old session is titled ... (before rewind)", any(t.endswith("(before rewind)") for t in titles), titles)
+        os.write(f, b"\r")  # the prompt came back in the input: send it again
+        until("again")
+        reqs = [json.loads(l) for l in open(lg)]
+        last = reqs[-1]["messages"]
+        users = [m["content"] for m in last if m["role"] == "user"]
+        check("rewind: the prompt returns to the input, and the history ends before it", users == ["start and more from the editor", "make it two"], users)
+    finally:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        srv_r.kill()
+
+
+rewind_and_editor()
+
+
+def prompt_commands():
+    """/NAME runs a saved prompt (front matter dropped, $1 and $ARGUMENTS filled); /review is built in; Tab completes names."""
+    d = tempfile.mkdtemp()
+    cfg = os.path.join(d, "cfg")
+    os.makedirs(os.path.join(cfg, "awl", "prompts"))
+    open(os.path.join(cfg, "awl", "prompts", "fixit.md"), "w").write("---\ndescription: fix one thing\n---\nFix $1 now. Context: $ARGUMENTS\n")
+    sp = os.path.join(d, "s.json")
+    json.dump([{"content": "on it"}], open(sp, "w"))
+    lg = os.path.join(d, "req.jsonl")
+    srv_p = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp, "--log", lg], stdout=subprocess.PIPE)
+    url = "http://127.0.0.1:" + srv_p.stdout.readline().decode().strip()
+    pid, f = pty.fork()
+    if pid == 0:
+        os.chdir(d)
+        os.execve(AWL, [AWL], dict(env, XDG_STATE_HOME=os.path.join(d, "state"), XDG_CONFIG_HOME=cfg, AWL_SANDBOX="off", AWL_URL=url))
+    fcntl.ioctl(f, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    out = [b""]
+
+    def until(pat, t=4.0):
+        end = time.time() + t
+        while pat.encode() not in out[0] and time.time() < end:
+            if select.select([f], [], [], 0.05)[0]:
+                try:
+                    out[0] += os.read(f, 1 << 20)
+                except OSError:
+                    break
+        return pat.encode() in out[0]
+
+    def last_user():
+        reqs = [json.loads(l) for l in open(lg)] if os.path.exists(lg) else []
+        return reqs[-1]["messages"][-1]["content"] if reqs else ""
+
+    try:
+        until("› ")
+        os.write(f, b"/fi\t")
+        check("Tab completes a prompt command's name", until("/fixit "), out[0][-200:])
+        os.write(f, b"parser quickly\r")
+        until("on it")
+        check("/fixit: front matter dropped, $1 and $ARGUMENTS filled", last_user() == "Fix parser now. Context: parser quickly", last_user())
+        out[0] = b""
+        os.write(f, b"/review focus on the parser\r")
+        until("on it")
+        u = last_user()
+        check("/review is built in; the words after it are added", u.startswith("Review the changes in this repository") and u.endswith("Do not change any files.\nfocus on the parser"), u[-200:])
+        out[0] = b""
+        os.write(f, b"/help\r")
+        check("/help lists prompt commands", until("/fixit") and until("/review") and until("/init"), out[0][-400:])
+    finally:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        srv_p.kill()
+
+
+prompt_commands()
+
+
+def prefix_diff_title():
+    """Ask mode: p allows a command prefix for the session (chained commands still ask); /diff; the terminal title."""
+    d = tempfile.mkdtemp()
+    proj = os.path.join(d, "proj")
+    os.makedirs(proj)
+    g = lambda *a: subprocess.run(["git", "-C", proj, "-c", "user.email=t@t", "-c", "user.name=t", *a], capture_output=True)
+    g("init", "-q")
+    open(os.path.join(proj, "a.txt"), "w").write("one\n")
+    g("add", ".")
+    g("commit", "-qm", "init")
+    open(os.path.join(proj, "a.txt"), "w").write("one\nadded line\n")
+    open(os.path.join(proj, "new.txt"), "w").write("brand new\n")
+    bash = lambda c: {"tool_calls": [{"name": "bash", "arguments": {"command": c}}]}
+    turns = [bash("echo one"), {"content": "first ok"}, bash("echo two"), {"content": "second ok"}, bash("echo three && echo x"), {"content": "third ok"}]
+    sp = os.path.join(d, "s.json")
+    json.dump(turns, open(sp, "w"))
+    srv_x = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp], stdout=subprocess.PIPE)
+    url = "http://127.0.0.1:" + srv_x.stdout.readline().decode().strip()
+    pid, f = pty.fork()
+    if pid == 0:
+        os.chdir(proj)
+        os.execve(AWL, [AWL], dict(env, XDG_STATE_HOME=os.path.join(d, "state"), AWL_SANDBOX="off", AWL_URL=url, AWL_MODE="ask"))
+    fcntl.ioctl(f, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))
+    out = [b""]
+
+    def until(pat, t=4.0):
+        end = time.time() + t
+        while pat.encode() not in out[0] and time.time() < end:
+            if select.select([f], [], [], 0.05)[0]:
+                try:
+                    out[0] += os.read(f, 1 << 20)
+                except OSError:
+                    break
+        return pat.encode() in out[0]
+
+    try:
+        check("title: the terminal's title is kept to put back, then set", until("\x1b]2;proj · awl\x07") and b"\x1b[22;2t" in out[0], out[0][:200])
+        os.write(f, b"go\r")
+        check("ask mode offers the command's prefix", until("p = always `echo` here"), out[0][-300:])
+        check("title: ? while it waits for you", until("\x1b]2;? proj · awl\x07"), out[0][-300:])
+        check("title: ⋯ while it works", "\x1b]2;⋯ proj · awl\x07".encode() in out[0], out[0][-200:])
+        os.write(f, b"p")
+        until("first ok")
+        out[0] = b""
+        os.write(f, b"again\r")
+        until("second ok")
+        check("p: the same prefix runs without asking", b"allow?" not in out[0] and b"\xe2\x96\xb8 bash" in out[0], out[0][-300:])
+        out[0] = b""
+        os.write(f, b"chain\r")
+        check("a chained command with that prefix still asks", until("allow?"), out[0][-300:])
+        os.write(f, b"n")
+        until("third ok")
+        out[0] = b""
+        os.write(f, b"/diff\r")
+        plain_ok = until("2 files changed")
+        check("/diff: tracked changes and new files, colored", plain_ok and (ui_green := b"+added line") in out[0] and b"+brand new" in out[0] and b"\x1b[1mdiff --git" in out[0], out[0][-600:])
+    finally:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        srv_x.kill()
+
+
+prefix_diff_title()
 print(f"tui: {'all passed' if not fails else f'{fails} failed'}")
 sys.exit(1 if fails else 0)

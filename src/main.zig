@@ -9,6 +9,7 @@ const agent = @import("agent.zig");
 const session = @import("session.zig");
 const tui = @import("tui.zig");
 const bufm = @import("buf.zig");
+const agents = @import("agents.zig");
 
 pub const version = "0.1.0";
 
@@ -29,6 +30,7 @@ const usage =
     \\  -c          continue the latest session
     \\  -r FILE     resume a session file
     \\  --full      full-screen mode (also AWL_FULL=1, or /full)
+    \\  --bg        with -p: run as a background agent (the TUI's ← view starts these)
     \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MODE AWL_REASONING AWL_MAX_TOKENS AWL_MAX_STEPS
     \\     AWL_RETRIES AWL_SYSTEM AWL_AGENTS (off) AWL_WELCOME (off: one line)
     \\     AWL_MODELS (Ctrl-P cycles) AWL_STATUS (model,ctx,mode,branch,dir,session or off)
@@ -39,6 +41,7 @@ const usage =
     \\     AWL_KEEP_REASONING (0: do not send reasoning back with each turn)
     \\     AWL_THINK_ROWS (reasoning rows shown live, default 6; 0: timer only)
     \\     AWL_DEBUG_KEYS=FILE (log raw input, escaped: for keyboard / paste problems)
+    \\     AWL_TITLE (off: leave the terminal title alone)
     \\
 ;
 
@@ -56,6 +59,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var resume_path: ?[]const u8 = null;
     var cont = false;
     var idle = false;
+    var bg = false;
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
         const a = std.mem.span(argv[i]);
@@ -73,6 +77,8 @@ pub fn main(init: std.process.Init.Minimal) u8 {
             cont = true;
         } else if (eq(u8, a, "--full")) {
             tui.start_full = true;
+        } else if (eq(u8, a, "--bg")) {
+            bg = true;
         } else if (eq(u8, a, "--idle-rss")) {
             idle = true;
         } else {
@@ -81,9 +87,15 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         }
     }
 
+    if (bg and prompt == null) {
+        sys.writeAll(sys.stderr, usage) catch {};
+        return 2;
+    }
     sys.setupSignals();
     tools.detect();
     ui.oneshot = prompt != null;
+    agents.enabled = prompt == null or bg; // plain -p (scripts, benchmarks) leaves no status file
+    agents.kind = if (bg) .bg else .tui;
     ui.color = !ui.oneshot and sys.isatty(sys.stdout);
     ui.loadTheme();
 
@@ -145,12 +157,14 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         resume_path = session.pathOf(&l[0], &latest_b) orelse die("no saved sessions", .{});
     }
     if (resume_path) |p| {
+        if (agents.busyElsewhere(p)) |o| die("that session is in use by another awl (pid {d}{s}); open awl and press ← to see it", .{ o.pid, if (o.kind == .bg) ", a background agent" else "" });
         const n = agent.resume_(p) catch die("cannot read session {s}", .{p});
         if (!ui.oneshot) ui.note("resumed {d} messages from {s}", .{ n, p });
     } else {
         session.create(session.start_meta);
     }
 
+    if (bg) return background(prompt.?);
     if (prompt) |p| {
         agent.user(p);
         const rc: u8 = switch (agent.run()) {
@@ -164,7 +178,38 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         }
         return rc;
     }
+    defer session.close(); // a TUI's status file goes with it
     return tui.repl();
+}
+
+/// --bg: a background agent. Messages sent to it meanwhile (its inbox) run as follow-ups;
+/// questions wait for an answer from the dashboard; SIGINT stops it.
+fn background(prompt: []const u8) u8 {
+    tools.ask = &agents.bgAsk;
+    agent.steer = &agents.bgSteer;
+    agent.user(prompt);
+    var o = agent.run();
+    while (o == .done) {
+        const more = agents.bgSteer() orelse break;
+        agent.user(more);
+        o = agent.run();
+    }
+    agents.set(switch (o) {
+        .done => .done,
+        .cancelled => .stopped,
+        else => .failed,
+    });
+    agents.notify(switch (o) {
+        .done => "finished",
+        .cancelled => "stopped",
+        else => "failed",
+    });
+    session.close();
+    return switch (o) {
+        .done => 0,
+        .cancelled => 130,
+        else => 1,
+    };
 }
 
 /// Omarchy Local AI keeps its gateway key here.
@@ -191,4 +236,7 @@ test {
     _ = @import("sandbox.zig");
     _ = @import("agent.zig");
     _ = @import("ui.zig");
+    _ = @import("agents.zig");
+    _ = @import("dash.zig");
+    _ = @import("prompts.zig");
 }

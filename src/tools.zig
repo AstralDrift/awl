@@ -21,6 +21,63 @@ pub var mode: Mode = .auto;
 pub const Answer = enum { yes, no, always, cancel };
 /// Set by the TUI. Without it (one-shot, pipes) ask mode allows everything.
 pub var ask: ?*const fn () Answer = null;
+/// What the pending question is about (a background agent shows it in the dashboard).
+pub var ask_reason: []const u8 = "";
+/// The command a bash call asks to run (empty for other tools): the TUI offers its prefix.
+pub var ask_command: []const u8 = "";
+
+// Command prefixes the user allowed for this session ("zig build", "cargo test").
+var prefixes: [16][64]u8 = undefined;
+var prefix_len: [16]usize = undefined;
+var n_prefixes: usize = 0;
+
+/// What "always allow" would cover for `cmd`: its first word, plus the second for tools whose
+/// second word is a subcommand ("zig build test" → "zig build"; "echo hi" → "echo").
+pub fn commandPrefix(cmd: []const u8) []const u8 {
+    const c0 = std.mem.trim(u8, cmd, " \t");
+    var it = std.mem.tokenizeScalar(u8, c0, ' ');
+    const first = it.next() orelse return "";
+    const second = it.next() orelse return first;
+    const sub = [_][]const u8{ "git", "cargo", "npm", "pnpm", "yarn", "bun", "go", "zig", "docker", "podman", "kubectl", "uv", "pip", "mise", "gh", "dotnet", "mvn", "gradle", "deno", "swift", "systemctl", "just" };
+    for (sub) |x| if (std.mem.eql(u8, first, x)) {
+        for (second) |c| if (!(std.ascii.isLower(c) or c == '-' or c == '_')) return first;
+        return c0[0 .. @intFromPtr(second.ptr) - @intFromPtr(c0.ptr) + second.len];
+    };
+    return first;
+}
+
+pub fn allowPrefix(p: []const u8) void {
+    if (n_prefixes == prefixes.len or p.len == 0 or p.len > 64) return;
+    @memcpy(prefixes[n_prefixes][0..p.len], p);
+    prefix_len[n_prefixes] = p.len;
+    n_prefixes += 1;
+}
+
+/// An allowed prefix covers `cmd` unless it chains, substitutes or redirects (then it asks).
+fn prefixAllowed(cmd0: []const u8) bool {
+    const cmd = std.mem.trim(u8, cmd0, " \t");
+    if (std.mem.indexOfAny(u8, cmd, ";&|`<>\n") != null or std.mem.indexOf(u8, cmd, "$(") != null) return false;
+    for (0..n_prefixes) |i| {
+        const p = prefixes[i][0..prefix_len[i]];
+        if (std.mem.startsWith(u8, cmd, p) and (cmd.len == p.len or cmd[p.len] == ' ')) return true;
+    }
+    return false;
+}
+
+test "command prefixes" {
+    try std.testing.expectEqualStrings("zig build", commandPrefix("zig build test -Doptimize=ReleaseSmall"));
+    try std.testing.expectEqualStrings("python3", commandPrefix("python3 calc.py"));
+    try std.testing.expectEqualStrings("ls", commandPrefix("ls -la"));
+    try std.testing.expectEqualStrings("make", commandPrefix("make"));
+    try std.testing.expectEqualStrings("echo", commandPrefix("echo one"));
+    try std.testing.expectEqualStrings("git", commandPrefix("git -C x status"));
+    allowPrefix("zig build");
+    defer n_prefixes = 0;
+    try std.testing.expect(prefixAllowed("zig build test"));
+    try std.testing.expect(!prefixAllowed("zig build && rm -rf ~"));
+    try std.testing.expect(!prefixAllowed("zig buildx"));
+    try std.testing.expect(!prefixAllowed("zig fmt ."));
+}
 
 /// May this file change or command run? false: refused, and `out` says why.
 fn gate(name: []const u8, changes_files: bool, out: *Buf) error{Cancel}!bool {
@@ -30,6 +87,8 @@ fn gate(name: []const u8, changes_files: bool, out: *Buf) error{Cancel}!bool {
         return false;
     }
     const f = ask orelse return true;
+    if (!changes_files and prefixAllowed(ask_command)) return true;
+    ask_reason = if (changes_files) "change a file" else "run a command";
     switch (f()) {
         .yes => return true,
         .always => {
@@ -55,18 +114,23 @@ fn save(path: []const u8) void {
 /// A command the user typed with `!`: no approval, same output limits as bash.
 pub fn userShell(cmd: [:0]const u8, out: *Buf) error{Cancel}!bool {
     const argv = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
-    return spawn(&argv, 600_000, out, .bash);
+    return spawn(&argv, 600_000, out, .bash, false);
 }
 
 /// The project's files for the @file picker (fd: respects .gitignore), one per line.
 pub fn listFiles(out: *Buf) bool {
     if (!have_fd) return false;
     const argv = [_:null]?[*:0]const u8{ fd_path, "--type", "f", "--color", "never", "--max-results", "20000" };
-    return spawn(&argv, 5_000, out, .find) catch false;
+    return spawn(&argv, 5_000, out, .find, false) catch false;
 }
 
 pub fn undoLast(out: *Buf) usize {
     return undo.undo(&write, out);
+}
+
+/// Rewind: put back every file change from undo turn `from` on.
+pub fn undoFrom(from: u32, out: *Buf) usize {
+    return undo.undoFrom(from, &write, out);
 }
 
 pub const out_cap = 64 * 1024;
@@ -84,7 +148,7 @@ const schema_core =
     \\{"type":"function","function":{"name":"read","description":"Read a text file. The first line shown and every 10th line start with their number and an arrow (10→); the markers are not part of the file. For large files, grep for what you need first, then read with offset/limit (1-based).","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}},
     \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file with the given content. Creates parent directories.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
     \\{"type":"function","function":{"name":"edit","description":"Replace exact text in a file. One change: old_string + new_string. Several changes in one file: edits, a list of {old_string, new_string}, each matched against the file as it was before this call; all apply or none do. Each old_string must occur exactly once; include enough context. Read the file first; leave out read's N→ line markers.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","description":"with old_string: replace every occurrence (renames)"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["old_string","new_string"]}}},"required":["path"]}}},
-    \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"},"background":{"type":"boolean","description":"start it and return at once (servers, watchers, long test runs); output goes to a log file"}},"required":["command"]}}},
+    \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"},"background":{"type":"boolean","description":"start it and return at once (servers, watchers, long test runs); output goes to a log file"},"network":{"type":"boolean","description":"needs the internet (install, download, clone); the user approves each such command"}},"required":["command"]}}},
     \\{"type":"function","function":{"name":"todo","description":"Checklist for long tasks with several distinct steps; skip it for quick fixes. Send the whole list every time. status: pending, doing, done or skip (put the reason in text). Keep exactly one item doing. The latest list always stays in context.","parameters":{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"status":{"type":"string","enum":["pending","doing","done","skip"]}},"required":["text","status"]}}},"required":["items"]}}}
 ;
 const schema_grep =
@@ -157,6 +221,7 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         const content = p.content.v;
         sum(&r, name, "{s} ({d} lines)", .{ path, std.mem.count(u8, content, "\n") + @intFromBool(content.len > 0 and content[content.len - 1] != '\n') });
         if (outside(path, out)) return r;
+        if (try guarded(name, path, out)) return r;
         if (!try gate(name, true, out)) return r;
         save(path);
         r.ok = write(path, &.{content}, out);
@@ -166,7 +231,7 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         const E = struct { old_string: ?Str = null, new_string: ?Str = null, old: ?Str = null, new: ?Str = null };
         const p = std.json.parseFromSliceLeaky(struct { path: Str, old_string: ?Str = null, new_string: ?Str = null, old: ?Str = null, new: ?Str = null, replace_all: bool = false, edits: ?[]const E = null }, a, args, opts) catch return badArgs(out, name, args, &r);
         const path = p.path.v;
-        if (outside(path, out)) {
+        if (outside(path, out) or try guarded(name, path, out)) {
             sum(&r, name, "{s}", .{path});
             return r;
         }
@@ -212,18 +277,31 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         sum(&r, name, "{d}/{d} done", .{ done, p.items.len });
         r.ok = todo(p.items, out);
     } else if (eq(u8, name, "bash")) {
-        const p = std.json.parseFromSliceLeaky(struct { command: Str, timeout: ?Int(u32) = null, background: bool = false }, a, args, opts) catch return badArgs(out, name, args, &r);
+        const p = std.json.parseFromSliceLeaky(struct { command: Str, timeout: ?Int(u32) = null, background: bool = false, network: bool = false }, a, args, opts) catch return badArgs(out, name, args, &r);
         if (p.background) sum(&r, name, "&{s}", .{p.command.v}) else sum(&r, name, "{s}", .{p.command.v});
-        if (!try gate(name, false, out)) return r;
+        const online = p.network and sandbox.on and !sandbox.net;
+        if (online) {
+            if (p.background) {
+                out.add("not run: a command with network cannot run in the background; run it in the foreground");
+                return r;
+            }
+            if (!try networkApproved(out)) return r;
+        } else {
+            ask_command = p.command.v;
+            defer ask_command = "";
+            if (!try gate(name, false, out)) return r;
+        }
+        if (!sandboxReady(out)) return r;
         const cmd = a.dupeZ(u8, p.command.v) catch return badArgs(out, name, args, &r);
         if (p.background) {
             r.ok = startJob(cmd, out);
             return r;
         }
-        var av: [96:null]?[*:0]const u8 = undefined;
-        var zs = sandbox.ZStrings{};
-        _ = sandbox.argv(cmd, workdir(), &av, &zs);
-        r.ok = try spawn(&av, @as(u64, if (p.timeout) |x| x.v else 120) * 1000, out, .bash);
+        const av = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
+        net_once = online;
+        defer net_once = false;
+        r.ok = try spawn(&av, @as(u64, if (p.timeout) |x| x.v else 120) * 1000, out, .bash, true);
+        if (online) out.add("\n[ran with network, approved by the user for this command only]");
     } else if (eq(u8, name, "grep") and have_rg) {
         const p = std.json.parseFromSliceLeaky(struct { pattern: Str, path: ?Str = null, glob: ?Str = null, context: ?Int(u8) = null, ignore_case: bool = false, limit: ?Int(usize) = null }, a, args, opts) catch return badArgs(out, name, args, &r);
         const pattern = p.pattern.v;
@@ -252,7 +330,8 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         argv[n + 1] = a.dupeZ(u8, pattern) catch return badArgs(out, name, args, &r);
         argv[n + 2] = "--";
         argv[n + 3] = a.dupeZ(u8, path) catch return badArgs(out, name, args, &r);
-        r.ok = try spawn(&argv, 30_000, out, .grep);
+        if (!sandboxReady(out)) return r;
+        r.ok = try spawn(&argv, 30_000, out, .grep, true);
         capLines(out, @min(if (p.limit) |l| l.v else 200, 1000), "lines");
     } else if (eq(u8, name, "find") and have_fd) {
         const q = std.json.parseFromSliceLeaky(struct { pattern: ?Str = null, path: ?Str = null }, a, args, opts) catch return badArgs(out, name, args, &r);
@@ -269,7 +348,8 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         }
         argv[i] = a.dupeZ(u8, pat) catch return badArgs(out, name, args, &r);
         argv[i + 1] = a.dupeZ(u8, p.path orelse ".") catch return badArgs(out, name, args, &r);
-        r.ok = try spawn(&argv, 30_000, out, .find);
+        if (!sandboxReady(out)) return r;
+        r.ok = try spawn(&argv, 30_000, out, .find, true);
         capLines(out, 500, "entries");
     } else {
         out.print("unknown tool: {s}", .{name});
@@ -295,6 +375,77 @@ fn outside(path: []const u8, out: *Buf) bool {
     const abs = sandbox.normalize(path, workdir(), &nb);
     if (sandbox.writable(abs)) return false;
     out.print("not written: {s} is outside the sandbox (writable: the project {s}, /tmp, build caches; the user can add AWL_SANDBOX_WRITE=dir)", .{ abs, sandbox.root });
+    return true;
+}
+
+/// Set while the user is asked about a guarded path or the network: y/n only, never "all".
+pub var asking_once = false;
+
+/// write/edit to the project's .git, AGENTS.md or .agents: the user says yes every time, in
+/// every mode; with nobody to ask, no. true: refused, and `out` says why.
+fn guarded(name: []const u8, path: []const u8, out: *Buf) error{Cancel}!bool {
+    var nb: [4096]u8 = undefined;
+    const abs = sandbox.normalize(path, workdir(), &nb);
+    if (!sandbox.guardedPath(abs)) return false;
+    const f = ask orelse {
+        out.print("not written: {s} is guarded (git config and hooks run outside the sandbox; AGENTS.md and skills instruct later sessions). Only the user can approve this, in a terminal session.", .{abs});
+        return true;
+    };
+    ui.note("{s} changes {s}, which runs outside the sandbox or instructs later sessions", .{ name, abs });
+    ask_reason = "change a guarded file (git config, hooks, AGENTS.md or skills)";
+    asking_once = true;
+    defer asking_once = false;
+    switch (f()) {
+        .yes, .always => return false,
+        .no => {
+            out.print("The user declined this {s} call to {s}.", .{ name, abs });
+            return true;
+        },
+        .cancel => {
+            out.add("[interrupted by user]");
+            return error.Cancel;
+        },
+    }
+}
+
+/// Set for one approved command: it runs in its own sandbox with the host network.
+var net_once = false;
+
+/// A command that wants the network: the user approves this one call, in every mode
+/// (the tool line above shows the exact command). With nobody to ask, no.
+fn networkApproved(out: *Buf) error{Cancel}!bool {
+    const f = ask orelse {
+        out.add("not run: the network is off in the sandbox and only the user can approve a command that needs it, in a terminal session. Do without it, or ask the user to run the command with !");
+        return false;
+    };
+    ui.note("this command wants the network (this call only)", .{});
+    ask_reason = "use the network";
+    asking_once = true;
+    defer asking_once = false;
+    return switch (f()) {
+        .yes, .always => true,
+        .no => blk: {
+            out.add("The user declined network access for this command. Do without it, or ask the user.");
+            break :blk false;
+        },
+        .cancel => blk: {
+            out.add("[interrupted by user]");
+            break :blk error.Cancel;
+        },
+    };
+}
+
+/// The model's commands need the session sandbox (or AWL_SANDBOX=off). false: `out` says why.
+fn sandboxReady(out: *Buf) bool {
+    if (sandbox.missing) {
+        out.add("not run: awl runs the model's commands in a bubblewrap sandbox and /usr/bin/bwrap is missing. Tell the user: install bubblewrap, or restart awl with AWL_SANDBOX=off to run commands unsandboxed.");
+        return false;
+    }
+    if (!sandbox.on) return true;
+    if (sandbox.ready()) |why| {
+        out.print("not run: {s}. Tell the user; AWL_SANDBOX=off runs commands unsandboxed.", .{why});
+        return false;
+    }
     return true;
 }
 
@@ -494,6 +645,11 @@ fn mapFile(path: []const u8) !Map {
 }
 
 fn read(path: []const u8, offset: usize, limit: usize, out: *Buf) bool {
+    var nb: [4096]u8 = undefined;
+    if (sandbox.hidden(sandbox.normalize(path, workdir(), &nb))) {
+        out.print("not read: {s} is hidden from the model (secrets, other processes, the user's sockets)", .{path});
+        return false;
+    }
     const m = mapFile(path) catch |e| return errMsg(out, "read", path, e);
     defer m.deinit();
     const b = m.bytes;
@@ -891,6 +1047,8 @@ fn startJob(cmd: [*:0]const u8, out: *Buf) bool {
     job_seq += 1;
     const path = std.fmt.bufPrint(&slot.log, "/tmp/awl-{d}-job{d}.log", .{ linux.getpid(), job_seq }) catch return false;
     const lfd = sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600) catch |e| return errMsg(out, "background", path, e);
+    var pp: [2]i32 = .{ -1, -1 };
+    if (sandbox.on) _ = linux.pipe2(&pp, .{ .CLOEXEC = true });
     const pid_rc = linux.fork();
     if (linux.errno(pid_rc) != .SUCCESS) {
         sys.close(lfd);
@@ -905,17 +1063,26 @@ fn startJob(cmd: [*:0]const u8, out: *Buf) bool {
         _ = linux.dup2(lfd, 2);
         sys.unblockAll();
         var env: [1024]?[*:0]const u8 = undefined;
-        var av: [96:null]?[*:0]const u8 = undefined;
-        var zs = sandbox.ZStrings{};
-        _ = sandbox.argv(cmd, workdir(), &av, &zs);
-        _ = linux.execve(av[0].?, &av, sys.childEnvp(sys.envp, &env));
+        const av = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
+        const e = sandbox.envp(sys.envp, &env);
+        if (sandbox.on) sandbox.execIn(&av, e, @ptrCast(workdir().ptr), pp[1]);
+        _ = linux.execve(av[0].?, &av, e);
         linux.exit_group(127);
     }
     sys.close(lfd);
+    // Inside the sandbox the job has its own pid; the model needs that one to stop it.
+    var shown: linux.pid_t = pid;
+    if (sandbox.on) {
+        sys.close(pp[1]);
+        var nb: [16]u8 = undefined;
+        const n = sys.read(pp[0], &nb) catch 0;
+        sys.close(pp[0]);
+        shown = std.fmt.parseInt(linux.pid_t, nb[0..n], 10) catch pid;
+    }
     const c = std.mem.span(cmd);
     slot.* = .{ .pid = pid, .id = job_seq, .log = slot.log, .log_n = path.len, .cmd_n = @min(c.len, 60) };
     @memcpy(slot.cmd[0..slot.cmd_n], c[0..slot.cmd_n]);
-    out.print("started background job {d} (pid {d}); output goes to {s}. Read it with read or tail; stop it with: kill -- -{d}", .{ job_seq, pid, path, pid });
+    out.print("started background job {d} (pid {d}); output goes to {s}. Read it with read or tail; stop it with: kill -- -{d}", .{ job_seq, shown, path, shown });
     return true;
 }
 
@@ -966,7 +1133,8 @@ var log_seq: usize = 0;
 /// fork+execve `argv` in its own process group with stdout+stderr on one pipe.
 /// Keeps the first and last 32 KB (bash: 8 KB + 12 KB, with the full output saved to a log
 /// file whose path is reported when anything was cut). Timeout or Ctrl-C kills the whole group.
-fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: Kind) error{Cancel}!bool {
+/// `model`: the model's command (sandboxed, allowlisted environment); else the user's own.
+fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: Kind, model: bool) error{Cancel}!bool {
     var p: [2]i32 = undefined;
     if (linux.errno(linux.pipe2(&p, .{ .CLOEXEC = true })) != .SUCCESS) return errMsg(out, "spawn", "pipe", error.Sys);
     const pid_rc = linux.fork();
@@ -977,17 +1145,21 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
     }
     const pid: linux.pid_t = @intCast(pid_rc);
     if (pid == 0) {
-        _ = linux.setpgid(0, 0);
+        _ = linux.setsid(); // own session and process group: no terminal, one kill stops it all
         const devnull = linux.open("/dev/null", .{}, 0);
         _ = linux.dup2(@intCast(devnull), 0);
         _ = linux.dup2(p[1], 1);
         _ = linux.dup2(p[1], 2);
         sys.unblockAll();
         var env: [1024]?[*:0]const u8 = undefined; // this desktop already has ~220 vars
-        _ = linux.execve(argv[0].?, argv, sys.childEnvp(sys.envp, &env));
+        if (model) {
+            const e = sandbox.envp(sys.envp, &env);
+            if (sandbox.on and net_once) sandbox.execOnline(argv, e, @ptrCast(workdir().ptr));
+            if (sandbox.on) sandbox.execIn(argv, e, @ptrCast(workdir().ptr), -1);
+            _ = linux.execve(argv[0].?, argv, e);
+        } else _ = linux.execve(argv[0].?, argv, sys.childEnvp(sys.envp, &env));
         linux.exit_group(127);
     }
-    _ = linux.setpgid(pid, pid);
     sys.close(p[1]);
     defer sys.close(p[0]);
 
@@ -1480,7 +1652,7 @@ test "spawn returns when the command exits even if a background job holds the pi
     var out = Buf.init(1 << 20);
     const t0 = sys.nowNs();
     const a = [_:null]?[*:0]const u8{ "/bin/bash", "-c", "sleep 5 & echo started" };
-    try t.expect(try spawn(&a, 10_000, &out, .bash));
+    try t.expect(try spawn(&a, 10_000, &out, .bash, false));
     try t.expect(sys.nowNs() - t0 < 2 * std.time.ns_per_s);
     try t.expectEqualStrings("started\n", out.items());
 }
@@ -1488,11 +1660,11 @@ test "spawn returns when the command exits even if a background job holds the pi
 test "spawn: output, exit code, truncation, timeout kills grandchild" {
     var out = Buf.init(1 << 20);
     const a1 = [_:null]?[*:0]const u8{ "/bin/bash", "-c", "echo hi; exit 3" };
-    try t.expect(!try spawn(&a1, 5000, &out, .bash));
+    try t.expect(!try spawn(&a1, 5000, &out, .bash, false));
     try t.expectEqualStrings("hi\n\n[exit 3]", out.items());
     out.reset();
     const a2 = [_:null]?[*:0]const u8{ "/bin/bash", "-c", "head -c 200000 /dev/zero | tr '\\0' x" };
-    try t.expect(try spawn(&a2, 5000, &out, .bash));
+    try t.expect(try spawn(&a2, 5000, &out, .bash, false));
     try t.expect(out.len < 21 * 1024 + 200);
     const omit = std.mem.indexOf(u8, out.items(), "bytes omitted; full output (200000 bytes) in /tmp/awl-") orelse return error.TestUnexpectedResult;
     const pstart = std.mem.indexOfPos(u8, out.items(), omit, "/tmp/awl-").?;
@@ -1503,12 +1675,12 @@ test "spawn: output, exit code, truncation, timeout kills grandchild" {
     _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&zb, out.items()[pstart..pend]), 0);
     out.reset();
     const a_small = [_:null]?[*:0]const u8{ "/bin/bash", "-c", "echo small" };
-    try t.expect(try spawn(&a_small, 5000, &out, .bash));
+    try t.expect(try spawn(&a_small, 5000, &out, .bash, false));
     try t.expectEqualStrings("small\n", out.items()); // short output: no log file mentioned
     out.reset();
     const t0 = sys.nowNs();
     const a3 = [_:null]?[*:0]const u8{ "/bin/bash", "-c", "(sleep 30; echo leaked) & sleep 30" };
-    try t.expect(!try spawn(&a3, 300, &out, .bash));
+    try t.expect(!try spawn(&a3, 300, &out, .bash, false));
     try t.expect(sys.nowNs() - t0 < 2 * std.time.ns_per_s);
     try t.expect(std.mem.indexOf(u8, out.items(), "timed out") != null);
 }

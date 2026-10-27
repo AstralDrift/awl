@@ -43,6 +43,8 @@ class Awl(BaseInstalledAgent):
             "AWL_URL": os.environ["AWL_TB_URL"],
             "AWL_MODEL": os.environ["AWL_TB_MODEL"],
             "AWL_KEY": "local",  # the proxy swaps in the real key
+            # The task container is the sandbox (and has no bwrap; tasks install packages).
+            "AWL_SANDBOX": "off",
             "XDG_STATE_HOME": "/logs/agent/state",  # the session file comes back with the logs
         }
         await self.exec_as_agent(
