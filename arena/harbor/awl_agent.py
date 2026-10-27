@@ -6,6 +6,7 @@ Env (host side, read when the job starts):
   AWL_TB_URL   model endpoint as seen from the container, IPv4 literal
                (awl has no DNS), e.g. http://172.21.0.9:18080/run/awl
   AWL_TB_MODEL model id
+  AWL_*        any other awl setting (e.g. AWL_THINK_MAX=4096) is passed through to the container
 """
 import os
 import shlex
@@ -47,6 +48,9 @@ class Awl(BaseInstalledAgent):
             "AWL_SANDBOX": "off",
             "XDG_STATE_HOME": "/logs/agent/state",  # the session file comes back with the logs
         }
+        # Any other AWL_* setting on the host (AWL_THINK_MAX, AWL_REASONING, ...) goes into the container too.
+        env.update({k: v for k, v in os.environ.items()
+                    if k.startswith("AWL_") and k not in ("AWL_BIN", "AWL_TB_URL", "AWL_TB_MODEL", "AWL_KEY", "AWL_URL", "AWL_MODEL")})
         await self.exec_as_agent(
             environment,
             command=(
