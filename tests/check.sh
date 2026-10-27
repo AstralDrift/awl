@@ -10,7 +10,9 @@ size=$(stat -c %s "$B")
 # 224 KB; dropping std.json's float fallback, see src/jint.zig, brought it back to 199 KB.
 # The QOL round the user asked for (welcome, status line, pickers, full screen) has the
 # AGENTS.md soft goal of 256 KB.)
-[ "$size" -le 262144 ] || fail "size $size > 256 KB"
+# 2026-10-27: 272 KB. Raised for task-success features the local model needs (edit divergence hints,
+# did-you-mean paths, runaway and repeat guards); the user ranks task success above footprint.
+[ "$size" -le 278528 ] || fail "size $size > 272 KB"
 ok "size $size B"
 
 # `return f() == {}` reads as "return after f" but returns true; in tui.command true

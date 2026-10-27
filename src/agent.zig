@@ -368,6 +368,7 @@ pub fn run() Outcome {
                 return .cancelled;
             };
             ui.toolOutput(out.items(), r.ok);
+            repeats.note(c.name.get(), c.args.items(), &out);
             if (turn.overflow and i + 1 == turn.n) out.add(overflow_note);
             pushResult(c, step, i, out.items());
         }
@@ -376,6 +377,43 @@ pub fn run() Outcome {
     ui.err("stopped after {d} steps (AWL_MAX_STEPS)", .{max_steps});
     return .max_steps;
 }
+
+/// Loop detector: the same call (tool + arguments) giving the same output again. A stuck model repeats a
+/// read-only call and gets the identical answer each time; rerunning tests after an edit gives a new output
+/// and is left alone. From the third identical call+output on, the result says so (the call still runs).
+const repeats = struct {
+    const n_slots = 64;
+    var call_h: [n_slots]u64 = .{0} ** n_slots;
+    var out_h: [n_slots]u64 = .{0} ** n_slots;
+    var count: [n_slots]u8 = .{0} ** n_slots;
+    var next: usize = 0;
+
+    fn note(name: []const u8, args: []const u8, o: *Buf) void {
+        var h = std.hash.Wyhash.init(1);
+        h.update(name);
+        h.update(args);
+        const ch = h.final() | 1; // 0 marks an empty slot
+        const oh = std.hash.Wyhash.hash(2, o.items());
+        const i = for (call_h, 0..) |x, j| {
+            if (x == ch) break j;
+        } else blk: {
+            const j = next;
+            next = (next + 1) % n_slots;
+            call_h[j] = ch;
+            out_h[j] = oh;
+            count[j] = 1;
+            break :blk null;
+        };
+        const j = i orelse return;
+        if (out_h[j] != oh) { // new output: a fresh start
+            out_h[j] = oh;
+            count[j] = 1;
+            return;
+        }
+        count[j] +|= 1;
+        if (count[j] >= 3) o.print("\n[awl: you have made this exact call {d} times and got the same result each time. Use the result above, or try a different approach.]", .{count[j]});
+    }
+};
 
 const overflow_note = "\n[awl stopped your reply here: at most 16 tool calls run per reply, so the calls after this one were not run. Make fewer calls, and check each result before repeating a similar command.]";
 

@@ -414,6 +414,26 @@ assert "relsub/r.txt:1:needle_rel" in res[0] and sys.argv[2] not in res[0], res[
 assert "relsub/r.txt" in res[1] and sys.argv[2] not in res[1], res[1]
 EOF2
 stop
+# loop detector: the same call with the same output is flagged from the 3rd time; a changing output never is
+echo "needle_rep" > "$W/rep.txt"
+python3 -c "
+import json
+g={'name':'grep','arguments':{'pattern':'needle_rep','path':'rep.txt'}}
+b={'name':'bash','arguments':{'command':'date +%N'}}
+print(json.dumps([{'tool_calls':[g,b]}]*4+[{'content':'rep ok'}]))" > "$W/rep.json"
+serve "$W/rep.json"
+out=$(cd "$W" && "$AWL" -p go 2>/dev/null)
+python3 - "$LOG" "$out" <<'EOF2' && ok "same call + same result flagged from the 3rd time; changing output never" || bad "repeat detector" "$out"
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "rep ok", sys.argv[2]
+res = [m["content"] for m in r[-1]["messages"] if m["role"] == "tool"]
+greps, dates = res[0::2], res[1::2]
+flag = "exact call"
+assert [flag in x for x in greps] == [False, False, True, True], greps
+assert not any(flag in x for x in dates), dates
+EOF2
+stop
 # a runaway reply (a stuck model once wrote 171 near-identical calls): the stream stops at call 17, 16 run, the model is told
 python3 -c "import json; print(json.dumps([{'tool_calls': [{'name': 'bash', 'arguments': {'command': 'echo run%d >> runaway.txt' % i}} for i in range(20)]}, {'content': 'calmer'}]))" > "$W/runaway.json"
 serve "$W/runaway.json"
