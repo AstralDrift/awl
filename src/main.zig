@@ -34,6 +34,7 @@ const usage =
     \\     AWL_MODELS (Ctrl-P cycles) AWL_STATUS (model,ctx,mode,branch,dir,session or off)
     \\     AWL_SANDBOX (off) AWL_SANDBOX_NET (off: no network for commands) AWL_SANDBOX_WRITE=dir:dir
     \\     AWL_THINK_BUDGET=N (SGLang --enable-strict-thinking: cap reasoning per reply)
+    \\     AWL_THINK_MAX=N (any server: stop a reply that thinks past N tokens, then act)
     \\     AWL_THINKING (off: ask the chat template for no thinking on every request)
     \\     AWL_KEEP_REASONING (0: do not send reasoning back with each turn)
     \\     AWL_THINK_ROWS (reasoning rows shown live, default 6; 0: timer only)
@@ -94,6 +95,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     agent.cfg = .{ .url = http.parseUrl(sys.getenv("AWL_URL") orelse "http://127.0.0.1:12434") catch die("AWL_URL must look like http://127.0.0.1:12434", .{}) };
     var key_b: [512]u8 = undefined;
     agent.cfg.key = sys.getenv("AWL_KEY") orelse gatewayKey(&key_b);
+    if (sys.getenv("AWL_THINK_MAX")) |s| llm.think_max = 4 * (std.fmt.parseInt(usize, s, 10) catch 0);
     if (sys.getenv("AWL_MAX_STEPS")) |s| agent.max_steps = std.fmt.parseInt(usize, s, 10) catch 200;
     if (sys.getenv("AWL_RETRIES")) |s| agent.max_retries = std.fmt.parseInt(u32, s, 10) catch 5;
     tui.keylog_path = sys.getenv("AWL_DEBUG_KEYS");

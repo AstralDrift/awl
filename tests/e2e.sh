@@ -351,6 +351,21 @@ assert r[1].get("chat_template_kwargs") == {"enable_thinking": False} and "chat_
 assert all("reasoning_content" not in m for m in r[1]["messages"] if m["role"] == "assistant"), "cut-off reasoning was sent back"
 EOF2
 stop
+# AWL_THINK_MAX: a reply still thinking past the cap is stopped; its plan goes back, the next request acts without thinking
+python3 -c "import json; print(json.dumps([{'reasoning': 'plan step ' * 40, 'content': 'never shown'}, {'content': 'acted'}]))" > "$W/tmax.json"
+serve "$W/tmax.json"
+out=$(cd "$W" && AWL_THINK_MAX=10 "$AWL" -p go 2>"$W/o")
+python3 - "$LOG" "$out" <<'EOF2' && ok "AWL_THINK_MAX stops long thinking, keeps the plan, next reply without thinking" || bad "think max" "$out $(tail -2 "$W/o")"
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "acted", sys.argv[2]
+assert len(r) == 2, len(r)
+assert "budget" in r[1]["messages"][-1]["content"], r[1]["messages"][-1]
+assert r[1].get("chat_template_kwargs") == {"enable_thinking": False} and "chat_template_kwargs" not in r[0]
+a = [m for m in r[1]["messages"] if m["role"] == "assistant"][-1]
+assert a.get("reasoning_content", "").startswith("plan step") and 40 < len(a["reasoning_content"]) < 100, a
+EOF2
+stop
 # max_tokens fits the window: sized per request, and shrunk to what a server says is left
 echo '[{"content": "fits"}]' > "$W/fit.json"
 serve "$W/fit.json" --ctx 8000

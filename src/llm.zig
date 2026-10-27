@@ -27,6 +27,8 @@ pub const Small = struct {
 };
 
 pub const max_calls = 16;
+/// AWL_THINK_MAX (tokens, kept as bytes at ~4 per token): stop a reply whose thinking runs past this before it acts. 0 = off.
+pub var think_max: usize = 0;
 pub const Call = struct {
     id: Small = .{},
     name: Small = .{},
@@ -45,6 +47,8 @@ pub const Turn = struct {
     // The reply started a call past max_calls: the stream was stopped there (a model stuck repeating near-identical
     // calls once wrote 171 in one reply, 17K tokens), and only the first max_calls run.
     overflow: bool = false,
+    // Reasoning passed think_max before any content or call (AWL_THINK_MAX): the stream was stopped there.
+    think_cut: bool = false,
 
     pub fn reset(self: *Turn) void {
         self.content.reset();
@@ -59,6 +63,7 @@ pub const Turn = struct {
         self.reasoning_bytes = 0;
         self.length_cut = false;
         self.overflow = false;
+        self.think_cut = false;
     }
 };
 
@@ -124,7 +129,7 @@ pub fn stream(cfg: Cfg, body: []const []const u8, t: *Turn) Error!void {
         const data = std.mem.trim(u8, line[5..], " ");
         if (std.mem.eql(u8, data, "[DONE]")) break;
         try event(data, t);
-        if (t.overflow) break; // closing the connection makes the server stop generating
+        if (t.overflow or t.think_cut) break; // closing the connection makes the server stop generating
     }
 }
 
@@ -149,6 +154,10 @@ fn event(data: []const u8, t: *Turn) Error!void {
             t.reasoning_bytes += s.len;
             t.reasoning.add(s);
             ui.reasoning(s);
+            if (think_max > 0 and t.reasoning_bytes > think_max and t.n == 0 and t.content.len == 0) {
+                t.think_cut = true;
+                return;
+            }
         }
         if (d.content) |cs| if (cs.v.len > 0) {
             const s = cs.v;

@@ -345,6 +345,12 @@ pub fn run() Outcome {
             no_think = true;
             continue;
         }
+        if (turn.think_cut) { // thought past AWL_THINK_MAX: the plan so far stays in history, the next reply acts on it
+            ui.note("thinking passed {d}K tokens (AWL_THINK_MAX); asking for the next step without thinking", .{llm.think_max / 4096});
+            addUser(think_note);
+            no_think = true;
+            continue;
+        }
         if (turn.n > 0 and turn.length_cut) { // cut off inside a tool call: its arguments are incomplete, run nothing
             ui.note("reply cut off inside a tool call (AWL_MAX_TOKENS); asking the model to redo it", .{});
             for (turn.calls[0..turn.n], 0..) |*c, i| pushResult(c, step, i, cut_call_note);
@@ -450,6 +456,7 @@ const overflow_note = "\n[awl stopped your reply here: at most 16 tool calls run
 const wrap_note = "\n[awl: {d} steps are left in this run. Stop checking and polishing: finish the essential work, then end with your final report.]";
 const final_note = "[awl: the step limit is reached and no more tools will run. Files changed with write/edit in this session:\n";
 const final_note_end = "Write a short final report based only on the tool results above: what is done, what was verified and how, what is unfinished. Do not write code or file contents: nothing you write now is applied.]";
+const think_note = "[awl: your thinking ran past its budget and was stopped there. Your reasoning so far is above: act on it now with the next tool call. Plan the rest as you go, in small steps.]";
 const cut_note = "[Your last reply hit the output token limit before it finished. Think more briefly: make the next tool call now, or give your answer.]";
 
 const cut_call_note = "[not run: your reply hit the output token limit while writing this tool call, so its arguments were incomplete. Make the call again with less text in one call (write a long file in several smaller steps).]";
