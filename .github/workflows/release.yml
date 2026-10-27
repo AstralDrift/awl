@@ -1,0 +1,29 @@
+name: Release
+
+# Push a tag like v0.2.0 to publish the static binary as a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - name: Build and unit test
+        run: |
+          zig build -Doptimize=ReleaseSmall
+          zig build test
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp zig-out/bin/awl awl-x86_64-linux
+          sha256sum awl-x86_64-linux > awl-x86_64-linux.sha256
+          gh release create "$GITHUB_REF_NAME" awl-x86_64-linux awl-x86_64-linux.sha256 \
+            --title "$GITHUB_REF_NAME" --generate-notes

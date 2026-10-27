@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2 # Zig, pinned in mise.toml
+      - name: Tools the tests use
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq bubblewrap ripgrep fd-find hyperfine
+          sudo ln -sf "$(command -v fdfind)" /usr/bin/fd
+          # Ubuntu 24.04 blocks unprivileged user namespaces; awl's sandbox (bubblewrap) needs them
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Build
+        run: zig build -Doptimize=ReleaseSmall
+      - name: Unit tests
+        run: zig build test
+      - name: Budgets (peak RSS, startup; size and idle RSS reported)
+        run: zig build check
+      - name: End-to-end and TUI tests
+        run: zig build e2e
+      - name: Sandbox escape tests
+        run: zig build sandbox
