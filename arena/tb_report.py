@@ -3,7 +3,8 @@
 
   arena/tb_report.py [JOB ...]   default: every job under results/tb/jobs with >= 10 trials
 
-Pass/fail per task (T = agent timeout, E = other error), the score, wall time, and
+Pass/fail per task (T = agent timeout, E = other error) with agent seconds and completion
+tokens (exact when trials ran one at a time, as --dev does), the score, wall time, and
 model requests/tokens from the proxy log (records inside the job's time window;
 agents run one at a time, so windows do not overlap).
 """
@@ -20,7 +21,7 @@ def ts(s):
 
 def load(job):
     d = os.path.join(JOBS, job)
-    trials = {}
+    trials, wins = {}, {}
     t0, t1 = 1e20, 0
     hin = hout = 0  # Harbor's own token counts (agents that report them)
     for t in os.listdir(d):
@@ -32,7 +33,10 @@ def load(job):
         rew = ((r.get("verifier_result") or {}).get("rewards") or {}).get("reward") or 0
         exc = (r.get("exception_info") or {}).get("exception_type", "")
         mark = "pass" if rew >= 1 else ("T" if "Timeout" in exc else "E" if exc else "-")
+        ae = r.get("agent_execution") or {}
+        win = (ts(ae["started_at"]), ts(ae["finished_at"])) if ae.get("finished_at") else None
         trials[task] = mark
+        wins[task] = win
         ar = r.get("agent_result") or {}
         hin += ar.get("n_input_tokens") or 0
         hout += ar.get("n_output_tokens") or 0
@@ -46,7 +50,14 @@ def load(job):
     pout = sum(x["completion_tokens"] for x in reqs)
     if not pin:  # proxy before 2026-10-23 lost usage of non-streamed replies
         pin, pout = hin, hout
-    return dict(job=job, agent=agent, trials=trials, secs=t1 - t0, reqs=reqs, pin=pin, pout=pout)
+    cells = {}  # per task: mark, agent seconds, completion tokens (trials one at a time: windows are exact)
+    for task, win in wins.items():
+        if not win:
+            cells[task] = trials[task]
+            continue
+        out = sum(x["completion_tokens"] for x in reqs if win[0] <= x["t0"] <= win[1])
+        cells[task] = f"{trials[task]} {win[1] - win[0]:.0f}s {out / 1e3:.1f}K"
+    return dict(job=job, agent=agent, trials=trials, cells=cells, secs=t1 - t0, reqs=reqs, pin=pin, pout=pout)
 
 
 jobs = sys.argv[1:] or sorted(j for j in os.listdir(JOBS)
@@ -54,9 +65,9 @@ jobs = sys.argv[1:] or sorted(j for j in os.listdir(JOBS)
 rs = [load(j) for j in jobs]
 tasks = sorted({t for r in rs for t in r["trials"]})
 w = max(map(len, tasks))
-print(" " * w + "".join(f" {r['agent'][:12]:>12}" for r in rs))
+print(" " * w + "".join(f" {r['agent'][:16]:>16}" for r in rs))
 for t in tasks:
-    print(t.ljust(w) + "".join(f" {r['trials'].get(t, ''):>12}" for r in rs))
+    print(t.ljust(w) + "".join(f" {r['cells'].get(t, ''):>16}" for r in rs))
 print()
 for r in rs:
     n, ok = len(r["trials"]), sum(v == "pass" for v in r["trials"].values())

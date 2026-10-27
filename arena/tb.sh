@@ -4,7 +4,7 @@
 #   arena/tb.sh AGENT [harbor run args...]    AGENT: awl | terminus-2 | mini-swe-agent | pi | opencode | hermes
 #   e.g. arena/tb.sh awl -i fix-git           one task
 #        arena/tb.sh awl $(arena/tb.sh --subset)
-#        arena/tb.sh awl $(arena/tb.sh --dev)       daytime 4-task dev set, <= 10 min
+#        arena/tb.sh awl $(arena/tb.sh --dev)       daytime set, <= ~10 min (also --smoke)
 #
 # - Tasks: arena/results/tb/tb2/terminal-bench (harbor dataset download terminal-bench@2.0).
 # - Every agent talks to the model through one proxy container (awl-tbproxy) on the
@@ -28,12 +28,17 @@ SUBSET="overfull-hbox cobol-modernization fix-git prove-plus-comm log-summary-da
 multi-source-data-merger regex-log query-optimize build-cython-ext sqlite-db-truncate db-wal-recovery
 extract-elf gcode-to-text largest-eigenval crack-7z-hash openssl-selfsigned-cert sanitize-git-repo
 git-multibranch nginx-request-logging polyglot-c-py"
-# Daytime dev set (2026-10-27): the 4 tasks awl solved fastest on 10-23. One at a time, 210 s agent cap,
-# so <= 10 min per harness. The server runs one request at a time (~45 agent turns in 10 min), so
-# running trials in parallel only splits that budget (a 7-task, 3-at-once try: 6 of 7 hit the cap).
-#   arena/tb.sh AGENT $(arena/tb.sh --dev)
-DEV="fix-git prove-plus-comm extract-elf db-wal-recovery"
-if [ "${1:-}" = --dev ]; then for t in $DEV; do printf -- '-i %s ' "$t"; done; echo '--agent-timeout-multiplier 0.2333 -n 1'; exit 0; fi
+# Daytime sets (2026-10-27), one trial at a time, 210 s agent cap, <= ~10 min per harness. The server runs one
+# request at a time (~45 agent turns in 10 min), so parallel trials only split that budget.
+#   --dev   tasks awl lost to pi on 10-23 (pi passed or was 3-4x faster): what to improve
+#   --smoke tasks awl solved fastest on 10-23: catches breakage
+#   arena/tb.sh AGENT $(arena/tb.sh --dev)   then arena/tb_report.py JOB...
+DEV="sqlite-db-truncate regex-log log-summary-date-ranges"
+SMOKE="fix-git prove-plus-comm extract-elf db-wal-recovery"
+case "${1:-}" in --dev | --smoke)
+  [ "$1" = --dev ] && L=$DEV || L=$SMOKE
+  for t in $L; do printf -- '-i %s ' "$t"; done; echo '--agent-timeout-multiplier 0.2333 -n 1'; exit 0 ;;
+esac
 if [ "${1:-}" = --subset ]; then for t in $SUBSET; do printf -- '-i %s ' "$t"; done; echo; exit 0; fi
 AGENT=$1
 shift
