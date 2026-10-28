@@ -17,6 +17,7 @@
 #   under ~25: each trial gets its own Docker network and the default address pools run out
 #   ("all predefined address pools have been fully subnetted"). TB_TASKS: task directory (default 2.0;
 #   2.1 is results/tb/tb21/terminal-bench-2-1 via harbor dataset download terminal-bench/terminal-bench-2-1).
+# - TB_UPSTREAM=test: the kernel repo's test engine instead of the live server (see the branch below).
 # - TB_UPSTREAM=openrouter: same, on OpenRouter instead of the local GPU (key in
 #   ~/.local/state/awl-arena/openrouter.key). TB_MODEL (default deepseek/deepseek-v4.1-flash-1017),
 #   TB_PROVIDER (pin one provider), TB_BUDGET (USD, default 2: the proxy refuses requests past it).
@@ -44,7 +45,16 @@ AGENT=$1
 shift
 TB=$HERE/results/tb
 mkdir -p "$TB/proxy" "$TB/jobs"
-if [ "${TB_UPSTREAM:-local}" = openrouter ]; then
+if [ "${TB_UPSTREAM:-local}" = test ]; then
+  # The kernel repo's test engine (kl-test-engine, 127.0.0.1:30011) on its own Docker network, never the gateway's.
+  # Start it with TE_NETWORK=awl-tb-test. TB_TAG names the engine variant in job/proxy names (default: test).
+  PORT=18082 PROXY=awl-tbproxy-test RUN=$AGENT-${TB_TAG:-test} NET=awl-tb-test KEYF=/dev/null
+  docker network inspect $NET >/dev/null 2>&1 || docker network create $NET >/dev/null
+  read -r MODEL CTX < <(curl -s -m5 http://127.0.0.1:30011/v1/models |
+    python3 -c 'import sys,json; m=json.load(sys.stdin)["data"][0]; print(m["id"], m.get("max_model_len", 0))')
+  [ -n "$MODEL" ] || { echo "tb: no test engine on 127.0.0.1:30011"; exit 2; }
+  UPARGS=(--upstream http://kl-test-engine:30000)
+elif [ "${TB_UPSTREAM:-local}" = openrouter ]; then
   PORT=18081 PROXY=awl-tbproxy-or RUN=$AGENT-or NET=awl-tb # own network: no local model needed
   docker network inspect $NET >/dev/null 2>&1 || docker network create $NET >/dev/null
   KEYF=$HOME/.local/state/awl-arena/openrouter.key
