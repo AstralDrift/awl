@@ -101,4 +101,9 @@ hermes)
   ARGS+=(-a arena.harbor.awl_agent:HermesFixed -m "openai/$MODEL") ;;
 *) echo "tb: unknown agent $AGENT"; exit 2 ;;
 esac
-exec harbor run "${ARGS[@]}" "$@" </dev/null
+rc=0
+harbor run "${ARGS[@]}" "$@" </dev/null || rc=$?
+# The proxy sits on the Local AI gateway's Docker network; left running, it blocks the app from removing that network,
+# so the model cannot be restarted ("network ... already exists", 2026-10-27). Stop it when no other job still uses it.
+pgrep -f "harbor run" >/dev/null || docker stop "$PROXY" >/dev/null 2>&1 || true
+exit $rc
