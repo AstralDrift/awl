@@ -744,19 +744,92 @@ fn showDiff() void {
     const text = std.mem.trimEnd(u8, d.items(), "\n");
     if (text.len == 0) return ui.note("no changes", .{});
     if (std.mem.startsWith(u8, text, "fatal:")) return ui.note("{s}", .{text[0..@min(text.len, 200)]});
-    var b = Buf.init(d.len * 2 + 4096);
+    // Reserved, not resident: short colored lines can grow many times over.
+    var b = Buf.init(d.len * 16 + 4096);
     defer b.free();
     var it = std.mem.splitScalar(u8, text, '\n');
     var files: usize = 0;
+    var added: usize = 0;
+    var removed: usize = 0;
+    var in_hunk = false;
     while (it.next()) |l| {
-        const st = std.mem.startsWith;
-        if (st(u8, l, "diff --git")) files += 1;
-        const color = if (st(u8, l, "diff --git")) "\x1b[1m" else if (st(u8, l, "+++") or st(u8, l, "---") or st(u8, l, "index ") or st(u8, l, "new file") or st(u8, l, "deleted file")) ui.muted() else if (st(u8, l, "@@")) ui.accent() else if (st(u8, l, "+")) ui.green() else if (st(u8, l, "-")) ui.red() else "";
-        b.print("{s}{s}{s}\n", .{ color, l, ui.plain() });
+        const kind = diffKind(&in_hunk, l);
+        switch (kind) {
+            .file => files += 1,
+            .add => added += 1,
+            .del => removed += 1,
+            else => {},
+        }
+        if (kind == .hunk) { // the @@ range in the accent, the enclosing function after it muted
+            const end = if (std.mem.indexOfPos(u8, l, 2, "@@")) |i| i + 2 else l.len;
+            b.add(ui.accent());
+            shownLine(&b, l[0..end]);
+            b.add(ui.muted());
+            shownLine(&b, l[end..]);
+        } else {
+            b.add(switch (kind) {
+                .file => if (ui.color) "\x1b[1m" else "",
+                .meta => ui.muted(),
+                .add => ui.green(),
+                .del => ui.red(),
+                .hunk, .context => "",
+            });
+            shownLine(&b, l);
+        }
+        b.add(ui.plain());
+        b.byte('\n');
     }
     b.truncate(b.len - 1);
     ui.raw(b.items());
-    ui.note("{d} file{s} changed", .{ files, if (files == 1) "" else "s" });
+    ui.note("{d} file{s} changed · {s}+{d}{s} {s}-{d}{s}", .{ files, if (files == 1) "" else "s", ui.green(), added, ui.muted(), ui.red(), removed, ui.muted() });
+}
+
+const DiffKind = enum { file, meta, hunk, add, del, context };
+
+/// One line of git diff output. Inside a hunk `--- x` is a removed line and
+/// `+++ x` an added one, not file headers.
+fn diffKind(in_hunk: *bool, l: []const u8) DiffKind {
+    const st = std.mem.startsWith;
+    if (st(u8, l, "diff --git")) {
+        in_hunk.* = false;
+        return .file;
+    }
+    if (st(u8, l, "@@")) {
+        in_hunk.* = true;
+        return .hunk;
+    }
+    if (!in_hunk.*) return .meta;
+    return switch (if (l.len > 0) l[0] else ' ') {
+        '+' => .add,
+        '-' => .del,
+        '\\' => .meta,
+        else => .context,
+    };
+}
+
+/// A diff line as text: control bytes from file contents (an escape sequence
+/// in a changed file, say) show as ^X instead of reaching the terminal.
+fn shownLine(b: *Buf, l: []const u8) void {
+    for (l) |c| {
+        if ((c < 0x20 and c != '\t') or c == 0x7f) {
+            b.byte('^');
+            b.byte(c ^ 0x40);
+        } else b.byte(c);
+    }
+}
+
+test "diffKind tells headers from changed lines that look like them" {
+    var h = false;
+    const lines = [_][]const u8{ "diff --git a/x b/x", "index 1..2 100644", "--- a/x", "+++ b/x", "@@ -1,3 +1,3 @@ fn f", " keep", "--- removed dashes", "+++ added pluses", "\\ No newline at end of file", "diff --git a/y b/y", "--- a/y" };
+    const want = [_]DiffKind{ .file, .meta, .meta, .meta, .hunk, .context, .del, .add, .meta, .file, .meta };
+    for (lines, want) |l, w| try std.testing.expectEqual(w, diffKind(&h, l));
+}
+
+test "shownLine makes control bytes visible" {
+    var b = Buf.init(64);
+    defer b.free();
+    shownLine(&b, "a\x1b[2Jb\tc\x7f");
+    try std.testing.expectEqualStrings("a^[[2Jb\tc^?", b.items());
 }
 
 /// `/name args` for a prompt command (prompts.zig): its text, filled in, in `out`.

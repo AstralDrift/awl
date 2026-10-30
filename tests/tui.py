@@ -50,7 +50,9 @@ subprocess.run(["pkill", "-x", "-f", "sleep 100"])
 srv = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp, "--log", log], stdout=subprocess.PIPE)
 port = srv.stdout.readline().decode().strip()
 
-env = dict(os.environ, AWL_URL=f"http://127.0.0.1:{port}", XDG_STATE_HOME=os.path.join(W, "state"), TERM="xterm-256color")
+# These checks read colors. `zig build` sets NO_COLOR when its own output is not a terminal.
+env = {k: v for k, v in os.environ.items() if k != "NO_COLOR"}
+env.update(AWL_URL=f"http://127.0.0.1:{port}", XDG_STATE_HOME=os.path.join(W, "state"), TERM="xterm-256color")
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(W)
