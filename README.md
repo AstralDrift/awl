@@ -44,7 +44,7 @@ noise. Method, per-task tables and every run are in [arena/LOG.md](arena/LOG.md)
 
 | | awl | pi |
 |---|---|---|
-| Install | **234 KB**, one static file | 107 MB binary |
+| Install | **346 KB**, one static file | 107 MB binary |
 | Startup (`--version`) | **0.2 ms** | 205 ms |
 | Memory of the harness process | **~0.3 MB** idle, < 1 MB peak over 50 turns | ~135-155 MB |
 | Prompt per request (Terminal-Bench, local Qwen) | **8.9K tokens** | 17.5K tokens |
