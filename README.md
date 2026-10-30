@@ -110,7 +110,8 @@ ghostty, alacritty, and over ssh).
   `/NAME args` (`$ARGUMENTS`, `$1`..`$9`; an optional `description:` front matter shows in the
   picker and `/help`). `/review` (the uncommitted changes, read only) and `/init` (an AGENTS.md)
   are built in; a file with the same name replaces them.
-- `/diff` shows every uncommitted change, new files included, colored.
+- `/diff` shows every uncommitted change, new files included, colored, then the files changed and
+  lines added and removed. Control bytes in changed files show as `^X`.
 - The terminal title shows the folder, with `⋯` while awl works and `?` while it waits for you;
   the old title comes back on exit (`AWL_TITLE=off` leaves it alone).
 - `/model NAME` switches model, `/compact` summarizes the conversation now, `/context` shows the
@@ -211,6 +212,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_DEBUG_KEYS` | unset | file to append every raw input chunk to, escaped (`\e` = Esc): shows exactly what the terminal sends on a keypress or paste |
 | `AWL_TITLE` | on | `off`: leave the terminal's title alone |
 | `AWL_FULL` | unset | `1` starts in full-screen mode (same as `--full`) |
+| `NO_COLOR` | unset | any value drops colors ([no-color.org](https://no-color.org)); bold and layout stay |
 
 ## Benchmarks
 

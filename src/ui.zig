@@ -5,6 +5,7 @@ const sys = @import("sys.zig");
 
 pub var quiet = false; // tests
 pub var color = false; // stdout is a terminal
+pub var no_color = false; // NO_COLOR is set: bold and dim stay, hues go
 pub var oneshot = false;
 
 // Theme: SGR sequences built from Omarchy's colors.toml.
@@ -12,7 +13,7 @@ const Sgr = struct { b: [24]u8 = undefined, n: usize = 0 };
 var th = struct { accent: Sgr = .{}, fg: Sgr = .{}, muted: Sgr = .{}, red: Sgr = .{}, green: Sgr = .{}, yellow: Sgr = .{} }{};
 
 fn sgr(s: *const Sgr) []const u8 {
-    if (!color) return "";
+    if (!color or no_color) return "";
     return s.b[0..s.n];
 }
 fn reset() []const u8 {
@@ -1184,6 +1185,18 @@ pub fn status(model: []const u8, secs: f64, steps: usize, changed: usize, ctx: u
     var b: [512]u8 = undefined;
     print("{s}{s}{s}\n", .{ muted(), statusLine(&b, model, secs, steps, changed, ctx, limit, sys.rssKb(), @as(usize, sys.termCols()) -| 1), reset() });
     flush();
+}
+
+test "NO_COLOR drops hues but keeps resets" {
+    color = true;
+    no_color = true;
+    defer {
+        color = false;
+        no_color = false;
+    }
+    try tt.expectEqualStrings("", accent());
+    try tt.expectEqualStrings("", red());
+    try tt.expectEqualStrings("\x1b[0m", plain());
 }
 
 test "end-of-turn line: items drop from the end to fit" {

@@ -97,6 +97,8 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     agents.enabled = prompt == null or bg; // plain -p (scripts, benchmarks) leaves no status file
     agents.kind = if (bg) .bg else .tui;
     ui.color = !ui.oneshot and sys.isatty(sys.stdout);
+    // no-color.org: any non-empty NO_COLOR turns hues off.
+    ui.no_color = if (sys.getenv("NO_COLOR")) |v| v.len > 0 else false;
     ui.loadTheme();
 
     var cwd_b: [4096]u8 = undefined;
