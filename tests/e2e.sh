@@ -74,6 +74,32 @@ assert names[:4] == ["read", "write", "edit", "bash"], names
 EOF
 stop
 
+# 2a. a model command still running at its timeout is not killed: it goes on as a background job
+mkdir -p "$W/slowp"
+cat >"$W/slow.json" <<'EOF2'
+[{"tool_calls":[{"name":"bash","arguments":{"command":"echo begun; sleep 2; echo late > marker.txt; echo finished","timeout":1}}]},
+ {"tool_calls":[{"name":"bash","arguments":{"command":"sleep 3; cat marker.txt"}}]},
+ {"tool_calls":[{"name":"bash","arguments":{"command":"true"}}]},
+ {"content":"bg done"}]
+EOF2
+serve "$W/slow.json"
+t0=$(date +%s)
+out=$(cd "$W/slowp" && "$AWL" -p go 2>/dev/null)
+python3 - "$LOG" "$out" "$W/slowp" <<'EOF2' && ok "a command past its timeout continues as a background job" || bad "timeout to background" "$out"
+import json, re, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "bg done", sys.argv[2]
+t = [x["content"] for x in r[3]["messages"] if x["role"] == "tool"]
+assert t[0].startswith("begun\n") and "still running after 1 s" in t[0] and "background job 1" in t[0] and "killed" not in t[0], t[0]
+assert "finished" not in t[0], t[0]
+log = re.search(r"(/tmp/awl-\d+-\d+\.log)", t[0]).group(1)
+assert t[1].strip() == "late", t[1]  # the command finished on its own after the timeout
+assert t[2].startswith("[background job 1 (echo begun; sleep 2;") and "exited with code 0" in t[2] and log in t[2], t[2]
+assert open(log).read() == "begun\nfinished\n", open(log).read()
+EOF2
+[ $(( $(date +%s) - t0 )) -le 6 ] && ok "the timed-out call returned at its timeout" || bad "timeout to background: slow" "$(( $(date +%s) - t0 )) s"
+stop
+
 # 2b. child processes get awl's env minus AWL_*: a bash `env` must not leak the key
 cat >"$W/env.json" <<'EOF'
 [{"tool_calls":[{"name":"bash","arguments":{"command":"env"}}]},
