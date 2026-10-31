@@ -32,6 +32,10 @@ ln -s .git/config linkcfg
 ln -s "$HOME/.bashrc_probe" linkrc
 ln -s "$HOME/.ssh/id_probe" linkssh
 cp .git/config "$W/config.before"
+# Another session (another project's, say) and another awl's session view: the model must see neither.
+mkdir -p "$XDG_STATE_HOME/awl/sessions"
+echo '{"role":"tool","tool_call_id":"c","content":"OTHERSESSION-hunter3"}' >"$XDG_STATE_HOME/awl/sessions/20200101-000000-1.jsonl"
+echo 'OTHERVIEW-hunter4' >"$XDG_STATE_HOME/awl/sessions/view-1.txt"
 
 bash_call() { python3 -c 'import json,sys; print(json.dumps({"name":"bash","arguments":{"command":sys.argv[1]}}))' "$1"; }
 {
@@ -52,6 +56,10 @@ bash_call() { python3 -c 'import json,sys; print(json.dumps({"name":"bash","argu
     'env | grep -q PROBE_SECRET_TOKEN && echo ESCAPED-env' \
     'grep -q SECRETKEY ~/.ssh/id_probe 2>/dev/null && echo ESCAPED-sshbash' \
     'grep -a -l hunter2 /proc/*/environ 2>/dev/null | grep -q . && echo ESCAPED-procenv' \
+    'cat "$XDG_STATE_HOME"/awl/sessions/*.jsonl 2>/dev/null | grep -q hunter3 && echo ESCAPED-sessions' \
+    'cat "$XDG_STATE_HOME"/awl/sessions/view-1.txt 2>/dev/null | grep -q hunter4 && echo ESCAPED-otherview' \
+    'for f in "$XDG_STATE_HOME"/awl/sessions/view-*.txt; do echo x 2>/dev/null >>"$f" && echo ESCAPED-viewwrite; done; true' \
+    'grep -q "^{\"n\":2,\"role\":\"user\"}" "$XDG_STATE_HOME"/awl/sessions/view-*.txt && echo INSIDE-view; echo VIEWPATH "$XDG_STATE_HOME"/awl/sessions/view-*.txt' \
     'for c in curl ip unshare busctl git find; do command -v $c >/dev/null || echo MISSING-$c; done; echo INSIDE-tools' \
     'echo made >made.txt && echo INSIDE-$(cat made.txt)' \
     'f=/tmp/awl-sbx-$$; echo t >$f && rm $f && echo INSIDE-tmp' \
@@ -68,6 +76,10 @@ bash_call() { python3 -c 'import json,sys; print(json.dumps({"name":"bash","argu
 {"name":"read","arguments":{"path":"$HOME/.ssh/id_probe"}},
 {"name":"read","arguments":{"path":"linkssh"}},
 {"name":"grep","arguments":{"pattern":"SECRETKEY","path":"$HOME/.ssh"}},
+{"name":"read","arguments":{"path":"$XDG_STATE_HOME/awl/sessions/20200101-000000-1.jsonl"}},
+{"name":"read","arguments":{"path":"$XDG_STATE_HOME/awl/sessions/view-1.txt"}},
+{"name":"grep","arguments":{"pattern":"OTHERSESSION-hunter[3]|OTHERVIEW-hunter[4]","path":"$XDG_STATE_HOME/awl/sessions"}},
+{"name":"read","arguments":{"path":"\$VIEW","limit":2}},
 {"name":"write","arguments":{"path":".git/config","content":"[core]\\n\\tfsmonitor = echo pwned\\n"}},
 {"name":"write","arguments":{"path":"AGENTS.md","content":"planted"}},
 {"name":"write","arguments":{"path":"linkcfg","content":"planted"}},
@@ -85,22 +97,25 @@ LOG=$W/req.jsonl
 python3 "$HERE/fake_sse.py" "$W/script.json" --log "$LOG" >"$W/port" &
 for _ in $(seq 50); do [ -s "$W/port" ] && break; sleep 0.02; done
 export AWL_URL=http://127.0.0.1:$(cat "$W/port")
+export AWL_CTX_MODE=fresh # the session view exists only in fresh/async; other sessions are hidden in every mode
 "$AWL" -p "probe" >"$W/out" 2>&1 || bad "awl exit" "$(tail -5 "$W/out")"
 
 results=$(python3 -c '
 import json, sys
 m = [json.loads(l) for l in open(sys.argv[1])][-1]["messages"]
 print("\n".join("[%s] %s" % (i, x["content"]) for i, x in enumerate(m) if x["role"] == "tool"))' "$LOG")
-for p in net hostlocal netflag metadata userns dbus runuser tmpsock gitconfig githooks agentsmd skills env sshbash procenv; do
+for p in net hostlocal netflag metadata userns dbus runuser tmpsock gitconfig githooks agentsmd skills env sshbash procenv sessions otherview viewwrite; do
   grep -q "ESCAPED-$p" <<<"$results" && bad "blocks $p" "got through" || ok "blocks $p"
 done
-for p in tools made tmp git shared; do
+for p in tools made tmp git shared view; do
   grep -q "INSIDE-$p" <<<"$results" && ok "still works: $p" || bad "still works: $p" "missing"
 done
 grep -q "only the user can approve a command that needs it" <<<"$results" && ok "network: true refused without a terminal" || bad "network: true refused without a terminal" "no refusal"
 job_pid=$(grep -o 'started background job 1 (pid [0-9]*' <<<"$results" | grep -o '[0-9]*$')
 grep -q "PGIDS.*\b$job_pid\b" <<<"$results" && ok "job pid is the group the model can kill" || bad "job pid is the group the model can kill" "pid $job_pid; $(grep PGIDS <<<"$results")"
 grep MISSING- <<<"$results" && bad "probe tools present" "install them" || ok "probe tools present"
+grep -q 'OTHERSESSION-hunter3\|OTHERVIEW-hunter4' <<<"$results" && bad "read/grep hide other sessions" "$(grep 'hunter[34]' <<<"$results" | head -3)" || ok "read/grep hide other sessions"
+grep -q '1→{"n":2,"role":"user"}$' <<<"$results" && ok "read shows this session's view" || bad "read shows this session's view" "$(grep -A2 'view-' <<<"$results" | head -5)"
 grep -q SECRETKEY <<<"$results" && bad "read/grep hide ~/.ssh" "$(grep SECRETKEY <<<"$results" | head -3)" || ok "read/grep hide ~/.ssh"
 cmp -s .git/config "$W/config.before" && ok ".git/config unchanged" || bad ".git/config unchanged" "$(cat .git/config)"
 [ "$(cat AGENTS.md)" = "# rules" ] && ok "AGENTS.md unchanged" || bad "AGENTS.md unchanged" "$(cat AGENTS.md)"

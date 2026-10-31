@@ -11,6 +11,7 @@ Each request body is appended to --log as one JSON line, plus "_path" and "_auth
 Authorization header). --comments 1 interleaves OpenRouter-style ": OPENROUTER PROCESSING" lines.
 """
 import json
+import re
 import socket
 import sys
 import threading
@@ -53,6 +54,20 @@ def events(turn, model, parts=False):
     return body + b"data: [DONE]\n\n"
 
 
+def fill(turn, body):
+    """Placeholders in a turn, taken from the request's tool results and user messages: "$VIEW" (the
+    session view's path, the newest mention) and "$ELIDED_OFFSET" / "$ELIDED_LIMIT" (from the first elided tool output)."""
+    t = json.dumps(turn)
+    outs = "\n".join(x.get("content") or "" for x in json.loads(body).get("messages", []) if x.get("role") in ("tool", "user"))
+    if "$VIEW" in t:
+        m = re.findall(r'(/[^\s"\\]*/view-\d+\.txt)', outs)
+        t = t.replace("$VIEW", m[-1] if m else "/no-view-in-request")
+    if "$ELIDED_" in t:
+        m = re.search(r"\(offset=(\d+), limit=(\d+)\)", outs)
+        t = t.replace('"$ELIDED_OFFSET"', m.group(1) if m else "0").replace('"$ELIDED_LIMIT"', m.group(2) if m else "0")
+    return json.loads(t)
+
+
 def send(conn, data):
     if split <= 0:
         conn.sendall(data)
@@ -88,7 +103,7 @@ def handle(conn):
             return
         req = json.loads(rest)
         with lock:
-            turn = script[min(served, len(script) - 1)]
+            turn = fill(script[min(served, len(script) - 1)], rest.decode("utf-8", "replace"))
             served += 1
             if opt["--log"]:
                 with open(opt["--log"], "a") as f:

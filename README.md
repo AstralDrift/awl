@@ -114,7 +114,7 @@ ghostty, alacritty, and over ssh).
   lines added and removed. Control bytes in changed files show as `^X`.
 - The terminal title shows the folder, with `⋯` while awl works and `?` while it waits for you;
   the old title comes back on exit (`AWL_TITLE=off` leaves it alone).
-- `/model NAME` switches model, `/compact` summarizes the conversation now, `/context` shows the
+- `/model NAME` switches model, `/compact` summarizes the conversation now (a fresh context with `AWL_CTX_MODE=fresh`), `/context` shows the
   window use and the files read and changed. A `/command` typed while the model works runs when
   the turn ends.
 
@@ -148,7 +148,8 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 - **Sandbox** (bubblewrap, required by default): the model's commands (bash, background jobs, grep, find)
   run in one sandbox per session. They see the filesystem read-only and can write only to the project
   (git root or cwd), `/tmp`, build caches and `AWL_SANDBOX_WRITE` dirs. Hidden from them: `~/.ssh`,
-  `~/.gnupg`, cloud/gh credentials, keyrings, the Local AI key, `/run/user` (D-Bus, Hyprland, keyring
+  `~/.gnupg`, cloud/gh credentials, keyrings, the Local AI key, awl's session files (all but this run's
+  view, read-only), `/run/user` (D-Bus, Hyprland, keyring
   sockets), sockets under `/tmp`, the docker socket, other processes, and any environment variable not on
   a short allowlist (names with TOKEN, KEY, SECRET, PASS, AUTH, ... never pass). They cannot create user
   namespaces. The project's `.git/config`, `.git/hooks`, `AGENTS.md` and `.agents/` are read-only to them,
@@ -185,6 +186,14 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 - Old tool outputs are trimmed when the prompt passes 60% of the window; the checklist is never trimmed.
 - If that is not enough (80%), or the server says the request is too long, the model summarizes the
   work and awl continues from the task, the summary, the checklist and the newest messages.
+- `AWL_CTX_MODE=fresh` (being measured in the arena, not the default): while awl runs, the session is
+  also kept as plain text, `view-<pid>.txt` next to the session files (each message starts with a line
+  `{"n":<line in the session file>,"role":…}`; the model's commands can read this one file, read-only;
+  removed on exit). Trimmed outputs say where they are in the view (`read it there (offset=…,
+  limit=…)`), every tool result ends with the run's time and the context used, and at 80% awl starts a
+  fresh context with no model request: the task, one note naming the view, the checklist, the files
+  read and changed, the newest user message, and the newest messages. A resumed session that is
+  already over the window does this before its first request.
 - Transient model errors (connection loss, 408/425/429/5xx) are retried with backoff; Ctrl-C stops a wait.
 - Commands the model runs never see `AWL_*` variables (so not the API key).
 
@@ -197,6 +206,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_KEY` | Local AI gateway key | bearer token |
 | `AWL_MAX_STEPS` | 200 | model calls per prompt |
 | `AWL_RETRIES` | 5 | retries for transient model errors |
+| `AWL_CTX_MODE` | compact | when the context fills: `compact` (summary) or `fresh` (fresh context + session view; arena A/B) |
 | `AWL_REASONING` | `medium` | `reasoning_effort` to send (`low`, `medium`, `xhigh`, ...; `off` sends none). Local AI's Qwen defaults to xhigh, about twice the tokens per turn; dropped automatically if a server rejects it |
 | `AWL_MAX_TOKENS` | `65536` | output cap per reply (`max_tokens`; `0` sends none). Generous so heavy thinkers are not cut off. A reply cut off before any tool call gets a note asking the model to continue; one cut off inside a tool call runs nothing and asks for the call again |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |

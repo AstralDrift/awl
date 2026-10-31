@@ -7,7 +7,7 @@ W=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$W"' EXIT
 export XDG_STATE_HOME=$W/state
 # The caller's awl settings must not leak in (e.g. running inside an awl session).
-unset AWL_URL AWL_MODEL AWL_KEY AWL_SYSTEM AWL_MAX_STEPS AWL_RSS AWL_AGENTS
+unset AWL_URL AWL_MODEL AWL_KEY AWL_SYSTEM AWL_MAX_STEPS AWL_RSS AWL_AGENTS AWL_CTX_MODE
 export XDG_CONFIG_HOME=/nonexistent
 pass=0
 fail=0
@@ -57,13 +57,13 @@ rc=$?
 [ "$(cat "$W/proj/hello.txt")" = "hello awl" ] && ok "edit applied" || bad "edit applied" "$(cat "$W/proj/hello.txt")"
 case "$out" in *Done.) ok "final reply" ;; *) bad "final reply" "$out" ;; esac
 python3 - "$LOG" <<'EOF' && ok "request history" || bad "request history" "see above"
-import json, sys
+import json, re, sys
 reqs = [json.loads(l) for l in open(sys.argv[1])]
 assert len(reqs) == 3, len(reqs)
 m = reqs[-1]["messages"]
 roles = [x["role"] for x in m]
 assert roles == ["system", "user", "assistant", "tool", "assistant", "tool", "tool"], roles
-assert m[3]["content"] == "1→hello world\n", repr(m[3]["content"])
+assert m[3]["content"] == "1→hello world\n", repr(m[3]["content"])  # compact (default): no budget line
 assert m[2]["tool_calls"][0]["function"]["name"] == "read"
 assert json.loads(m[4]["tool_calls"][0]["function"]["arguments"])["new_string"] == "awl"
 assert m[5]["tool_call_id"] == "call_0" and m[6]["tool_call_id"] == "call_1"
@@ -241,7 +241,11 @@ seq 1 300 >"$W/big.txt"
 python3 "$HERE/ctx_script.py" "$W/ctx.json"
 serve "$W/ctx.json" --ctx 1500
 (cd "$W" && "$AWL" -p go >/dev/null 2>"$W/o")
-python3 "$HERE/ctx_check.py" "$LOG" 2>"$W/o2" && ok "context elision" || bad "context elision" "$(tail -1 "$W/o2") $(cat "$W/o")"
+python3 "$HERE/ctx_check.py" "$LOG" compact 2>"$W/o2" && ok "context elision (compact: old marker, no view)" || bad "context elision (compact)" "$(tail -1 "$W/o2") $(cat "$W/o")"
+stop
+serve "$W/ctx.json" --ctx 1500
+(cd "$W" && AWL_CTX_MODE=fresh "$AWL" -p go >/dev/null 2>"$W/o")
+python3 "$HERE/ctx_check.py" "$LOG" fresh 2>"$W/o2" && ok "context elision (fresh: marker points into the view)" || bad "context elision (fresh)" "$(tail -1 "$W/o2") $(cat "$W/o")"
 stop
 
 # 8b. the checklist survives context elision; old reads around it are elided
@@ -249,7 +253,8 @@ python3 - "$W/ctodo.json" <<'EOF'
 import json, sys
 items = [{"text": f"step {i}: " + "x" * 40, "status": "doing" if i == 0 else "pending"} for i in range(10)]
 t = [{"tool_calls": [{"name": "todo", "arguments": {"items": items}}], "usage": {"prompt_tokens": 400, "completion_tokens": 5}}]
-t += [{"tool_calls": [{"name": "read", "arguments": {"path": "big.txt"}}], "usage": {"prompt_tokens": 500 + 100 * i, "completion_tokens": 5}} for i in range(12)]
+# under 80% of the window throughout: elision alone, no reset
+t += [{"tool_calls": [{"name": "read", "arguments": {"path": "big.txt"}}], "usage": {"prompt_tokens": min(500 + 100 * i, 1150), "completion_tokens": 5}} for i in range(12)]
 t.append({"content": "done"})
 json.dump(t, open(sys.argv[1], "w"))
 EOF
@@ -265,7 +270,7 @@ assert any(c.startswith("[old tool output elided") for c in tools[1:]), "nothing
 EOF
 stop
 
-# 8c. compaction: over 80% after elision -> summary request (no tools), history rebuilt
+# 8c. compaction (AWL_CTX_MODE=compact, the default): over 80% after elision -> summary request (no tools), history rebuilt
 python3 - "$W/cmp.json" <<'EOF'
 import json, sys
 items = [{"text": "port the parser", "status": "doing"}, {"text": "run tests", "status": "pending"}]
@@ -500,6 +505,180 @@ import json, sys
 reqs = [json.loads(l) for l in open(sys.argv[1])]
 too_long, ask = reqs[3], reqs[4]
 assert len(json.dumps(ask["messages"])) < len(json.dumps(too_long["messages"])), (len(json.dumps(ask["messages"])), len(json.dumps(too_long["messages"])))
+EOF
+stop
+
+# 8e. retrieval (AWL_CTX_MODE=fresh): over 80% after elision -> no model request; the history becomes the
+# first user message + one note naming the session view + checklist + files, then the newest messages
+python3 - "$W/rr.json" <<'EOF'
+import json, sys
+items = [{"text": "port the parser", "status": "doing"}, {"text": "run tests", "status": "pending"}]
+t = [{"tool_calls": [{"name": "todo", "arguments": {"items": items}}], "usage": {"prompt_tokens": 500, "completion_tokens": 5}}]
+t += [{"tool_calls": [{"name": "read", "arguments": {"path": "big.txt"}}], "usage": {"prompt_tokens": p, "completion_tokens": 5}} for p in (1000, 1500, 2000, 2700)]
+t.append({"content": "done"})
+json.dump(t, open(sys.argv[1], "w"))
+EOF
+serve "$W/rr.json" --ctx 3000
+out=$(cd "$W" && AWL_CTX_MODE=fresh "$AWL" -p "go port it" 2>"$W/o")
+python3 - "$LOG" <<'EOF' && ok "retrieval reset: no summary request, note names the view" || bad "retrieval reset" "$out $(tail -3 "$W/o")"
+import json, re, sys
+reqs = [json.loads(l) for l in open(sys.argv[1])]
+assert len(reqs) == 6, len(reqs)  # one per script turn: nothing extra
+assert all("tool_choice" not in r for r in reqs), [r.get("tool_choice") for r in reqs]
+m = reqs[-1]["messages"]
+assert m[1] == {"role": "user", "content": "go port it"}, m[1]
+s = m[2]["content"]
+assert s.startswith("[Context reset:"), s[:100]
+assert re.search(r"/view-\d+\.txt", s), s
+assert "grep" in s and "summar" not in s.split("]")[0].replace("not summarized", ""), s
+assert "Checklist (current):\n[>] port the parser" in s, s
+assert "<read-files>\nbig.txt\n</read-files>" in s, s
+assert len(m) == 3 or m[3]["role"] == "assistant", [x["role"] for x in m]
+assert len(m) < len(reqs[-2]["messages"]), (len(m), len(reqs[-2]["messages"]))
+ids = {c["id"] for x in m if x["role"] == "assistant" for c in x.get("tool_calls") or []}
+assert all(x["tool_call_id"] in ids for x in m if x["role"] == "tool"), "orphan tool result"
+EOF
+[ "$out" = "done" ] && grep -q "context reset:" "$W/o" && ok "retrieval reset transparent to -p" || bad "retrieval -p" "$out $(cat "$W/o")"
+stop
+
+# 8e2. retrieval with a bigger window keeps a valid recent tail (every result keeps its call)
+python3 - "$W/rr2.json" <<'EOF'
+import json, sys
+t = [{"tool_calls": [{"name": "bash", "arguments": {"command": f"echo step {i}"}}, {"name": "bash", "arguments": {"command": "echo hi"}}], "usage": {"prompt_tokens": p, "completion_tokens": 5}} for i, p in enumerate((2000, 3000, 4000, 5000, 6000, 7000, 7600))]
+t.append({"content": "done"})
+json.dump(t, open(sys.argv[1], "w"))
+EOF
+serve "$W/rr2.json" --ctx 9000
+out=$(cd "$W" && AWL_CTX_MODE=fresh "$AWL" -p "loop" 2>"$W/o")
+python3 - "$LOG" <<'EOF' && ok "retrieval keeps a valid recent tail" || bad "retrieval tail" "$out $(tail -3 "$W/o")"
+import json, sys
+reqs = [json.loads(l) for l in open(sys.argv[1])]
+assert len(reqs) == 8, len(reqs)
+m = reqs[-1]["messages"]
+roles = [x["role"] for x in m]
+assert roles[:3] == ["system", "user", "user"] and len(m) > 3 and roles[3] == "assistant", roles
+assert m[2]["content"].startswith("[Context reset:"), m[2]["content"][:80]
+ids = {c["id"] for x in m if x["role"] == "assistant" for c in x.get("tool_calls") or []}
+assert ids and all(x["tool_call_id"] in ids for x in m if x["role"] == "tool"), "orphan tool result"
+for i, x in enumerate(m):
+    for c in x.get("tool_calls") or []:
+        assert any(y.get("tool_call_id") == c["id"] for y in m[i + 1:]), c["id"]
+EOF
+stop
+
+# 8e3. a "too long" rejection resets the context (no summary request) and the run continues
+python3 - "$W/r400.json" <<'EOF'
+import json, sys
+t = [{"tool_calls": [{"name": "read", "arguments": {"path": "big.txt"}}]} for _ in range(3)]
+t.append({"status": 400, "content": "This model's maximum context length is 8192 tokens. Please reduce the length."})
+t.append({"content": "recovered"})
+json.dump(t, open(sys.argv[1], "w"))
+EOF
+serve "$W/r400.json"
+out=$(cd "$W" && AWL_CTX_MODE=fresh "$AWL" -p go 2>"$W/o")
+python3 - "$LOG" "$out" <<'EOF' && ok "400 too-long -> reset -> continue" || bad "400 reset" "$out $(tail -3 "$W/o")"
+import json, sys
+reqs = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "recovered", sys.argv[2]
+assert len(reqs) == 5, len(reqs)
+too_long, after = reqs[3], reqs[4]
+assert after["messages"][2]["content"].startswith("[Context reset:"), after["messages"][2]["content"][:80]
+assert len(json.dumps(after["messages"])) < len(json.dumps(too_long["messages"]))
+EOF
+stop
+
+# 8e4. a resumed session already over the window resets before its first request, and the newest
+# prompt survives even when it alone is bigger than the tail that is kept
+python3 - "$W/rlong.json" <<'EOF'
+import json, sys
+t = [{"tool_calls": [{"name": "read", "arguments": {"path": "big.txt"}}]} for _ in range(8)]
+t.append({"content": "first done"})
+json.dump(t, open(sys.argv[1], "w"))
+EOF
+mkdir -p "$W/rs"
+cp "$W/big.txt" "$W/rs/"
+serve "$W/rlong.json" --ctx 100000
+(cd "$W/rs" && AWL_CTX_MODE=fresh "$AWL" -p "first task" >/dev/null 2>&1)
+stop
+echo '[{"content":"second ok"}]' >"$W/rsec.json"
+serve "$W/rsec.json" --ctx 3000
+big_prompt="second task: $(printf 'y%.0s' $(seq 4000))"
+out=$(cd "$W/rs" && AWL_CTX_MODE=fresh "$AWL" -c -p "$big_prompt" 2>"$W/o")
+python3 - "$LOG" "$out" <<'EOF' && ok "resume over the window resets at step 0; newest prompt kept" || bad "resume reset" "$out $(tail -3 "$W/o")"
+import json, sys
+reqs = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "second ok", sys.argv[2]
+assert len(reqs) == 1, len(reqs)
+m = reqs[0]["messages"]
+assert m[1] == {"role": "user", "content": "first task"}, m[1]
+assert m[-1]["role"] == "user", [x["role"] for x in m]
+s = m[2]["content"]
+assert s.startswith("[Context reset:") and "second task: yyyy" in s, s[:200]
+assert len(json.dumps(m)) < 12000, len(json.dumps(m))
+EOF
+stop
+
+# 8e5. a torn last line (a crash mid-write) is skipped on resume, and the next record starts on a line of its own
+S=$W/torn.jsonl
+printf '%s\n%s\n%s\n%s' '{"awl":"0","model":"fake-model","cwd":"/x"}' '{"role":"user","content":"before"}' '{"role":"assistant","content":"first answer"}' '{"role":"user","content":"tor' >"$S"
+echo '[{"content":"after torn"}]' >"$W/torn.json"
+serve "$W/torn.json"
+out=$(cd "$W" && AWL_CTX_MODE=fresh "$AWL" -r "$S" -p next 2>"$W/o")
+python3 - "$LOG" "$out" "$S" <<'EOF' && ok "torn last line skipped; next record on its own line" || bad "torn line" "$out $(tail -3 "$W/o")"
+import json, sys
+reqs = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "after torn", sys.argv[2]
+m = reqs[0]["messages"]
+assert [x["role"] for x in m] == ["system", "user", "assistant", "user"], [x["role"] for x in m]
+assert m[-1]["content"] == "next", m[-1]
+lines = open(sys.argv[3]).read().split("\n")
+assert lines[3] == '{"role":"user","content":"tor', lines[3]
+for l in lines[4:]:
+    if l:
+        json.loads(l)
+assert json.loads(lines[4])["content"] == "next" and json.loads(lines[5])["content"] == "after torn", lines[4:]
+EOF
+stop
+
+# 8e6. an 11 MB session: resumed, reset at once, and its middle found with grep in the view (from the
+# sandboxed bash: the view is the one session file the model's commands can see)
+python3 - "$W/huge.jsonl" <<'EOF'
+import json, sys
+f = open(sys.argv[1], "w")
+d = lambda o: json.dumps(o, separators=(",", ":"))  # compact, as awl writes it
+f.write(d({"awl": "0", "model": "fake-model", "cwd": "/x"}) + "\n")
+f.write(d({"role": "user", "content": "build it"}) + "\n")
+for i in range(170):
+    f.write(d({"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}", "type": "function", "function": {"name": "bash", "arguments": d({"command": f"make part{i}"})}}]}) + "\n")
+    body = "".join(f"part{i} line {k}: compiling module {k} of part {i}\n" for k in range(1300))
+    if i == 85:
+        body += 'NEEDLE-ERROR: disk quota 4242 exceeded in "/srv/build/out.bin"\n'
+    f.write(d({"role": "tool", "tool_call_id": f"c{i}", "content": body}) + "\n")
+EOF
+cat >"$W/huge-s.json" <<'EOF'
+[{"tool_calls":[{"name":"bash","arguments":{"command":"grep -n NEEDLE-ERROR $VIEW; grep -c '^{\"n\":' $VIEW; ls $(dirname $VIEW)"}}]},
+ {"content":"found"}]
+EOF
+serve "$W/huge-s.json" --ctx 180000
+t0=$(date +%s%N)
+out=$(cd "$W" && AWL_CTX_MODE=fresh "$AWL" -r "$W/huge.jsonl" -p "find the error" 2>"$W/o")
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+python3 - "$LOG" "$out" "$W/huge.jsonl" <<'EOF' && ok "11 MB session: reset at once, needle found in the view (${ms} ms)" || bad "11 MB session" "$out $(tail -3 "$W/o")"
+import json, os, sys
+assert os.path.getsize(sys.argv[3]) > 10 << 20
+reqs = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "found", sys.argv[2]
+assert len(json.dumps(reqs[0]["messages"])) < 4 * 180000, len(json.dumps(reqs[0]["messages"]))
+r = [x for x in reqs[1]["messages"] if x["role"] == "tool"][-1]["content"]
+assert 'NEEDLE-ERROR: disk quota 4242 exceeded in "/srv/build/out.bin"' in r, r[:300]
+lines = r.split("\n")
+# the hit is in the loaded part (part 85 of 170), before this search's own call line (the view records it too)
+hits = [l for l in lines if "NEEDLE-ERROR" in l]
+assert hits[0].endswith('exceeded in "/srv/build/out.bin"') and "→ bash" in hits[-1], hits
+counts = [l for l in lines if l.isdigit()]
+assert counts == [str(1 + 2 * 170 + 2)], counts  # loaded messages + the new prompt + this reply
+listing = [l for l in lines if l.startswith("view-") or l.endswith(".jsonl")]
+assert len(listing) == 1 and listing[0].startswith("view-"), listing  # nothing else of the sessions folder
 EOF
 stop
 

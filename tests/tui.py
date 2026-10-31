@@ -1265,6 +1265,11 @@ def rewind_and_editor():
         check("rewind: a.txt as it was before that prompt", open(os.path.join(proj, "a.txt")).read() == "one\n", open(os.path.join(proj, "a.txt")).read())
         titles = [open(os.path.join(sess, x)).read() for x in os.listdir(sess) if x.endswith(".title")]
         check("rewind: the old session is titled ... (before rewind)", any(t.endswith("(before rewind)") for t in titles), titles)
+        files = sorted(x for x in os.listdir(sess) if x.endswith(".jsonl"))
+        old_f = [x for x in files if os.path.exists(os.path.join(sess, x[:-6] + ".title")) and open(os.path.join(sess, x[:-6] + ".title")).read().endswith("(before rewind)")]
+        new_l = open(os.path.join(sess, files[-1])).read().split("\n")[:-1]
+        old_l = open(os.path.join(sess, old_f[0])).read().split("\n")[:-1] if old_f else []
+        check("rewind: the new session file keeps the old one's line numbers", old_f and files[-1] != old_f[0] and len(new_l) > 1 and new_l[1:] == old_l[1:len(new_l)], (files, old_f, new_l[:3]))
         os.write(f, b"\r")  # the prompt came back in the input: send it again
         until("again")
         reqs = [json.loads(l) for l in open(lg)]

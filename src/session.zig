@@ -2,7 +2,9 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
-const Buf = @import("buf.zig").Buf;
+const bufm = @import("buf.zig");
+const Buf = bufm.Buf;
+const Str = @import("jint.zig").Str;
 
 pub var fd: sys.fd_t = -1;
 pub var path_b: [512]u8 = undefined;
@@ -40,6 +42,8 @@ pub fn restart() void {
 
 /// Start a new session file. Failure leaves sessions off (fd = -1).
 pub fn create(meta: []const u8) void {
+    lines = 0;
+    viewReset();
     fd = newFile(&path_b, &path) orelse return;
     append(meta);
     @import("agents.zig").begin();
@@ -67,14 +71,266 @@ pub fn newFile(buf: []u8, out: *[]const u8) ?sys.fd_t {
     return null;
 }
 
+/// Lines in the session file: the next record is line `lines + 1`. A line's number never
+/// changes (the file is append-only), so the model and the view can cite it.
+pub var lines: u32 = 0;
+
+/// One write per record, newline included: a crash can tear only the last line, never glue two.
 pub fn append(json: []const u8) void {
     if (fd < 0) return;
-    sys.writeAll(fd, json) catch {};
-    sys.writeAll(fd, "\n") catch {};
+    const iov = [_]std.posix.iovec_const{ .{ .base = json.ptr, .len = json.len }, .{ .base = "\n", .len = 1 } };
+    const want = json.len + 1;
+    const rc = linux.writev(fd, &iov, 2);
+    if (linux.errno(rc) == .SUCCESS and rc < want) { // short write (disk full, signal): finish it
+        if (rc < json.len) sys.writeAll(fd, json[rc..]) catch {};
+        sys.writeAll(fd, "\n") catch {};
+    }
+    lines += 1;
 }
 
-/// Feed each message line of `p` to `onMsg`. Reopens the file for append.
-pub fn load(p: []const u8, comptime onMsg: fn ([]const u8) void) !usize {
+/// Where a message is: its line in the session file, and its body in the view (first line, line count). 0 = none.
+pub const Rec = struct { n: u32 = 0, at: u32 = 0, len: u32 = 0 };
+
+/// What the view shows of a message: role, text, the calls an assistant made, the call a tool result answers.
+pub const Call = struct { name: []const u8, args: []const u8 };
+pub const Msg = struct { role: []const u8, text: []const u8, calls: []const Call = &.{}, of: ?Call = null };
+
+/// Append a message to the session file and the view.
+pub fn record(json: []const u8, m: Msg) Rec {
+    if (fd < 0) return .{};
+    append(json);
+    var r = viewAdd(lines, m);
+    r.n = lines;
+    return r;
+}
+
+/// Append a message given only as JSON (parsed for the view).
+pub fn recordJson(json: []const u8) Rec {
+    if (fd < 0) return .{};
+    append(json);
+    var p = Parser.init();
+    defer p.deinit();
+    var r = if (p.msg(json)) |m| viewAdd(lines, m) else Rec{};
+    r.n = lines;
+    return r;
+}
+
+// ---- the view: the session as plain text the model can grep and read ----
+// One per awl process (<sessions>/view-<pid>.txt), rewritten in place when the session
+// changes, so the sandbox can mount this one file read-only for the whole run. Each message
+// starts with a line {"n":<line in the session file>,"role":…} and its text follows as is.
+// Reasoning is left out (it is in the session file): it would bury the grep hits.
+
+var view_fd: sys.fd_t = -1;
+var view_b: [512]u8 = undefined;
+pub var view_path: []const u8 = "";
+pub var view_lines: u32 = 0;
+
+/// Create the view, or empty it in place (same file: a sandbox mount of it stays valid).
+pub var view_on = false; // AWL_CTX_MODE=fresh/async: the view exists (compact writes none)
+
+fn viewReset() void {
+    view_lines = 0;
+    if (!view_on) return;
+    if (view_fd >= 0) {
+        _ = linux.ftruncate(view_fd, 0);
+        return;
+    }
+    var db: [400]u8 = undefined;
+    const d = dir(&db) orelse return;
+    mkdirs(d);
+    pruneViews(d);
+    view_path = std.fmt.bufPrint(&view_b, "{s}/view-{d}.txt", .{ d, linux.getpid() }) catch return;
+    view_fd = sys.open(view_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .APPEND = true, .CLOEXEC = true }, 0o600) catch -1;
+    if (view_fd < 0) view_path = "";
+}
+
+/// At exit: the view is a copy, the session file stays.
+pub fn dropView() void {
+    if (view_fd < 0) return;
+    sys.close(view_fd);
+    view_fd = -1;
+    var zb: [520]u8 = undefined;
+    _ = linux.unlink(sys.z(&zb, view_path));
+    view_path = "";
+}
+
+/// Views left by awl processes that were killed.
+fn pruneViews(d: []const u8) void {
+    const dfd = sys.open(d, .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch return;
+    defer sys.close(dfd);
+    var b: [8192]u8 align(8) = undefined;
+    while (true) {
+        const got = sys.check(linux.getdents64(dfd, &b, b.len)) catch return;
+        if (got == 0) return;
+        var off: usize = 0;
+        while (off < got) {
+            const e: *align(1) linux.dirent64 = @ptrCast(&b[off]);
+            const name = std.mem.sliceTo(@as([*:0]u8, @ptrCast(&b[off + @offsetOf(linux.dirent64, "name")])), 0);
+            off += e.reclen;
+            if (!std.mem.startsWith(u8, name, "view-") or !std.mem.endsWith(u8, name, ".txt")) continue;
+            const pid = std.fmt.parseInt(i32, name[5 .. name.len - 4], 10) catch continue;
+            if (linux.errno(linux.kill(pid, @enumFromInt(0))) != .SRCH) continue;
+            var zb: [300]u8 = undefined;
+            _ = linux.unlinkat(dfd, sys.z(&zb, name), 0);
+        }
+    }
+}
+
+fn viewAdd(n: u32, m: Msg) Rec {
+    if (view_fd < 0) return .{};
+    var w = Buf.init(m.text.len + m.text.len / 16 + 4096 + if (m.calls.len > 0) m.calls.len * 1024 + totalArgs(m.calls) else 0);
+    defer w.free();
+    w.print("{{\"n\":{d},\"role\":", .{n});
+    bufm.str(&w, m.role);
+    if (m.of) |c| {
+        w.add(",\"call\":");
+        var cb: [320]u8 = undefined;
+        bufm.str(&w, callLine(c, &cb));
+    }
+    w.add("}\n");
+    const body_start = w.len;
+    defuse(&w, m.text);
+    if (w.len > body_start and w.items()[w.len - 1] != '\n') w.byte('\n');
+    for (m.calls) |c| {
+        w.add("→ ");
+        w.add(c.name);
+        w.byte(' ');
+        for (c.args) |ch| w.byte(if (ch == '\n' or ch == '\r') ' ' else ch);
+        w.byte('\n');
+    }
+    const body_lines: u32 = @intCast(std.mem.count(u8, w.items()[body_start..], "\n"));
+    sys.writeAll(view_fd, w.items()) catch return .{};
+    const r = Rec{ .at = view_lines + 2, .len = body_lines };
+    view_lines += 1 + body_lines;
+    return r;
+}
+
+fn totalArgs(calls: []const Call) usize {
+    var n: usize = 0;
+    for (calls) |c| n += c.args.len;
+    return n;
+}
+
+/// "name args" on one line, cut to fit `out` on a UTF-8 boundary.
+fn callLine(c: Call, out: []u8) []const u8 {
+    var n: usize = 0;
+    for ([_][]const u8{ c.name, " ", c.args }) |part| for (part) |ch| {
+        if (n == out.len) break;
+        out[n] = if (ch == '\n' or ch == '\r') ' ' else ch;
+        n += 1;
+    };
+    if (n == out.len) { // full: drop a character cut at the end
+        var k = n;
+        while (k > 0 and (out[k - 1] & 0xC0) == 0x80) k -= 1;
+        if (k > 0 and k - 1 + (std.unicode.utf8ByteSequenceLength(out[k - 1]) catch 1) > n) n = k - 1;
+    }
+    return out[0..n];
+}
+
+/// Text as is, except a line that would read as a record header gets a leading space.
+fn defuse(w: *Buf, s: []const u8) void {
+    var from: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, s, at, "{\"n\":")) |i| {
+        at = i + 1;
+        if (i > 0 and s[i - 1] != '\n') continue;
+        w.add(s[from..i]);
+        w.byte(' ');
+        from = i;
+    }
+    w.add(s[from..]);
+}
+
+/// One message line, as std.json parses it (agent's compaction transcript uses it too: one parser in the binary).
+pub const Json = struct {
+    role: Str,
+    content: ?Str = null,
+    tool_call_id: ?Str = null,
+    tool_calls: ?[]const struct { id: Str = .{ .v = "" }, function: struct { name: Str = .{ .v = "" }, arguments: Str = .{ .v = "" } } = .{} } = null,
+};
+
+/// Parses session lines for the view (a reused arena; the last assistant's calls kept for its tool results).
+const Parser = struct {
+    region: Buf,
+    fba: std.heap.FixedBufferAllocator,
+    ids: [16][64]u8 = undefined,
+    id_n: [16]usize = undefined,
+    sums: [16][320]u8 = undefined,
+    sum_n: [16]usize = undefined,
+    n_calls: usize = 0,
+    calls: [16]Call = undefined,
+
+    fn init() Parser {
+        var p = Parser{ .region = Buf.init(1 << 30), .fba = undefined };
+        _ = p.region.extend(0);
+        p.fba = std.heap.FixedBufferAllocator.init(p.region.base.?[0..p.region.cap]);
+        return p;
+    }
+    fn deinit(p: *Parser) void {
+        p.region.free();
+    }
+
+    /// The message on one session line, or null (the meta line, a torn or broken line).
+    /// Slices point into the arena until the next call.
+    fn msg(p: *Parser, line: []const u8) ?Msg {
+        if (line.len < 2 or line[0] != '{' or std.mem.startsWith(u8, line, "{\"awl\"")) return null;
+        p.fba.reset();
+        const m = std.json.parseFromSliceLeaky(Json, p.fba.allocator(), line, .{ .ignore_unknown_fields = true }) catch return null;
+        var out = Msg{ .role = m.role.v, .text = if (m.content) |c| c.v else "" };
+        if (m.tool_calls) |tc| {
+            p.n_calls = @min(tc.len, p.calls.len);
+            for (tc[0..p.n_calls], 0..) |c, i| {
+                const k = @min(c.id.v.len, 64);
+                @memcpy(p.ids[i][0..k], c.id.v[0..k]);
+                p.id_n[i] = k;
+                const s = callLine(.{ .name = c.function.name.v, .args = c.function.arguments.v }, &p.sums[i]);
+                p.sum_n[i] = s.len;
+                p.calls[i] = .{ .name = c.function.name.v, .args = c.function.arguments.v };
+            }
+            out.calls = p.calls[0..p.n_calls];
+        }
+        if (m.tool_call_id) |id| for (0..p.n_calls) |i| if (std.mem.eql(u8, p.ids[i][0..p.id_n[i]], id.v)) {
+            out.of = .{ .name = p.sums[i][0..p.sum_n[i]], .args = "" };
+        };
+        return out;
+    }
+};
+
+/// Start a new session file holding lines 2..upto-1 of the current one (rewind): line numbers
+/// and the view stay as they were. False if the current file cannot be read.
+pub fn restartCopy(upto: u32) bool {
+    if (path.len == 0) return false;
+    var mb = Buf.init(1 << 30);
+    defer mb.free();
+    const f = sys.open(path, .{ .CLOEXEC = true }, 0) catch return false;
+    while (true) {
+        const dst = mb.extend(1 << 16);
+        const n = sys.read(f, dst) catch 0;
+        mb.truncate(mb.len - (dst.len - n));
+        if (n == 0) break;
+    }
+    sys.close(f);
+    restart();
+    if (fd < 0) return true;
+    var parser = Parser.init();
+    defer parser.deinit();
+    var it = std.mem.splitScalar(u8, mb.items(), '\n');
+    var ln: u32 = 0;
+    while (it.next()) |line| {
+        ln += 1;
+        if (ln == 1) continue; // the old meta line: restart wrote a new one
+        if (ln >= upto) break;
+        append(line);
+        if (parser.msg(line)) |m| _ = viewAdd(lines, m);
+    }
+    return true;
+}
+
+/// Feed each message line of `p` to `onMsg`, with where it is. Reopens the file for append
+/// and writes the view. A line that is not a message (meta, torn by a crash) is skipped but
+/// keeps its number; a torn last line gets its newline so the next record starts clean.
+pub fn load(p: []const u8, comptime onMsg: fn ([]const u8, Rec) void) !usize {
     var mb = Buf.init(1 << 30);
     defer mb.free();
     const f = try sys.open(p, .{ .CLOEXEC = true }, 0);
@@ -85,16 +341,27 @@ pub fn load(p: []const u8, comptime onMsg: fn ([]const u8) void) !usize {
         if (n == 0) break;
     }
     sys.close(f);
+    viewReset();
+    var parser = Parser.init();
+    defer parser.deinit();
     var count: usize = 0;
-    var it = std.mem.splitScalar(u8, mb.items(), '\n');
+    lines = 0;
+    var text = mb.items();
+    if (text.len > 0 and text[text.len - 1] == '\n') text = text[0 .. text.len - 1];
+    var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| {
-        if (line.len < 2 or std.mem.startsWith(u8, line, "{\"awl\"")) continue;
-        onMsg(line);
+        if (text.len == 0) break;
+        lines += 1;
+        const m = parser.msg(line) orelse continue;
+        var r = viewAdd(lines, m);
+        r.n = lines;
+        onMsg(line, r);
         count += 1;
     }
     path = path_b[0..@min(p.len, path_b.len)];
     @memcpy(@constCast(path), p[0..path.len]);
     fd = sys.open(p, .{ .ACCMODE = .WRONLY, .APPEND = true, .CLOEXEC = true }, 0) catch -1;
+    if (fd >= 0 and mb.len > 0 and mb.items()[mb.len - 1] != '\n') sys.writeAll(fd, "\n") catch {};
     @import("agents.zig").begin();
     return count;
 }
@@ -329,4 +596,32 @@ pub fn latest(out: []u8) ?[]const u8 {
     }
     if (best_n == 0) return null;
     return std.fmt.bufPrint(out, "{s}/{s}", .{ d, best[0..best_n] }) catch null;
+}
+
+test "view: a body line that looks like a record header is defused" {
+    var w = Buf.init(4096);
+    defer w.free();
+    defuse(&w, "{\"n\":3,\"role\":\"user\"}\nok {\"n\":4}\n{\"n\":5}");
+    try std.testing.expectEqualStrings(" {\"n\":3,\"role\":\"user\"}\nok {\"n\":4}\n {\"n\":5}", w.items());
+}
+
+test "view: a call line is one line, cut on a UTF-8 boundary" {
+    var b: [12]u8 = undefined;
+    try std.testing.expectEqualStrings("bash {\"a\": 1", callLine(.{ .name = "bash", .args = "{\"a\":\n1}" }, &b));
+    try std.testing.expectEqualStrings("read ✓✓", callLine(.{ .name = "read", .args = "✓✓✓" }, &b)[0..11]);
+    try std.testing.expectEqual(@as(usize, 11), callLine(.{ .name = "read", .args = "✓✓✓" }, &b).len);
+}
+
+test "view: session lines parse to messages; tool results name their call; torn lines are skipped" {
+    var p = Parser.init();
+    defer p.deinit();
+    try std.testing.expect(p.msg("{\"awl\":\"0.1\",\"cwd\":\"/x\"}") == null);
+    try std.testing.expect(p.msg("{\"role\":\"user\",\"content\":\"tor") == null);
+    const a = p.msg("{\"role\":\"assistant\",\"content\":\"ok\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]}").?;
+    try std.testing.expectEqualStrings("assistant", a.role);
+    try std.testing.expectEqual(@as(usize, 1), a.calls.len);
+    try std.testing.expectEqualStrings("{\"command\":\"ls\"}", a.calls[0].args);
+    const t = p.msg("{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"a\\nb\"}").?;
+    try std.testing.expectEqualStrings("a\nb", t.text);
+    try std.testing.expectEqualStrings("bash {\"command\":\"ls\"}", t.of.?.name);
 }
