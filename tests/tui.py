@@ -646,7 +646,7 @@ def screens():
 
     p5, f5 = start()
     until(f5, "› ")
-    until(f5, "auto", 1)
+    until(f5, "of 32k · auto", 2)  # the footer is drawn after the prompt; "auto" alone matches the welcome line
     plain = re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", out[0])
     check("welcome: model, window, mode", b"awl 0.1.0 \xc2\xb7 fake-model \xc2\xb7 32k context \xc2\xb7 mode auto" in plain, plain[:300])
     check("welcome: branch and AGENTS.md", b"\xe2\x8e\x87 feat-x \xc2\xb7 1 AGENTS.md" in plain, plain[:300])
