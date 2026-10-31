@@ -11,6 +11,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
+const session = @import("session.zig");
 
 const bwrap = "/usr/bin/bwrap";
 pub var on = false; // commands run in the sandbox
@@ -22,6 +23,8 @@ pub var root: []const u8 = "";
 var home: []const u8 = "";
 var extra_b: [2048]u8 = undefined;
 var extra: []const u8 = ""; // AWL_SANDBOX_WRITE, ':'-separated
+var sessions_b: [400]u8 = undefined;
+var sessions: []const u8 = ""; // awl's session files: hidden, except this run's view (session.view_path)
 
 /// Paths hidden from the model (empty tmpfs in the sandbox; read refuses them).
 const secrets = [_][]const u8{ "/.ssh", "/.gnupg", "/.aws", "/.config/gh", "/.local/state/omarchy", "/.password-store", "/.local/share/keyrings", "/.docker", "/.kube" };
@@ -40,6 +43,7 @@ pub fn setup(project_root: []const u8) void {
     const n = @min(project_root.len, root_b.len);
     @memcpy(root_b[0..n], project_root[0..n]);
     root = root_b[0..n];
+    sessions = session.dirPath(&sessions_b) orelse "";
     if (sys.getenv("AWL_SANDBOX_WRITE")) |w| {
         const m = @min(w.len, extra_b.len);
         @memcpy(extra_b[0..m], w[0..m]);
@@ -102,6 +106,13 @@ fn options(a: *Args, with_net: bool) void {
         const p = std.fmt.bufPrint(&pb, "{s}{s}", .{ home, c }) catch continue;
         if (sys.exists(p)) a.addAll(&.{ "--tmpfs", a.zs.z(p) });
     };
+    // Session files hold every tool output of every project: none of them, except this run's view
+    // (the session as text, for the model to search), read-only. After the project bind, which
+    // may contain them. The view keeps its path for the whole run (rewritten in place).
+    if (sessions.len > 0 and sys.exists(sessions)) {
+        a.addAll(&.{ "--tmpfs", a.zs.z(sessions) });
+        if (session.view_path.len > 0) a.bindIf("--ro-bind", session.view_path);
+    }
     // /var/run is usually a link to /run: mask each real socket once, at its real path (bwrap
     // fails to start when asked to cover the same file twice)
     var seen: [sockets.len][]const u8 = undefined;
@@ -420,12 +431,18 @@ pub fn guardedPath(abs: []const u8) bool {
     return false;
 }
 
-/// read: hidden from the model? Secrets, other processes (/proc), the user's sockets (/run/user).
+/// read: hidden from the model? Secrets, other processes (/proc), the user's sockets (/run/user),
+/// session files (except this run's view).
 pub fn hidden(abs: []const u8) bool {
     if (!enforce) return false;
     var rb: [4096]u8 = undefined;
     const p = resolve(abs, &rb);
     if (under(p, "/proc") or under(p, "/run/user")) return true;
+    if (sessions.len > 0) {
+        var sb: [4096]u8 = undefined;
+        var vb: [4096]u8 = undefined;
+        if (under(p, resolve(sessions, &sb)) and (session.view_path.len == 0 or !std.mem.eql(u8, p, resolve(session.view_path, &vb)))) return true;
+    }
     var pb: [1024]u8 = undefined;
     if (home.len > 0) for (secrets) |c| if (under(p, std.fmt.bufPrint(&pb, "{s}{s}", .{ home, c }) catch continue)) return true;
     return false;
@@ -494,6 +511,16 @@ test "sandbox: write rule and path normalization" {
     try t.expect(hidden("/home/u/.ssh/id_ed25519"));
     try t.expect(hidden("/proc/1/environ"));
     try t.expect(!hidden("/home/u/proj/a"));
+    sessions = "/home/u/.local/state/awl/sessions";
+    defer sessions = "";
+    const saved = session.view_path;
+    defer session.view_path = saved;
+    session.view_path = "/home/u/.local/state/awl/sessions/view-42.txt";
+    try t.expect(hidden("/home/u/.local/state/awl/sessions/20261030-120000-7.jsonl"));
+    try t.expect(hidden("/home/u/.local/state/awl/sessions/view-41.txt"));
+    try t.expect(hidden("/home/u/.local/state/awl/sessions"));
+    try t.expect(!hidden("/home/u/.local/state/awl/sessions/view-42.txt"));
+    try t.expect(!hidden("/home/u/.local/state/awl/history2"));
 }
 
 test "sandbox: environment allowlist" {
