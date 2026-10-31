@@ -78,7 +78,7 @@ def check_openrouter_model(model):
 
 def version(h):
     awl = [os.path.join(REPO, "zig-out/bin/awl"), "--version"]
-    cmd = {"awl": awl, "awl-summary": awl}.get(h, [h, "--version"])
+    cmd = awl if h.startswith("awl") else [h, "--version"]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         return (out.stdout or out.stderr).strip().splitlines()[0][:80]

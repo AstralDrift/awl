@@ -1276,8 +1276,6 @@ def rewind_and_editor():
         last = reqs[-1]["messages"]
         users = [m["content"] for m in last if m["role"] == "user"]
         check("rewind: the prompt returns to the input, and the history ends before it", users == ["start and more from the editor", "make it two"], users)
-        os.write(f, b"/compact\r")
-        check("/compact starts a fresh context (no summary request)", until("fresh context:") and not any(r.get("tool_choice") == "none" for r in [json.loads(l) for l in open(lg)][len(reqs):]), [(r.get("tool_choice"), [m["role"] for m in r["messages"]]) for r in [json.loads(l) for l in open(lg)][len(reqs):]])
     finally:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)

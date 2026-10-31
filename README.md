@@ -87,7 +87,7 @@ ghostty, alacritty, and over ssh).
 - On start, awl shows the model and its window, the mode, the folder and git branch, how many
   AGENTS.md files and skills it loaded, and the last conversation held in this folder.
 - A status line under the prompt shows the model, context use (amber from 60%, when old tool
-  output starts being trimmed; red from 80%, near a fresh context), the mode and the git branch.
+  output starts being trimmed; red from 80%, near summarizing), the mode and the git branch.
 - When the model keeps a checklist (the todo tool), it stays pinned above the timer while the
   model and tools work: finished items fold into a count, the one in progress is highlighted. Ctrl-T hides it (a `☰ 2/5` count stays on the timer line) and shows it again.
 - Full-screen mode (`awl --full`, `AWL_FULL=1`, or `/full` to switch either way): the
@@ -114,7 +114,7 @@ ghostty, alacritty, and over ssh).
   lines added and removed. Control bytes in changed files show as `^X`.
 - The terminal title shows the folder, with `⋯` while awl works and `?` while it waits for you;
   the old title comes back on exit (`AWL_TITLE=off` leaves it alone).
-- `/model NAME` switches model, `/compact` starts a fresh context now (earlier work stays searchable), `/context` shows the
+- `/model NAME` switches model, `/compact` summarizes the conversation now (a fresh context with `AWL_CTX_MODE=fresh`), `/context` shows the
   window use and the files read and changed. A `/command` typed while the model works runs when
   the turn ends.
 
@@ -183,18 +183,17 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 
 ## Long sessions
 
-- While awl runs, the session is also kept as plain text, `view-<pid>.txt` next to the session files:
-  each message starts with a line `{"n":<line in the session file>,"role":…}` and its text follows as
-  it was. The model's commands can read this one file (read-only); it is removed on exit.
-- Old tool outputs are trimmed when the prompt passes 60% of the window; each one is replaced by where
-  it is in the view (`read it there (offset=…, limit=…)`), so getting it back never reruns a command.
-  The checklist is never trimmed. Every tool result ends with the run's time and the context used.
-- If that is not enough (80%), or the server says the request is too long, awl starts a fresh context
-  with no extra model request: the task, one note naming the view (grep it for exact errors, paths and
-  decisions before redoing anything), the checklist, the files read and changed, the newest user
-  message, and the newest messages. A resumed session that is already over the window does this
-  before its first request. (`AWL_COMPACT=summary` brings back the old model-written summary, for the
-  arena A/B only.)
+- Old tool outputs are trimmed when the prompt passes 60% of the window; the checklist is never trimmed.
+- If that is not enough (80%), or the server says the request is too long, the model summarizes the
+  work and awl continues from the task, the summary, the checklist and the newest messages.
+- `AWL_CTX_MODE=fresh` (being measured in the arena, not the default): while awl runs, the session is
+  also kept as plain text, `view-<pid>.txt` next to the session files (each message starts with a line
+  `{"n":<line in the session file>,"role":…}`; the model's commands can read this one file, read-only;
+  removed on exit). Trimmed outputs say where they are in the view (`read it there (offset=…,
+  limit=…)`), every tool result ends with the run's time and the context used, and at 80% awl starts a
+  fresh context with no model request: the task, one note naming the view, the checklist, the files
+  read and changed, the newest user message, and the newest messages. A resumed session that is
+  already over the window does this before its first request.
 - Transient model errors (connection loss, 408/425/429/5xx) are retried with backoff; Ctrl-C stops a wait.
 - Commands the model runs never see `AWL_*` variables (so not the API key).
 
@@ -207,6 +206,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_KEY` | Local AI gateway key | bearer token |
 | `AWL_MAX_STEPS` | 200 | model calls per prompt |
 | `AWL_RETRIES` | 5 | retries for transient model errors |
+| `AWL_CTX_MODE` | compact | when the context fills: `compact` (summary) or `fresh` (fresh context + session view; arena A/B) |
 | `AWL_REASONING` | `medium` | `reasoning_effort` to send (`low`, `medium`, `xhigh`, ...; `off` sends none). Local AI's Qwen defaults to xhigh, about twice the tokens per turn; dropped automatically if a server rejects it |
 | `AWL_MAX_TOKENS` | `65536` | output cap per reply (`max_tokens`; `0` sends none). Generous so heavy thinkers are not cut off. A reply cut off before any tool call gets a note asking the model to continue; one cut off inside a tool call runs nothing and asks for the call again |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |

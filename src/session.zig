@@ -127,8 +127,11 @@ pub var view_path: []const u8 = "";
 pub var view_lines: u32 = 0;
 
 /// Create the view, or empty it in place (same file: a sandbox mount of it stays valid).
+pub var view_on = false; // AWL_CTX_MODE=fresh/async: the view exists (compact writes none)
+
 fn viewReset() void {
     view_lines = 0;
+    if (!view_on) return;
     if (view_fd >= 0) {
         _ = linux.ftruncate(view_fd, 0);
         return;

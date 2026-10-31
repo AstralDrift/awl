@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Assert the last request elided the oldest tool outputs and kept the newest; the elision
-marker points into the session view, and reading it there gives the output back exactly."""
+"""Assert the last request elided the oldest tool outputs and kept the newest.
+  ctx_check.py LOG fresh    the marker points into the session view, and reading it there gives the
+                            output back exactly (budget lines included)
+  ctx_check.py LOG compact  the default: the old marker, no budget line, no view written"""
 import json
 import re
 import sys
@@ -13,6 +15,13 @@ assert not tools[-2].startswith("[old"), "newest output elided"
 assert tools[0].startswith("[old"), "oldest output kept"
 assert all(x.get("tool_call_id") for x in m if x["role"] == "tool")
 mk = tools[0]
+if sys.argv[2] == "compact":
+    assert mk == "[old tool output elided to save context; rerun the tool if you need it]", mk
+    assert "[time " not in json.dumps(m), "budget line in compact mode"
+    import glob, os
+    views = glob.glob(os.path.join(os.environ["XDG_STATE_HOME"], "awl", "sessions", "view-*.txt"))
+    assert not views, views
+    sys.exit(0)
 assert re.search(r"it is in /\S*/view-\d+\.txt lines \d+-\d+: read it there \(offset=\d+, limit=\d+\) instead of rerunning", mk), mk
 assert "rerun the tool if you need it" not in json.dumps(m), "old marker"
 # the original output, as the first request that carried it had it

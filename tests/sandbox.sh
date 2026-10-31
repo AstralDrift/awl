@@ -97,6 +97,7 @@ LOG=$W/req.jsonl
 python3 "$HERE/fake_sse.py" "$W/script.json" --log "$LOG" >"$W/port" &
 for _ in $(seq 50); do [ -s "$W/port" ] && break; sleep 0.02; done
 export AWL_URL=http://127.0.0.1:$(cat "$W/port")
+export AWL_CTX_MODE=fresh # the session view exists only in fresh/async; other sessions are hidden in every mode
 "$AWL" -p "probe" >"$W/out" 2>&1 || bad "awl exit" "$(tail -5 "$W/out")"
 
 results=$(python3 -c '

@@ -7,7 +7,7 @@ W=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$W"' EXIT
 export XDG_STATE_HOME=$W/state
 # The caller's awl settings must not leak in (e.g. running inside an awl session).
-unset AWL_URL AWL_MODEL AWL_KEY AWL_SYSTEM AWL_MAX_STEPS AWL_RSS AWL_AGENTS AWL_COMPACT
+unset AWL_URL AWL_MODEL AWL_KEY AWL_SYSTEM AWL_MAX_STEPS AWL_RSS AWL_AGENTS AWL_CTX_MODE
 export XDG_CONFIG_HOME=/nonexistent
 pass=0
 fail=0
@@ -63,7 +63,7 @@ assert len(reqs) == 3, len(reqs)
 m = reqs[-1]["messages"]
 roles = [x["role"] for x in m]
 assert roles == ["system", "user", "assistant", "tool", "assistant", "tool", "tool"], roles
-assert re.fullmatch(r"1→hello world\n\n\[time \d+s\]", m[3]["content"]), repr(m[3]["content"])  # output, then the budget line
+assert m[3]["content"] == "1→hello world\n", repr(m[3]["content"])  # compact (default): no budget line
 assert m[2]["tool_calls"][0]["function"]["name"] == "read"
 assert json.loads(m[4]["tool_calls"][0]["function"]["arguments"])["new_string"] == "awl"
 assert m[5]["tool_call_id"] == "call_0" and m[6]["tool_call_id"] == "call_1"
@@ -241,7 +241,11 @@ seq 1 300 >"$W/big.txt"
 python3 "$HERE/ctx_script.py" "$W/ctx.json"
 serve "$W/ctx.json" --ctx 1500
 (cd "$W" && "$AWL" -p go >/dev/null 2>"$W/o")
-python3 "$HERE/ctx_check.py" "$LOG" 2>"$W/o2" && ok "context elision" || bad "context elision" "$(tail -1 "$W/o2") $(cat "$W/o")"
+python3 "$HERE/ctx_check.py" "$LOG" compact 2>"$W/o2" && ok "context elision (compact: old marker, no view)" || bad "context elision (compact)" "$(tail -1 "$W/o2") $(cat "$W/o")"
+stop
+serve "$W/ctx.json" --ctx 1500
+(cd "$W" && AWL_CTX_MODE=fresh "$AWL" -p go >/dev/null 2>"$W/o")
+python3 "$HERE/ctx_check.py" "$LOG" fresh 2>"$W/o2" && ok "context elision (fresh: marker points into the view)" || bad "context elision (fresh)" "$(tail -1 "$W/o2") $(cat "$W/o")"
 stop
 
 # 8b. the checklist survives context elision; old reads around it are elided
@@ -266,7 +270,7 @@ assert any(c.startswith("[old tool output elided") for c in tools[1:]), "nothing
 EOF
 stop
 
-# 8c. compaction (AWL_COMPACT=summary, the old path kept for the A/B): over 80% after elision -> summary request (no tools), history rebuilt
+# 8c. compaction (AWL_CTX_MODE=compact, the default): over 80% after elision -> summary request (no tools), history rebuilt
 python3 - "$W/cmp.json" <<'EOF'
 import json, sys
 items = [{"text": "port the parser", "status": "doing"}, {"text": "run tests", "status": "pending"}]
@@ -277,7 +281,7 @@ t.append({"content": "done"})
 json.dump(t, open(sys.argv[1], "w"))
 EOF
 serve "$W/cmp.json" --ctx 3000
-out=$(cd "$W" && AWL_COMPACT=summary "$AWL" -p "go port it" 2>"$W/o")
+out=$(cd "$W" && "$AWL" -p "go port it" 2>"$W/o")
 python3 - "$LOG" <<'EOF' && ok "compaction rebuilds history" || bad "compaction" "$out $(tail -3 "$W/o")"
 import json, sys
 reqs = [json.loads(l) for l in open(sys.argv[1])]
@@ -311,7 +315,7 @@ t.append({"content": "done"})
 json.dump(t, open(sys.argv[1], "w"))
 EOF
 serve "$W/cmp2.json" --ctx 9000
-out=$(cd "$W" && AWL_COMPACT=summary "$AWL" -p "loop" 2>"$W/o")
+out=$(cd "$W" && "$AWL" -p "loop" 2>"$W/o")
 python3 - "$LOG" <<'EOF' && ok "compaction keeps a valid recent tail" || bad "compaction tail" "$out $(tail -3 "$W/o")"
 import json, sys
 reqs = [json.loads(l) for l in open(sys.argv[1])]
@@ -494,7 +498,7 @@ t.append({"content": "recovered"})
 json.dump(t, open(sys.argv[1], "w"))
 EOF
 serve "$W/c400.json"
-out=$(cd "$W" && AWL_COMPACT=summary "$AWL" -p go 2>"$W/o")
+out=$(cd "$W" && "$AWL" -p go 2>"$W/o")
 [ "$out" = "recovered" ] && grep -q "compacted:" "$W/o" && ok "400 too-long -> compact -> continue" || bad "400 too-long" "$out $(tail -3 "$W/o")"
 python3 - "$LOG" <<'EOF' && ok "forced summary request is smaller than the history" || bad "forced summary size" "see above"
 import json, sys
@@ -504,7 +508,7 @@ assert len(json.dumps(ask["messages"])) < len(json.dumps(too_long["messages"])),
 EOF
 stop
 
-# 8e. retrieval (the default): over 80% after elision -> no model request; the history becomes the
+# 8e. retrieval (AWL_CTX_MODE=fresh): over 80% after elision -> no model request; the history becomes the
 # first user message + one note naming the session view + checklist + files, then the newest messages
 python3 - "$W/rr.json" <<'EOF'
 import json, sys
@@ -515,7 +519,7 @@ t.append({"content": "done"})
 json.dump(t, open(sys.argv[1], "w"))
 EOF
 serve "$W/rr.json" --ctx 3000
-out=$(cd "$W" && "$AWL" -p "go port it" 2>"$W/o")
+out=$(cd "$W" && AWL_CTX_MODE=fresh "$AWL" -p "go port it" 2>"$W/o")
 python3 - "$LOG" <<'EOF' && ok "retrieval reset: no summary request, note names the view" || bad "retrieval reset" "$out $(tail -3 "$W/o")"
 import json, re, sys
 reqs = [json.loads(l) for l in open(sys.argv[1])]
@@ -545,7 +549,7 @@ t.append({"content": "done"})
 json.dump(t, open(sys.argv[1], "w"))
 EOF
 serve "$W/rr2.json" --ctx 9000
-out=$(cd "$W" && "$AWL" -p "loop" 2>"$W/o")
+out=$(cd "$W" && AWL_CTX_MODE=fresh "$AWL" -p "loop" 2>"$W/o")
 python3 - "$LOG" <<'EOF' && ok "retrieval keeps a valid recent tail" || bad "retrieval tail" "$out $(tail -3 "$W/o")"
 import json, sys
 reqs = [json.loads(l) for l in open(sys.argv[1])]
@@ -571,7 +575,7 @@ t.append({"content": "recovered"})
 json.dump(t, open(sys.argv[1], "w"))
 EOF
 serve "$W/r400.json"
-out=$(cd "$W" && "$AWL" -p go 2>"$W/o")
+out=$(cd "$W" && AWL_CTX_MODE=fresh "$AWL" -p go 2>"$W/o")
 python3 - "$LOG" "$out" <<'EOF' && ok "400 too-long -> reset -> continue" || bad "400 reset" "$out $(tail -3 "$W/o")"
 import json, sys
 reqs = [json.loads(l) for l in open(sys.argv[1])]
@@ -594,12 +598,12 @@ EOF
 mkdir -p "$W/rs"
 cp "$W/big.txt" "$W/rs/"
 serve "$W/rlong.json" --ctx 100000
-(cd "$W/rs" && "$AWL" -p "first task" >/dev/null 2>&1)
+(cd "$W/rs" && AWL_CTX_MODE=fresh "$AWL" -p "first task" >/dev/null 2>&1)
 stop
 echo '[{"content":"second ok"}]' >"$W/rsec.json"
 serve "$W/rsec.json" --ctx 3000
 big_prompt="second task: $(printf 'y%.0s' $(seq 4000))"
-out=$(cd "$W/rs" && "$AWL" -c -p "$big_prompt" 2>"$W/o")
+out=$(cd "$W/rs" && AWL_CTX_MODE=fresh "$AWL" -c -p "$big_prompt" 2>"$W/o")
 python3 - "$LOG" "$out" <<'EOF' && ok "resume over the window resets at step 0; newest prompt kept" || bad "resume reset" "$out $(tail -3 "$W/o")"
 import json, sys
 reqs = [json.loads(l) for l in open(sys.argv[1])]
@@ -619,7 +623,7 @@ S=$W/torn.jsonl
 printf '%s\n%s\n%s\n%s' '{"awl":"0","model":"fake-model","cwd":"/x"}' '{"role":"user","content":"before"}' '{"role":"assistant","content":"first answer"}' '{"role":"user","content":"tor' >"$S"
 echo '[{"content":"after torn"}]' >"$W/torn.json"
 serve "$W/torn.json"
-out=$(cd "$W" && "$AWL" -r "$S" -p next 2>"$W/o")
+out=$(cd "$W" && AWL_CTX_MODE=fresh "$AWL" -r "$S" -p next 2>"$W/o")
 python3 - "$LOG" "$out" "$S" <<'EOF' && ok "torn last line skipped; next record on its own line" || bad "torn line" "$out $(tail -3 "$W/o")"
 import json, sys
 reqs = [json.loads(l) for l in open(sys.argv[1])]
@@ -657,7 +661,7 @@ cat >"$W/huge-s.json" <<'EOF'
 EOF
 serve "$W/huge-s.json" --ctx 180000
 t0=$(date +%s%N)
-out=$(cd "$W" && "$AWL" -r "$W/huge.jsonl" -p "find the error" 2>"$W/o")
+out=$(cd "$W" && AWL_CTX_MODE=fresh "$AWL" -r "$W/huge.jsonl" -p "find the error" 2>"$W/o")
 ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 python3 - "$LOG" "$out" "$W/huge.jsonl" <<'EOF' && ok "11 MB session: reset at once, needle found in the view (${ms} ms)" || bad "11 MB session" "$out $(tail -3 "$W/o")"
 import json, os, sys
