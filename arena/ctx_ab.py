@@ -5,14 +5,18 @@
 
 Per mode, over every run in the given results files: pass, recall (task probe.sh passed, over runs that
 have one), mean wall s, mean prompt tokens split cached/uncached, completion tokens, turns (requests),
-retrievals (tool calls that read the session view or session files) and resets (compactions, fresh
-contexts, swapped summaries, from the run log).
+retrievals (tool calls that read the session view or session files), resets (compactions, fresh
+contexts, swapped summaries, from the run log) and, for async, background summaries started/used/failed.
+ttfb_s in the proxy log is a cache signal only while one request is in flight: with two, a hit waits in
+the server's queue and looks like a miss.
 
 Cached tokens: the proxy's cached_tokens when the upstream reports them (cloud). Local SGLang through the
 Omarchy gateway does not, so they come from the engine's own log (`docker logs --timestamps`: each
 "Prefill batch ... #new-token: N, #cached-token: M" line belongs to the newest request that started
 before it). That is only right while nothing else uses the engine: a mismatch between the engine's
-total and the proxy's prompt tokens of more than 5% is printed as a warning. --runs prints every run.
+total and the proxy's prompt tokens of more than 5% is printed as a warning (expected when awl stopped a
+reply mid-stream or killed a background summary: the proxy logs 0 tokens for those, the engine did the
+work). --runs prints every run.
 """
 import datetime
 import glob
@@ -26,6 +30,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 SESSIONS = os.path.expanduser("~/.local/state/awl-arena/awl/awl/sessions")
 PREFILL = re.compile(r"^(\S+) .*Prefill batch.*#new-token: (\d+), #cached-token: (\d+)")
 RESET = re.compile(r"compacted: |fresh context: |summary swapped in")
+BG = {"started": "writing a summary in the background", "used": "summary swapped in", "failed": "the background summary (?:failed|is not done)"}
 
 
 def arg(n, d):
@@ -104,16 +109,18 @@ def main():
                 t0s = [q["t0"] for q in reqs]
                 lines = prefills(container, t0s[0], reqs[-1]["t0"] + reqs[-1]["model_s"])
                 new = cached = 0
-                end = reqs[-1]["t0"] + reqs[-1]["model_s"] + 1
+                end = reqs[-1]["t0"] + reqs[-1]["model_s"]  # the next run starts right after: no slack here
                 for t, n, c in lines:
-                    if t0s[0] - 0.5 <= t <= end:
+                    if t0s[0] <= t <= end:
                         new += n
                         cached += c
                 r["cached"], r["uncached"] = cached, new
                 if r["prompt_tokens"] and abs(new + cached - r["prompt_tokens"]) > 0.05 * r["prompt_tokens"]:
                     r["warn"] = f"engine saw {new + cached} prompt tokens, proxy {r['prompt_tokens']}"
             log = os.path.join(outdir, "logs", rid + ".log")
-            r["resets"] = len(RESET.findall(open(log, errors="replace").read())) if os.path.exists(log) else 0
+            text = open(log, errors="replace").read() if os.path.exists(log) else ""
+            r["resets"] = len(RESET.findall(text))
+            r["bg"] = "/".join(str(len(re.findall(v, text))) for v in BG.values())  # async: background summaries started/used/failed
             wd = os.path.join("/tmp/awl-arena", meta.get("ts", ""), rid)  # run.py: SANDBOX/<ts>/<rid>
             r["retrievals"] = retrievals(session_of(wd, reqs[0]["t0"], reqs[-1]["t0"] + reqs[-1]["model_s"])) if reqs else 0
             runs.append(r)
@@ -121,10 +128,10 @@ def main():
         for r in runs:
             print(f"{r['harness']:10} {r['task']:9} {r['rep']} {'PASS' if r['success'] else 'fail':4} probe={r.get('probe')} "
                   f"{r['wall_s']:7.1f}s turns={r['turns']:3} prompt={r['prompt_tokens']} cached={r['cached']} uncached={r['uncached']} "
-                  f"compl={r['completion_tokens']} resets={r['resets']} retr={r['retrievals']} {r['why'][:60]} {r['warn']}")
+                  f"compl={r['completion_tokens']} resets={r['resets']} bg={r['bg']} retr={r['retrievals']} {r['why'][:60]} {r['warn']}")
         print()
-    print("| mode | runs | pass | recall | wall s | prompt tok cached / uncached | completion tok | turns | retrievals | resets |")
-    print("|---|---|---|---|---|---|---|---|---|---|")
+    print("| mode | runs | pass | recall | wall s | prompt tok cached / uncached | completion tok | turns | retrievals | resets | bg summaries started/used/failed |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
     for h in sorted({r["harness"] for r in runs}):
         rs = [r for r in runs if r["harness"] == h]
         n = len(rs)
@@ -132,7 +139,8 @@ def main():
         mean = lambda k: sum(r[k] for r in rs) / n
         print(f"| {h} | {n} | {sum(r['success'] for r in rs)}/{n} | {sum(probes)}/{len(probes)} | {mean('wall_s'):.0f} | "
               f"{mean('cached') / 1000:.0f}K / {mean('uncached') / 1000:.0f}K | {mean('completion_tokens') / 1000:.1f}K | "
-              f"{mean('turns'):.1f} | {mean('retrievals'):.1f} | {mean('resets'):.1f} |")
+              f"{mean('turns'):.1f} | {mean('retrievals'):.1f} | {mean('resets'):.1f} | "
+              + "/".join(str(sum(int(r["bg"].split("/")[k]) for r in rs)) for k in range(3)) + " |")
     for r in runs:
         if r["warn"]:
             print(f"warning: {r['harness']}-{r['task']}-{r['rep']}: {r['warn']}")
