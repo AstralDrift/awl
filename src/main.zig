@@ -165,6 +165,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     } else {
         session.create(session.start_meta);
     }
+    defer session.dropView(); // the view is a copy for this run; the session file stays
 
     if (bg) return background(prompt.?);
     if (prompt) |p| {

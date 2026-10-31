@@ -1265,12 +1265,19 @@ def rewind_and_editor():
         check("rewind: a.txt as it was before that prompt", open(os.path.join(proj, "a.txt")).read() == "one\n", open(os.path.join(proj, "a.txt")).read())
         titles = [open(os.path.join(sess, x)).read() for x in os.listdir(sess) if x.endswith(".title")]
         check("rewind: the old session is titled ... (before rewind)", any(t.endswith("(before rewind)") for t in titles), titles)
+        files = sorted(x for x in os.listdir(sess) if x.endswith(".jsonl"))
+        old_f = [x for x in files if os.path.exists(os.path.join(sess, x[:-6] + ".title")) and open(os.path.join(sess, x[:-6] + ".title")).read().endswith("(before rewind)")]
+        new_l = open(os.path.join(sess, files[-1])).read().split("\n")[:-1]
+        old_l = open(os.path.join(sess, old_f[0])).read().split("\n")[:-1] if old_f else []
+        check("rewind: the new session file keeps the old one's line numbers", old_f and files[-1] != old_f[0] and len(new_l) > 1 and new_l[1:] == old_l[1:len(new_l)], (files, old_f, new_l[:3]))
         os.write(f, b"\r")  # the prompt came back in the input: send it again
         until("again")
         reqs = [json.loads(l) for l in open(lg)]
         last = reqs[-1]["messages"]
         users = [m["content"] for m in last if m["role"] == "user"]
         check("rewind: the prompt returns to the input, and the history ends before it", users == ["start and more from the editor", "make it two"], users)
+        os.write(f, b"/compact\r")
+        check("/compact starts a fresh context (no summary request)", until("fresh context:") and not any(r.get("tool_choice") == "none" for r in [json.loads(l) for l in open(lg)][len(reqs):]), [(r.get("tool_choice"), [m["role"] for m in r["messages"]]) for r in [json.loads(l) for l in open(lg)][len(reqs):]])
     finally:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)

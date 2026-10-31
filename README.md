@@ -87,7 +87,7 @@ ghostty, alacritty, and over ssh).
 - On start, awl shows the model and its window, the mode, the folder and git branch, how many
   AGENTS.md files and skills it loaded, and the last conversation held in this folder.
 - A status line under the prompt shows the model, context use (amber from 60%, when old tool
-  output starts being trimmed; red from 80%, near summarizing), the mode and the git branch.
+  output starts being trimmed; red from 80%, near a fresh context), the mode and the git branch.
 - When the model keeps a checklist (the todo tool), it stays pinned above the timer while the
   model and tools work: finished items fold into a count, the one in progress is highlighted. Ctrl-T hides it (a `☰ 2/5` count stays on the timer line) and shows it again.
 - Full-screen mode (`awl --full`, `AWL_FULL=1`, or `/full` to switch either way): the
@@ -114,7 +114,7 @@ ghostty, alacritty, and over ssh).
   lines added and removed. Control bytes in changed files show as `^X`.
 - The terminal title shows the folder, with `⋯` while awl works and `?` while it waits for you;
   the old title comes back on exit (`AWL_TITLE=off` leaves it alone).
-- `/model NAME` switches model, `/compact` summarizes the conversation now, `/context` shows the
+- `/model NAME` switches model, `/compact` starts a fresh context now (earlier work stays searchable), `/context` shows the
   window use and the files read and changed. A `/command` typed while the model works runs when
   the turn ends.
 
@@ -148,7 +148,8 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 - **Sandbox** (bubblewrap, required by default): the model's commands (bash, background jobs, grep, find)
   run in one sandbox per session. They see the filesystem read-only and can write only to the project
   (git root or cwd), `/tmp`, build caches and `AWL_SANDBOX_WRITE` dirs. Hidden from them: `~/.ssh`,
-  `~/.gnupg`, cloud/gh credentials, keyrings, the Local AI key, `/run/user` (D-Bus, Hyprland, keyring
+  `~/.gnupg`, cloud/gh credentials, keyrings, the Local AI key, awl's session files (all but this run's
+  view, read-only), `/run/user` (D-Bus, Hyprland, keyring
   sockets), sockets under `/tmp`, the docker socket, other processes, and any environment variable not on
   a short allowlist (names with TOKEN, KEY, SECRET, PASS, AUTH, ... never pass). They cannot create user
   namespaces. The project's `.git/config`, `.git/hooks`, `AGENTS.md` and `.agents/` are read-only to them,
@@ -182,9 +183,18 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 
 ## Long sessions
 
-- Old tool outputs are trimmed when the prompt passes 60% of the window; the checklist is never trimmed.
-- If that is not enough (80%), or the server says the request is too long, the model summarizes the
-  work and awl continues from the task, the summary, the checklist and the newest messages.
+- While awl runs, the session is also kept as plain text, `view-<pid>.txt` next to the session files:
+  each message starts with a line `{"n":<line in the session file>,"role":…}` and its text follows as
+  it was. The model's commands can read this one file (read-only); it is removed on exit.
+- Old tool outputs are trimmed when the prompt passes 60% of the window; each one is replaced by where
+  it is in the view (`read it there (offset=…, limit=…)`), so getting it back never reruns a command.
+  The checklist is never trimmed. Every tool result ends with the run's time and the context used.
+- If that is not enough (80%), or the server says the request is too long, awl starts a fresh context
+  with no extra model request: the task, one note naming the view (grep it for exact errors, paths and
+  decisions before redoing anything), the checklist, the files read and changed, the newest user
+  message, and the newest messages. A resumed session that is already over the window does this
+  before its first request. (`AWL_COMPACT=summary` brings back the old model-written summary, for the
+  arena A/B only.)
 - Transient model errors (connection loss, 408/425/429/5xx) are retried with backoff; Ctrl-C stops a wait.
 - Commands the model runs never see `AWL_*` variables (so not the API key).
 
