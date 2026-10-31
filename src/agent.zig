@@ -164,7 +164,9 @@ fn addAgentsFile(dir: []const u8, used: *usize) void {
 }
 
 pub fn resume_(path: []const u8) !usize {
-    return try session.load(path, addLoaded);
+    const n = try session.load(path, addLoaded);
+    dropOldReasoning();
+    return n;
 }
 
 fn addLoaded(line: []const u8) void {
@@ -854,18 +856,68 @@ fn callId(c: *const llm.Call, step: usize, i: usize, b: []u8) []const u8 {
 /// that think long on every turn (Nanbeige4.3) when speed matters more than deliberation.
 pub var thinking = true;
 
-/// AWL_KEEP_REASONING (default on; 0 = off): the reasoning goes back with the turn as reasoning_content.
-/// Chat templates (Nanbeige4.3, Qwen3.x) re-render it in the turn's <think> block; without it the
-/// re-rendered history differs from the tokens the model generated, so the server's prefix cache
-/// misses from the first assistant turn on and every step prefills that again.
-pub var keep_reasoning = true;
+/// AWL_KEEP_REASONING (default on = every turn; 0 = none; N = the newest N turns): the reasoning goes back
+/// with its turn as reasoning_content. Chat templates (Nanbeige4.3, Qwen3.x) re-render it in the turn's
+/// <think> block, and Qwen3's keeps it for every tool-call turn since the last user message, so with "on"
+/// a 40-step run carries ~40 turns of reasoning in each request (two thirds of the prompt at medium
+/// effort: arena/render_check.py). A window keeps the newest plan in view and bounds that cost.
+pub var keep_reasoning: usize = std.math.maxInt(usize);
+
+/// Strip reasoning_content from assistant turns older than the newest `keep_reasoning` that carry it.
+/// Editing an old message makes the prefix cache miss from there, so this costs one re-prefill of the
+/// window per step; the session log keeps the full text, and a resumed session is windowed the same way.
+fn dropOldReasoning() void {
+    if (keep_reasoning == std.math.maxInt(usize) or n_msgs > max_index) return;
+    const key = ",\"reasoning_content\":\"";
+    var seen: usize = 0;
+    var i = n_msgs;
+    while (i > 0) {
+        i -= 1;
+        const m = message(i);
+        if (!std.mem.startsWith(u8, m, "{\"role\":\"assistant\"")) continue;
+        const k = std.mem.indexOf(u8, m, key) orelse continue;
+        seen += 1;
+        if (seen <= keep_reasoning) continue;
+        var j = k + key.len; // the closing quote of the escaped string
+        while (j < m.len and m[j] != '"') : (j += 1) {
+            if (m[j] == '\\') j += 1;
+        }
+        if (j >= m.len) continue;
+        const start = offs[i] + 1 + k;
+        const cut = j + 1 - k;
+        const all = msgs.items();
+        std.mem.copyForwards(u8, all[start .. all.len - cut], all[start + cut ..]);
+        msgs.truncate(msgs.len - cut);
+        for (i + 1..n_msgs) |q| offs[q] -= cut;
+    }
+}
+
+test "reasoning window strips the oldest turns' reasoning, escaped quotes and all" {
+    const saved = keep_reasoning;
+    defer keep_reasoning = saved;
+    defer clear();
+    clear();
+    add("{\"role\":\"user\",\"content\":\"go\"}");
+    add("{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"a \\\"q\\\" \\\\\",\"tool_calls\":[]}");
+    add("{\"role\":\"tool\",\"tool_call_id\":\"c\",\"content\":\"x\"}");
+    add("{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"b\",\"tool_calls\":[]}");
+    add("{\"role\":\"tool\",\"tool_call_id\":\"d\",\"content\":\"y\"}");
+    keep_reasoning = 1;
+    dropOldReasoning();
+    try std.testing.expectEqualStrings("{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[]}", message(1));
+    try std.testing.expectEqualStrings("{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"b\",\"tool_calls\":[]}", message(3));
+    try std.testing.expectEqualStrings("{\"role\":\"tool\",\"tool_call_id\":\"d\",\"content\":\"y\"}", message(4));
+    keep_reasoning = 0;
+    dropOldReasoning();
+    try std.testing.expectEqualStrings("{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[]}", message(3));
+}
 
 fn pushAssistant(step: usize) void {
     var m = Buf.init(turn.content.len * 6 + turn.reasoning.len * 6 + (1 << 20));
     defer m.free();
     m.add("{\"role\":\"assistant\",\"content\":");
     bufm.str(&m, turn.content.items());
-    if (keep_reasoning and turn.reasoning.len > 0 and !turn.length_cut) { // a cut-off thought is incomplete and huge: not sent back
+    if (keep_reasoning > 0 and turn.reasoning.len > 0 and !turn.length_cut) { // a cut-off thought is incomplete and huge: not sent back
         m.add(",\"reasoning_content\":");
         bufm.str(&m, std.mem.trim(u8, turn.reasoning.items(), " \n"));
     }
@@ -886,6 +938,7 @@ fn pushAssistant(step: usize) void {
     }
     m.byte('}');
     push(&m);
+    dropOldReasoning();
 }
 
 /// Arguments that are not a JSON object (a call cut off by the output cap) go back as {}: chat templates
