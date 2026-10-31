@@ -114,7 +114,7 @@ ghostty, alacritty, and over ssh).
   lines added and removed. Control bytes in changed files show as `^X`.
 - The terminal title shows the folder, with `⋯` while awl works and `?` while it waits for you;
   the old title comes back on exit (`AWL_TITLE=off` leaves it alone).
-- `/model NAME` switches model, `/compact` summarizes the conversation now (a fresh context with `AWL_CTX_MODE=fresh`), `/context` shows the
+- `/model NAME` switches model, `/compact` starts a fresh context now that points at the session view (a summary with `AWL_CTX_MODE=compact`), `/context` shows the
   window use and the files read and changed. A `/command` typed while the model works runs when
   the turn ends.
 
@@ -206,7 +206,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_KEY` | Local AI gateway key | bearer token |
 | `AWL_MAX_STEPS` | 200 | model calls per prompt |
 | `AWL_RETRIES` | 5 | retries for transient model errors |
-| `AWL_CTX_MODE` | compact | when the context fills: `compact` (summary) or `fresh` (fresh context + session view; arena A/B) |
+| `AWL_CTX_MODE` | fresh | when the context fills: `fresh` (fresh context + session view) or `compact` (model-written summary; kept until the full Terminal-Bench run confirms fresh) |
 | `AWL_REASONING` | `medium` | `reasoning_effort` to send (`low`, `medium`, `xhigh`, ...; `off` sends none). Local AI's Qwen defaults to xhigh, about twice the tokens per turn; dropped automatically if a server rejects it |
 | `AWL_MAX_TOKENS` | `65536` | output cap per reply (`max_tokens`; `0` sends none). Generous so heavy thinkers are not cut off. A reply cut off before any tool call gets a note asking the model to continue; one cut off inside a tool call runs nothing and asks for the call again |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |
