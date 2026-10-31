@@ -416,6 +416,31 @@ serve "$W/keep.json"
 out=$(cd "$W" && AWL_KEEP_REASONING=0 "$AWL" -p go 2>/dev/null)
 python3 -c "import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; a=[m for m in r[1]['messages'] if m['role']=='assistant'][-1]; assert 'reasoning_content' not in a, a" "$LOG" && ok "AWL_KEEP_REASONING=0 sends none" || bad "keep reasoning off" "$out"
 stop
+# AWL_KEEP_REASONING=N: only the newest N assistant turns carry their reasoning (Qwen3-style templates
+# re-render every earlier tool-call turn's reasoning into the prompt, so a long run pays for all of it)
+cat >"$W/keep3.json" <<'EOF2'
+[{"reasoning":"first thought","tool_calls":[{"name":"bash","arguments":{"command":"true"}}]},
+ {"reasoning":"second \"quoted\" thought\\","tool_calls":[{"name":"bash","arguments":{"command":"true"}}]},
+ {"reasoning":"third thought","tool_calls":[{"name":"bash","arguments":{"command":"true"}}]},
+ {"content":"windowed"}]
+EOF2
+serve "$W/keep3.json"
+out=$(cd "$W" && AWL_KEEP_REASONING=1 "$AWL" -p go 2>/dev/null)
+python3 - "$LOG" "$out" <<'EOF2' && ok "AWL_KEEP_REASONING=1 keeps only the newest turn's reasoning" || bad "keep reasoning window" "$out"
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "windowed", sys.argv[2]
+a = [m for m in r[3]["messages"] if m["role"] == "assistant"]
+assert [m.get("reasoning_content") for m in a] == [None, None, "third thought"], a
+a2 = [m for m in r[2]["messages"] if m["role"] == "assistant"]
+assert [m.get("reasoning_content") for m in a2] == [None, 'second "quoted" thought\\'], a2
+assert all(m["tool_calls"][0]["function"]["name"] == "bash" for m in a), a
+EOF2
+stop
+serve "$W/keep3.json"
+out=$(cd "$W" && "$AWL" -p go 2>/dev/null)
+python3 -c "import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; a=[m for m in r[3]['messages'] if m['role']=='assistant']; assert [m.get('reasoning_content') for m in a]==['first thought','second \"quoted\" thought\\\\','third thought'], a" "$LOG" && ok "default keeps every turn's reasoning" || bad "keep reasoning default" "$out"
+stop
 # grep and find given an absolute path inside the project print short relative paths (long absolute ones get mis-copied)
 mkdir -p "$W/relsub" && echo "needle_rel" > "$W/relsub/r.txt"
 python3 -c "import json,sys; print(json.dumps([{'tool_calls': [{'name': 'grep', 'arguments': {'pattern': 'needle_rel', 'path': sys.argv[1] + '/relsub'}}, {'name': 'find', 'arguments': {'pattern': 'r.txt', 'path': sys.argv[1]}}]}, {'content': 'rel ok'}]))" "$W" > "$W/rel.json"
