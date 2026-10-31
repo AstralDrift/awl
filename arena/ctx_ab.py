@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Context-strategy A/B table: one row per harness (awl = compact, awl-fresh, awl-async).
 
-  arena/ctx_ab.py results/A.jsonl [results/B.jsonl ...] [--engine CONTAINER] [--runs]
+  arena/ctx_ab.py results/A.jsonl [results/B.jsonl ...] [--tasks a,b | --exclude a,b] [--engine CONTAINER] [--runs]
 
 Per mode, over every run in the given results files: pass, recall (task probe.sh passed, over runs that
 have one), mean wall s, mean prompt tokens split cached/uncached, completion tokens, turns (requests),
@@ -98,8 +98,9 @@ def main():
         meta = next((r for r in rows if r.get("meta")), {})
         outdir = path[: -len(".jsonl")]
         hosted = "openrouter" in meta.get("upstream", "") or "x.ai" in meta.get("upstream", "")
+        only, skip = arg("--tasks", ""), arg("--exclude", "")
         for r in rows:
-            if r.get("meta"):
+            if r.get("meta") or (only and r["task"] not in only.split(",")) or (skip and r["task"] in skip.split(",")):
                 continue
             rid = f"{r['harness']}-{r['task']}-{r['rep']}"
             pf = os.path.join(outdir, "proxy", rid + ".jsonl")
