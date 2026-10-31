@@ -11,6 +11,7 @@ Sends, in order, and prints prompt / cached tokens and time to first byte for ea
   5 parallel   two different-suffix requests on the same prefix at once (cache under concurrency)
   6 ext x2     two requests at once, each extending the whole previous prompt (async summary + next step)
   7 step+1     the next step after that, extending the step branch
+  8 tools      with tools: + one message, and + one message with tool_choice "none" (A's summary request)
 "cached" comes from usage.prompt_tokens_details.cached_tokens; a server that does not report it shows
 "-", and then the time to first byte is the only signal (a hit prefills in a fraction of the time).
 """
@@ -124,3 +125,11 @@ show("6 step", *res[0])
 show("6 summary", *res[1])
 show("7 step+1", *post(dict(base, messages=last + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "Now say yes."},
                                                   {"role": "assistant", "content": "yes"}, {"role": "user", "content": "Again."}])))
+# 8: with tools in the request: does tool_choice "none" (what A's summary request sends) change the rendered
+# prompt? A miss on 8c means the server drops the tools from the prompt for it.
+tools = [{"type": "function", "function": {"name": "read", "description": "Read a file. " + salt, "parameters": {
+    "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}}]
+tb = dict(base, tools=tools)
+show("8a tools", *post(dict(tb, messages=last)))
+show("8b +instr", *post(dict(tb, messages=last + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "Summarize."}])))
+show("8c +none", *post(dict(tb, tool_choice="none", messages=last + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "Summarize it."}])))
