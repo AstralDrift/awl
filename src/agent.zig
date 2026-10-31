@@ -1017,6 +1017,10 @@ fn asyncStart() void {
         ui.quiet = true;
         sys.tick = null;
         session.fd = -1;
+        // room for the summary from the server's own count of the last step (fitCap's bytes/3 guess
+        // overcounts; at a small window it left the floor of 1024, all spent on reasoning)
+        if (cap_max > 0) cap_max = @intCast(@min(cap_max, @max(1024, ctx_limit -| (ctx_tokens + ctx_tokens / 8 + 300))));
+        ctx_limit = 0;
         streamRetrying(msgs.items(), tail.items()) catch linux.exit_group(2);
         const sm = std.mem.trim(u8, turn.content.items(), " \t\r\n");
         if (sm.len < 20 or turn.n > 0) linux.exit_group(3);
