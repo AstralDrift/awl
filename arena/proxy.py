@@ -6,7 +6,7 @@
 Requests and responses pass through unchanged, except that chat requests get
 stream_options.include_usage so token counts are always reported. One JSON line
 per request goes to OUT/<id>.jsonl: bytes sent, prompt/completion/cached
-tokens, tool calls in the reply, model time and HTTP status.
+tokens, tool calls in the reply, model time, time to first byte and HTTP status.
 
 Usage: proxy.py --upstream http://127.0.0.1:12434 --out DIR [--port 0]
        proxy.py --upstream https://openrouter.ai/api --key-file F --model M --ctx N [--provider P]
@@ -202,6 +202,7 @@ class H(BaseHTTPRequestHandler):
         meter = Meter()
         status = 0
         retries = 0
+        ttfb = None  # first byte of the reply: on a server that does not report cached tokens, a prefix-cache hit shows here
         beat_path = os.path.join(OUT, f"{run}.active")  # heartbeat for the runners' stall watchdogs
         last_beat = 0.0
 
@@ -240,6 +241,8 @@ class H(BaseHTTPRequestHandler):
                 chunk = r.read1(65536)
                 if not chunk:
                     break
+                if ttfb is None:
+                    ttfb = time.time() - t0
                 meter.feed(chunk)
                 beat()
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
@@ -251,7 +254,7 @@ class H(BaseHTTPRequestHandler):
         if path.endswith("/models"):
             return
         calls = meter.finish()  # first: a plain JSON reply's usage is read here
-        rec = {"t0": t0, "model_s": round(time.time() - t0, 3), "path": path, "status": status,
+        rec = {"t0": t0, "model_s": round(time.time() - t0, 3), "ttfb_s": round(ttfb, 3) if ttfb is not None else None, "path": path, "status": status,
                "bytes_sent": len(body), "prompt_tokens": meter.prompt, "completion_tokens": meter.completion,
                "cached_tokens": meter.cached, "tool_calls": calls, "cost": meter.cost, "retries": retries, "provider": meter.provider,
                "reasoning_chars": sum(map(len, meter.think)), "content_chars": meter.content_chars}
