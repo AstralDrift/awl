@@ -72,6 +72,7 @@ class Meter:
         self.raw = b""
         self.think = []  # reasoning text
         self.content_chars = 0
+        self.call_chars = 0  # tool-call argument text
 
     def usage(self, u):
         if not isinstance(u, dict):
@@ -100,6 +101,7 @@ class Meter:
                 self.content_chars += len(d["content"])
             for tc in d.get("tool_calls") or []:
                 self.tool_idx.add(tc.get("index", len(self.tool_idx)))
+                self.call_chars += len(((tc.get("function") or {}).get("arguments")) or "")
 
     def feed(self, data):
         if len(self.raw) < 4 << 20:
@@ -202,6 +204,7 @@ class H(BaseHTTPRequestHandler):
         meter = Meter()
         status = 0
         retries = 0
+        cut = False  # the harness closed its side before the reply ended (awl stops a reply past 16 calls, past AWL_THINK_MAX, on Ctrl-C)
         beat_path = os.path.join(OUT, f"{run}.active")  # heartbeat for the runners' stall watchdogs
         last_beat = 0.0
 
@@ -247,6 +250,7 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(b"0\r\n\r\n")
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
             status = status or 599
+            cut = True
         self.close_connection = True
         if path.endswith("/models"):
             return
@@ -254,7 +258,11 @@ class H(BaseHTTPRequestHandler):
         rec = {"t0": t0, "model_s": round(time.time() - t0, 3), "path": path, "status": status,
                "bytes_sent": len(body), "prompt_tokens": meter.prompt, "completion_tokens": meter.completion,
                "cached_tokens": meter.cached, "tool_calls": calls, "cost": meter.cost, "retries": retries, "provider": meter.provider,
-               "reasoning_chars": sum(map(len, meter.think)), "content_chars": meter.content_chars}
+               "reasoning_chars": sum(map(len, meter.think)), "content_chars": meter.content_chars, "cut": cut}
+        if cut and not meter.completion and (meter.think or meter.content_chars or meter.call_chars):
+            # No usage event arrives for a reply the harness stopped: count what streamed (~4 chars per token) instead of 0.
+            rec["completion_tokens"] = (rec["reasoning_chars"] + meter.content_chars + meter.call_chars) // 4
+            rec["completion_estimated"] = True
         with lock:
             spent += meter.cost
             with open(os.path.join(OUT, f"{run}.jsonl"), "a") as f:
