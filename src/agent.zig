@@ -376,6 +376,7 @@ pub fn run() Outcome {
                     return .cancelled;
                 },
                 error.Connect => ui.err("cannot reach the model at {s}. Is a Local AI model running?", .{cfg.url.host}),
+                error.Tls => ui.err("TLS to {s} failed: {s}. AWL_CA_FILE=path points at another CA bundle.", .{ cfg.url.host, @import("tls.zig").detail }),
                 error.Status, error.Server => ui.err("model error: {s}", .{llm.detail[0..llm.detail_len]}),
                 else => ui.err("stream failed: {s}", .{@errorName(e)}),
             }

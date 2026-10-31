@@ -192,7 +192,8 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AWL_URL` | `http://127.0.0.1:12434` | OpenAI-compatible server (plain HTTP) |
+| `AWL_URL` | `http://127.0.0.1:12434` | OpenAI-compatible server: `http://` or `https://`, an address or a host name (resolved through /etc/hosts and the resolv.conf nameservers), with an optional path prefix (`https://openrouter.ai/api`) |
+| `AWL_CA_FILE` | system bundle | PEM file of trusted CAs for `https://` (default: the first of /etc/ssl/certs/ca-certificates.crt, /etc/pki/tls/certs/ca-bundle.crt, /etc/ssl/ca-bundle.pem, /etc/ssl/cert.pem) |
 | `AWL_MODEL` | first model the server lists | model id |
 | `AWL_KEY` | Local AI gateway key | bearer token |
 | `AWL_MAX_STEPS` | 200 | model calls per prompt |
