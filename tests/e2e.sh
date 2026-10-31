@@ -42,6 +42,29 @@ out=$(cd "$W" && "$AWL" -p hi 2>&1)
 [ "$out" = "héllo ✓ there" ] && ok "stream with SSE comment lines" || bad "stream with SSE comment lines" "$out"
 stop
 
+# 1b. https (std.crypto.tls, no libc) against a self-signed CA, and a host name from /etc/hosts
+if command -v openssl >/dev/null; then
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$W/k.pem" -out "$W/c.pem" \
+    -subj /CN=localhost -addext subjectAltName=DNS:localhost -days 2 >/dev/null 2>&1
+  serve "$W/hi.json" --cert "$W/c.pem" --key "$W/k.pem" --split 3
+  out=$(cd "$W" && AWL_URL=https://localhost:$PORT AWL_CA_FILE=$W/c.pem "$AWL" -p hi 2>&1)
+  [ "$out" = "héllo ✓ there" ] && ok "https stream (TLS 1.3, self-signed CA through AWL_CA_FILE)" || bad "https stream" "$out"
+  out=$(cd "$W" && AWL_URL=https://localhost:$PORT AWL_CA_FILE=/nonexistent "$AWL" -p hi 2>&1)
+  rc=$?
+  case "$out" in *TLS*|*CA*) [ $rc -ne 0 ] && ok "https refused without a trusted CA (exit $rc)" || bad "https untrusted: exit 0" "$out" ;; *) bad "https untrusted" "$out" ;; esac
+  stop
+else
+  echo "skip https (no openssl)"
+fi
+if getent hosts awl-e2e.test >/dev/null 2>&1; then
+  serve "$W/hi.json" --split 2
+  out=$(cd "$W" && AWL_URL=http://awl-e2e.test:$PORT "$AWL" -p hi 2>&1)
+  [ "$out" = "héllo ✓ there" ] && ok "host name in AWL_URL resolved through /etc/hosts" || bad "hosts resolution" "$out"
+  stop
+else
+  echo "skip host-name URL (no awl-e2e.test in /etc/hosts; docker run --add-host awl-e2e.test:127.0.0.1)"
+fi
+
 # 2. tool loop: read -> edit + grep -> done
 mkdir -p "$W/proj"
 echo "hello world" >"$W/proj/hello.txt"
