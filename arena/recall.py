@@ -8,9 +8,11 @@ For each mode and question, awl resumes a copy of SESSION with a window of --ctx
 tells it so), which forces the reset before the first request; the question is the new prompt.
 retrieval = awl's default (fresh context + the session view to grep); summary = AWL_COMPACT=summary
 (the model writes a summary first). A question scores when its answer appears verbatim in the reply
-(whitespace and quotes normalized). Before any model call, a dry run against tests/fake_sse.py shows
-what the first request keeps after the reset (the kept tail is the same in both modes); a question
-whose answer is still in it was not dropped: reported as "leak" and not scored. Prints recall, wall time, tokens and cost per mode.
+(whitespace and quotes normalized). Before any model call, dry runs against tests/fake_sse.py show
+(1) what the first request keeps after the reset (the kept tail is the same in both modes): a question
+whose answer is still in it was not dropped, "leak", not scored; and (2) whether the summary request
+contains the answer at all ("seen"): compaction shows the summarizer only message 0 and the newest
+messages that fit in ~2x the window, so recall is reported separately for seen and unseen answers. Prints recall, wall time, tokens and cost per mode.
 QUESTIONS: [{"q": "...", "a": "exact answer"}]. arena/recall/make_session.py writes a synthetic pair.
 """
 import json
@@ -52,8 +54,9 @@ def run_awl(awl, session, prompt, url, extra, timeout=900):
     return p, time.time() - t0
 
 
-def kept(awl, session, prompts, ctx):
-    """The first request's messages after the reset, per prompt (no model: tests/fake_sse.py)."""
+def kept(awl, session, prompts, ctx, extra=None):
+    """The first request's text after the reset, per prompt (no model: tests/fake_sse.py). With
+    AWL_COMPACT=summary in `extra` that first request is the summary request."""
     w = tempfile.mkdtemp(prefix="awl-recall-dry-")
     json.dump([{"content": "ok"}], open(os.path.join(w, "s.json"), "w"))
     out = []
@@ -66,7 +69,7 @@ def kept(awl, session, prompts, ctx):
                                    stdout=subprocess.PIPE)
             try:
                 port = srv.stdout.readline().decode().strip()
-                run_awl(awl, session, pr, f"http://127.0.0.1:{port}", {"AWL_KEY": "dry", "AWL_MODEL": "fake-model"}, timeout=120)
+                run_awl(awl, session, pr, f"http://127.0.0.1:{port}", dict({"AWL_KEY": "dry", "AWL_MODEL": "fake-model"}, **(extra or {})), timeout=120)
             finally:
                 srv.kill()
             msgs = json.loads(open(log).readline())["messages"]
@@ -97,7 +100,9 @@ def main():
     prompts = [q["q"] + " Answer with the exact text from the earlier work, quoted." for q in qs]
     dry = kept(awl, session, prompts, ctx)
     leaks = [norm(q["a"]) in norm(d) for q, d in zip(qs, dry)]
-    print(f"dry run: {sum(leaks)} of {len(qs)} answers still in context after the reset (not scored)", flush=True)
+    seen = [norm(q["a"]) in norm(d) for q, d in zip(qs, kept(awl, session, prompts, ctx, {"AWL_COMPACT": "summary"}))]
+    print(f"dry run: {sum(leaks)} of {len(qs)} answers still in context after the reset (not scored); "
+          f"{sum(seen)} of {len(qs)} in the summary request", flush=True)
     proxy = subprocess.Popen([sys.executable, os.path.join(ROOT, "proxy.py"), "--upstream", upstream, "--out", os.path.join(out, "proxy")] + pargs,
                              stdout=subprocess.PIPE)
     rows = []
@@ -121,7 +126,7 @@ def main():
                     reqs = [json.loads(l) for l in open(pf)] if os.path.exists(pf) else []
                     leak = leaks[i]
                     hit = norm(q["a"]) in norm(p.stdout)
-                    rows.append({"mode": mode, "q": i, "rep": rep, "hit": hit, "leak": leak, "wall_s": round(wall, 1), "requests": len(reqs),
+                    rows.append({"mode": mode, "q": i, "rep": rep, "hit": hit, "leak": leak, "seen": seen[i], "wall_s": round(wall, 1), "requests": len(reqs),
                                  "prompt": sum(r.get("prompt_tokens", 0) or 0 for r in reqs), "completion": sum(r.get("completion_tokens", 0) or 0 for r in reqs),
                                  "cost": sum(r.get("cost", 0) or 0 for r in reqs), "reply": p.stdout.strip()[-300:], "rc": p.returncode})
                     print(f"{mode:9} q{i:<2} {'HIT ' if hit else 'miss'}{' leak' if leak else ''}  {wall:6.1f} s  {rows[-1]['requests']} req", flush=True)
@@ -131,11 +136,13 @@ def main():
         for r in rows:
             f.write(json.dumps(r) + "\n")
     print(f"\nwindow {ctx} tokens, model {model}, {len(qs)} questions x {reps}; rows in {out}/rows.jsonl")
-    print(f"{'mode':10} {'recall':>8} {'leaks':>6} {'wall s':>8} {'req':>5} {'prompt tok':>11} {'compl tok':>10} {'cost $':>8}")
+    print(f"{'mode':10} {'recall':>8} {'seen':>7} {'unseen':>7} {'leaks':>6} {'wall s':>8} {'req':>5} {'prompt tok':>11} {'compl tok':>10} {'cost $':>8}")
     for mode in modes:
         rs = [r for r in rows if r["mode"] == mode]
         sc = [r for r in rs if not r["leak"]]
-        print(f"{mode:10} {sum(r['hit'] for r in sc):>3}/{len(sc):<4} {len(rs) - len(sc):>6} {sum(r['wall_s'] for r in rs) / max(len(rs), 1):>8.1f} "
+        se, un = [r for r in sc if r["seen"]], [r for r in sc if not r["seen"]]
+        print(f"{mode:10} {sum(r['hit'] for r in sc):>3}/{len(sc):<4} {sum(r['hit'] for r in se):>3}/{len(se):<3} {sum(r['hit'] for r in un):>3}/{len(un):<3} "
+              f"{len(rs) - len(sc):>6} {sum(r['wall_s'] for r in rs) / max(len(rs), 1):>8.1f} "
               f"{sum(r['requests'] for r in rs) / max(len(rs), 1):>5.1f} {sum(r['prompt'] for r in rs) // max(len(rs), 1):>11} "
               f"{sum(r['completion'] for r in rs) // max(len(rs), 1):>10} {sum(r['cost'] for r in rs):>8.4f}")
 
