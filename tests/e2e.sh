@@ -51,7 +51,13 @@ if command -v openssl >/dev/null; then
   [ "$out" = "héllo ✓ there" ] && ok "https stream (TLS 1.3, self-signed CA through AWL_CA_FILE)" || bad "https stream" "$out"
   out=$(cd "$W" && AWL_URL=https://localhost:$PORT AWL_CA_FILE=/nonexistent "$AWL" -p hi 2>&1)
   rc=$?
-  case "$out" in *TLS*|*CA*) [ $rc -ne 0 ] && ok "https refused without a trusted CA (exit $rc)" || bad "https untrusted: exit 0" "$out" ;; *) bad "https untrusted" "$out" ;; esac
+  case "$out" in *TLS*|*CA*) [ $rc -ne 0 ] && ok "https refused without a CA bundle (exit $rc)" || bad "https no bundle: exit 0" "$out" ;; *) bad "https no bundle" "$out" ;; esac
+  # the real check: the system bundle is loaded and must not trust the self-signed server
+  if [ -r /etc/ssl/certs/ca-certificates.crt ] || [ -r /etc/pki/tls/certs/ca-bundle.crt ]; then
+    out=$(cd "$W" && AWL_URL=https://localhost:$PORT "$AWL" -p hi 2>&1)
+    rc=$?
+    case "$out" in *TlsCertificateNotVerified*) [ $rc -eq 2 ] && ok "https: a self-signed server is refused against the system bundle" || bad "https self-signed: exit $rc" "$out" ;; *) bad "https self-signed not refused" "$out" ;; esac
+  fi
   stop
 else
   echo "skip https (no openssl)"
