@@ -2,6 +2,7 @@
 //! The conversation is kept as pre-serialized JSON, so a request is three
 //! writes to the socket (head, messages, tail) with no rebuild.
 const std = @import("std");
+const linux = std.os.linux;
 const sys = @import("sys.zig");
 const llm = @import("llm.zig");
 const http = @import("http.zig");
@@ -47,8 +48,9 @@ pub fn init(cwd: []const u8) void {
     // which wrote about twice the tokens per turn for the same work. AWL_REASONING=off
     // sends nothing; a server that rejects the field gets the request again without it.
     const mode = sys.getenv("AWL_CTX_MODE") orelse "compact";
-    ctx_mode = if (std.mem.eql(u8, mode, "fresh")) .fresh else .compact;
+    ctx_mode = if (std.mem.eql(u8, mode, "fresh")) .fresh else if (std.mem.eql(u8, mode, "async")) .@"async" else .compact;
     session.view_on = ctx_mode != .compact; // compact never points the model at the session
+    if (sys.getenv("AWL_ASYNC_WAIT")) |v| async_wait_ms = std.fmt.parseInt(i32, v, 10) catch async_wait_ms; // ms; tests
     const effort = sys.getenv("AWL_REASONING") orelse "medium";
     if (effort.len > 0 and !std.mem.eql(u8, effort, "off")) {
         head.add(",\"reasoning_effort\":");
@@ -184,6 +186,7 @@ fn add(json: []const u8, rec: session.Rec) void {
 }
 
 pub fn clear() void {
+    asyncDrop();
     msgs.reset();
     n_msgs = 0;
     ctx_tokens = 0;
@@ -325,6 +328,7 @@ pub fn restartSessionAt(i: usize) void {
 /// Drop message `i` and everything after it.
 pub fn rewind(i: usize) void {
     if (i >= n_msgs or i >= max_index) return;
+    asyncDrop();
     msgs.truncate(offs[i]);
     n_msgs = i;
     var k: usize = 0;
@@ -380,7 +384,7 @@ pub fn run() Outcome {
             ui.userEcho(text);
             addUser(text);
         };
-        if (step > 0 or ctx_mode != .compact) _ = compact(false); // fresh: also at step 0 (a resumed session may already be over the window)
+        if (step > 0 or ctx_mode == .fresh) _ = compact(false); // fresh: also at step 0 (a resumed session may already be over the window)
         ui.liveStart();
         @import("agents.zig").progress(step + 1);
         const t0 = sys.nowNs();
@@ -451,7 +455,7 @@ pub fn run() Outcome {
                 out.add(std.fmt.bufPrint(&nb, wrap_note, .{max_steps - step - 1}) catch "");
                 ui.note("{d} steps left (AWL_MAX_STEPS); the model was told to wrap up", .{max_steps - step - 1});
             }
-            if (ctx_mode != .compact and !std.mem.eql(u8, c.name.get(), "todo")) budget(&out, sys.nowNs() - run_t0); // after the loop detector: the time differs every call
+            if (ctx_mode == .fresh and !std.mem.eql(u8, c.name.get(), "todo")) budget(&out, sys.nowNs() - run_t0); // after the loop detector: the time differs every call
             pushResult(c, step, i, out.items());
         }
         if (turn.overflow) ui.note("reply stopped after {d} tool calls; the model was told", .{llm.max_calls});
@@ -672,8 +676,8 @@ fn tooLong() bool {
     return false;
 }
 
-const compact_instructions =
-    \\The conversation below is about to exceed the context window. Write a summary that lets you
+const summary_ask =
+    \\Write a summary that lets you
     \\continue the task without it. Use exactly these sections:
     \\## Goal
     \\## Constraints & Preferences
@@ -685,10 +689,10 @@ const compact_instructions =
     \\## Next Steps
     \\## Critical Context
     \\Be concrete: file names, function names, commands, error messages, values. Do not call tools.
-    \\
-    \\<conversation>
-    \\
 ;
+const compact_instructions = "The conversation below is about to exceed the context window. " ++ summary_ask ++ "\n\n<conversation>\n";
+/// async: the request is the last step's request plus this one message, so the server's prefix cache covers all of it.
+const async_instructions = "[awl: the conversation above is about to exceed the context window.] " ++ summary_ask;
 
 /// One message as plain text for the summary request: "[User]: …", "[Assistant]: …",
 /// "[Assistant tool calls]: name(args)", "[Tool result]: …". Long parts are cut.
@@ -753,8 +757,11 @@ test "compaction transcript: turn labels inside content are defused" {
 /// What happens when the context fills up (AWL_CTX_MODE). compact (default): elide old tool output at
 /// 60%, a model-written summary at 80%. fresh: the same elision, but each elided output names its lines
 /// in the session view, every tool result carries the time and context used, and at 80% a fresh
-/// context points at the view (no summary request). The loser goes once the arena A/B decides.
-pub const CtxMode = enum { compact, fresh };
+/// context points at the view (no summary request). async: elision as fresh; at 70% a forked child asks
+/// for the summary as a continuation of the last request (a prefix-cache hit) while the run goes on; at
+/// 80% the summary and every message since it started replace the history (A's path if it is not there).
+/// The loser goes once the arena A/B decides.
+pub const CtxMode = enum { compact, fresh, @"async" };
 pub var ctx_mode: CtxMode = .compact;
 
 const reset_note =
@@ -770,11 +777,21 @@ const reset_note =
 /// summary the model writes from the conversation serialized to text instead.
 fn compact(force: bool) bool {
     if (n_msgs < 4 or n_msgs > max_index) return false;
+    if (ctx_mode == .@"async" and !force) asyncStart();
     if (!force and (ctx_limit == 0 or ctx_tokens * 10 < ctx_limit * 8)) return false;
+    // async: the background summary, when it is there; any compaction makes an older one stale
+    var asum = Buf.init(1 << 20);
+    defer asum.free();
+    const from: ?usize = if (ctx_mode == .@"async" and !force) switch (asyncTake(&asum)) {
+        .ok => |f| f,
+        .cancel => return false,
+        .none => null,
+    } else null;
+    asyncDrop();
     const retrieve = ctx_mode == .fresh and session.view_path.len > 0;
     if (retrieve)
         ui.note("context reset: {d}k of {d}k tokens; earlier work stays in {s} for the model to search", .{ ctx_tokens / 1000, ctx_limit / 1000, session.view_path })
-    else
+    else if (from == null)
         ui.note("context {d}k of {d}k: summarizing earlier work to continue", .{ ctx_tokens / 1000, ctx_limit / 1000 });
     const items = msgs.items();
     const msgAt = struct {
@@ -788,8 +805,8 @@ fn compact(force: bool) bool {
     _ = region.extend(0);
     var fba = std.heap.FixedBufferAllocator.init(region.base.?[0..region.cap]);
 
-    var summary: []const u8 = "";
-    if (!retrieve) {
+    var summary: []const u8 = std.mem.trim(u8, asum.items(), " \t\r\n");
+    if (!retrieve and from == null) {
         // Transcript: message 0 (the task), then as many of the newest messages as fit.
         const budget_c: usize = if (ctx_limit > 0) @intCast(ctx_limit * 2) else msgs.len / 3; // ~half the window in chars
         var tr = Buf.init(1 << 30);
@@ -847,17 +864,19 @@ fn compact(force: bool) bool {
         if (std.json.parseFromSliceLeaky(session.Json, fba.allocator(), m, .{ .ignore_unknown_fields = true })) |t| todo_text = if (t.content) |c| c.v else "" else |_| {}
         break;
     }
-    // Keep the newest ~25% of the window (or of the current history when the window is unknown).
-    const keep_bytes: usize = if (ctx_limit > 0) @intCast(ctx_limit) else msgs.len / 4;
+    // Keep the newest ~25% of the window (or of the current history when the window is unknown);
+    // async: every message since the summary started.
+    const keep_bytes: usize = if (from != null) 0 else if (ctx_limit > 0) @intCast(ctx_limit) else msgs.len / 4;
     var k = n_msgs;
     var kept: usize = 0;
-    while (k > 1) {
+    while (from == null and k > 1) {
         const m = msgAt(items, k - 1);
         if (kept + m.len > keep_bytes) break;
         kept += m.len + 1;
         k -= 1;
     }
-    while (k < n_msgs and !std.mem.startsWith(u8, msgAt(items, k), "{\"role\":\"assistant\"")) k += 1;
+    while (from == null and k < n_msgs and !std.mem.startsWith(u8, msgAt(items, k), "{\"role\":\"assistant\"")) k += 1;
+    if (from) |f| k = @max(f, 1);
     // The newest user message, when it is among the dropped ones (a long turn in a TUI session):
     // the model must still know what it is doing. A summary covered it; a reset carries it.
     var carried: []const u8 = "";
@@ -901,6 +920,8 @@ fn compact(force: bool) bool {
         text.add("\n\n[The user's newest message, from before the reset:]\n");
         text.add(carried);
     }
+    if (ctx_mode == .@"async" and session.view_path.len > 0)
+        text.print("\n\n[Every earlier message is in the plain-text log {s}, unchanged: grep it for exact errors, paths, values and outputs the summary left out, then read around a hit with offset and limit.]", .{session.view_path});
     var sm = Buf.init(text.len * 6 + 64);
     defer sm.free();
     sm.add("{\"role\":\"user\",\"content\":");
@@ -947,9 +968,120 @@ fn compact(force: bool) bool {
     ctx_tokens = if (before > 0) ctx_tokens * msgs.len / before else 0;
     if (retrieve)
         ui.note("fresh context: {d} older messages dropped, searchable in the session view (~{d}k tokens now)", .{ dropped, ctx_tokens / 1000 })
+    else if (from != null)
+        ui.note("summary swapped in: {d} older messages replaced, {d} newer kept (~{d}k tokens now)", .{ dropped, n_msgs - 2, ctx_tokens / 1000 })
     else
         ui.note("compacted: {d} older messages replaced by a summary (~{d}k tokens now)", .{ dropped, ctx_tokens / 1000 });
     return true;
+}
+
+/// async: the summary being written in the background. `from`: the first message it does not cover.
+/// `failed`: it did not work this time; A's path at 80%, and no new try until the context drops below 70%.
+const Pending = struct { pid: linux.pid_t = 0, pidfd: i32 = -1, out: i32 = -1, from: usize = 0, failed: bool = false };
+var pend: Pending = .{};
+/// How long the 80% step waits for a summary still being written (the server may serve one request at a time).
+pub var async_wait_ms: i32 = 120_000;
+
+/// At 70%: fork a child that sends the last step's request plus one message asking for a summary,
+/// byte for byte the same up to there (the server's prefix cache covers it), and writes the summary to a
+/// memfd. The run goes on meanwhile.
+fn asyncStart() void {
+    if (ctx_limit == 0 or ctx_tokens * 10 < ctx_limit * 7) {
+        pend.failed = false;
+        return;
+    }
+    if (pend.pid != 0 or pend.failed) return;
+    const mfd_rc = linux.memfd_create("awl-summary", linux.MFD.CLOEXEC);
+    if (linux.errno(mfd_rc) != .SUCCESS) {
+        pend.failed = true;
+        return;
+    }
+    const mfd: i32 = @intCast(mfd_rc);
+    var tail = Buf.init(async_instructions.len * 2 + 128);
+    defer tail.free();
+    tail.add(",{\"role\":\"user\",\"content\":");
+    bufm.str(&tail, async_instructions);
+    tail.add(if (thinking) "}]}" else "}],\"chat_template_kwargs\":{\"enable_thinking\":false}}");
+    const rc = linux.fork();
+    if (linux.errno(rc) != .SUCCESS) {
+        sys.close(mfd);
+        pend.failed = true;
+        return;
+    }
+    if (rc == 0) { // the child: nothing on the terminal, nothing in the session file
+        _ = linux.prctl(@intFromEnum(linux.PR.SET_PDEATHSIG), @intFromEnum(linux.SIG.KILL), 0, 0, 0);
+        const devnull = linux.open("/dev/null", .{ .ACCMODE = .RDWR }, 0);
+        if (linux.errno(devnull) == .SUCCESS) for ([_]i32{ 0, 1, 2 }) |f| {
+            _ = linux.dup2(@intCast(devnull), f);
+        };
+        ui.quiet = true;
+        sys.tick = null;
+        session.fd = -1;
+        // room for the summary from the server's own count of the last step (fitCap's bytes/3 guess
+        // overcounts; at a small window it left the floor of 1024, all spent on reasoning)
+        if (cap_max > 0) cap_max = @intCast(@min(cap_max, @max(1024, ctx_limit -| (ctx_tokens + ctx_tokens / 8 + 300))));
+        ctx_limit = 0;
+        streamRetrying(msgs.items(), tail.items()) catch linux.exit_group(2);
+        const sm = std.mem.trim(u8, turn.content.items(), " \t\r\n");
+        if (sm.len < 20 or turn.n > 0) linux.exit_group(3);
+        sys.writeAll(mfd, sm) catch linux.exit_group(4);
+        linux.exit_group(0);
+    }
+    const pfd = linux.pidfd_open(@intCast(rc), 0);
+    pend = .{ .pid = @intCast(rc), .pidfd = if (linux.errno(pfd) == .SUCCESS) @intCast(pfd) else -1, .out = mfd, .from = n_msgs };
+    ui.note("context {d}k of {d}k: writing a summary in the background", .{ ctx_tokens / 1000, ctx_limit / 1000 });
+}
+
+const Taken = union(enum) { ok: usize, none, cancel };
+
+/// At 80%: the background summary into `dst_buf` and the first message it does not cover. Waits up to
+/// async_wait_ms for one still being written; none when there is none, it failed or it took too long.
+fn asyncTake(dst_buf: *Buf) Taken {
+    if (pend.pid == 0) return .none;
+    if (pend.pidfd >= 0) {
+        const done = http.wait(pend.pidfd, async_wait_ms) catch |e| {
+            if (e == error.Cancel) { // Ctrl-C: stop it, and leave the signal for the run to see
+                asyncDrop();
+                _ = linux.kill(linux.getpid(), .INT);
+                return .cancel;
+            }
+            return .none;
+        };
+        if (!done) {
+            ui.note("the background summary is not done after {d} s; summarizing now instead", .{@divTrunc(async_wait_ms, 1000)});
+            return .none;
+        }
+    }
+    var status: u32 = 0;
+    if (linux.errno(linux.wait4(pend.pid, &status, 0, null)) != .SUCCESS) return .none;
+    pend.pid = 0;
+    if (status != 0) {
+        ui.note("the background summary failed (status {d}); summarizing now instead", .{status >> 8});
+        return .none;
+    }
+    var off: i64 = 0;
+    while (true) {
+        const dst = dst_buf.extend(1 << 16);
+        const n = linux.pread(pend.out, dst.ptr, dst.len, off);
+        const got: usize = if (linux.errno(n) == .SUCCESS) n else 0;
+        dst_buf.truncate(dst_buf.len - (dst.len - got));
+        if (got == 0) break;
+        off += @intCast(got);
+    }
+    if (dst_buf.len < 20) return .none;
+    return .{ .ok = pend.from };
+}
+
+/// Forget the background summary (the history it covers changed, or it was used): stop it if it runs.
+fn asyncDrop() void {
+    if (pend.pid != 0) {
+        _ = linux.kill(pend.pid, .KILL);
+        var status: u32 = 0;
+        _ = linux.wait4(pend.pid, &status, 0, null);
+    }
+    if (pend.pidfd >= 0) sys.close(pend.pidfd);
+    if (pend.out >= 0) sys.close(pend.out);
+    pend = .{ .failed = pend.failed };
 }
 
 fn callId(c: *const llm.Call, step: usize, i: usize, b: []u8) []const u8 {

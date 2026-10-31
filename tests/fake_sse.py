@@ -9,6 +9,9 @@ SCRIPT is a list of turns, served in order (the last one repeats):
 Prints the bound port on stdout, then serves until killed.
 Each request body is appended to --log as one JSON line, plus "_path" and "_auth" (the
 Authorization header). --comments 1 interleaves OpenRouter-style ": OPENROUTER PROCESSING" lines.
+--summary TURN.json: a request whose last message asks for awl's background summary (AWL_CTX_MODE=async)
+gets this turn, outside the script order (it runs while the script goes on). --raw 1 also logs the
+request body as sent ("_raw").
 """
 import json
 import re
@@ -19,11 +22,12 @@ import time
 
 args = sys.argv[1:]
 script = json.load(open(args[0]))
-opt = {"--port": "0", "--log": "", "--split": "0", "--mode": "chunked", "--ctx": "0", "--comments": "0", "--models": ""}
+opt = {"--port": "0", "--log": "", "--split": "0", "--mode": "chunked", "--ctx": "0", "--comments": "0", "--models": "", "--summary": "", "--raw": "0"}
 for i in range(1, len(args), 2):
     opt[args[i]] = args[i + 1]
 split = int(opt["--split"])
 mode = opt["--mode"]
+summary_turn = json.load(open(opt["--summary"])) if opt["--summary"] else None
 served = 0
 lock = threading.Lock()
 
@@ -102,12 +106,18 @@ def handle(conn):
             conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
             return
         req = json.loads(rest)
+        last = (req.get("messages") or [{}])[-1]
+        is_summary = summary_turn is not None and last.get("role") == "user" and str(last.get("content", "")).startswith("[awl: the conversation above")
         with lock:
-            turn = fill(script[min(served, len(script) - 1)], rest.decode("utf-8", "replace"))
-            served += 1
+            if is_summary:
+                turn = summary_turn
+            else:
+                turn = fill(script[min(served, len(script) - 1)], rest.decode("utf-8", "replace"))
+                served += 1
             if opt["--log"]:
+                extra = {"_raw": rest.decode("utf-8", "replace")} if int(opt["--raw"]) else {}
                 with open(opt["--log"], "a") as f:
-                    f.write(json.dumps(dict(req, _path=path, _auth=hdrs.get("authorization", ""))) + "\n")
+                    f.write(json.dumps(dict(req, _path=path, _auth=hdrs.get("authorization", ""), **extra)) + "\n")
         if turn.get("delay"):
             time.sleep(turn["delay"])
         status = turn.get("status", 200)

@@ -194,6 +194,11 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
   fresh context with no model request: the task, one note naming the view, the checklist, the files
   read and changed, the newest user message, and the newest messages. A resumed session that is
   already over the window does this before its first request.
+- `AWL_CTX_MODE=async` (also being measured): the same view and elision markers; at 70% a background
+  process asks for the summary as a continuation of the last request (the server's prefix cache covers
+  it) while the run goes on; at 80% the summary, a line naming the view, and every message since the
+  summary started replace the history. A summary that failed, or is not done 120 s after 80%
+  (`AWL_ASYNC_WAIT`, ms), falls back to the default summary.
 - Transient model errors (connection loss, 408/425/429/5xx) are retried with backoff; Ctrl-C stops a wait.
 - Commands the model runs never see `AWL_*` variables (so not the API key).
 
@@ -206,7 +211,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_KEY` | Local AI gateway key | bearer token |
 | `AWL_MAX_STEPS` | 200 | model calls per prompt |
 | `AWL_RETRIES` | 5 | retries for transient model errors |
-| `AWL_CTX_MODE` | compact | when the context fills: `compact` (summary) or `fresh` (fresh context + session view; arena A/B) |
+| `AWL_CTX_MODE` | compact | when the context fills: `compact` (summary), `fresh` (fresh context + session view) or `async` (background summary); arena A/B |
 | `AWL_REASONING` | `medium` | `reasoning_effort` to send (`low`, `medium`, `xhigh`, ...; `off` sends none). Local AI's Qwen defaults to xhigh, about twice the tokens per turn; dropped automatically if a server rejects it |
 | `AWL_MAX_TOKENS` | `65536` | output cap per reply (`max_tokens`; `0` sends none). Generous so heavy thinkers are not cut off. A reply cut off before any tool call gets a note asking the model to continue; one cut off inside a tool call runs nothing and asks for the call again |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |

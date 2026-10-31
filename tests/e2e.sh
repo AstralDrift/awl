@@ -682,6 +682,36 @@ assert len(listing) == 1 and listing[0].startswith("view-"), listing  # nothing 
 EOF
 stop
 
+# 8f. AWL_CTX_MODE=async: at 70% a background summary request (the step request + one message, byte for
+# byte), the run goes on; at 80% the summary and every later message replace the history. A failed or late
+# background summary falls back to A's serialized summary, and the run still finishes.
+printf 'aa\n' >"$W/a.txt"; printf 'bb\n' >"$W/b.txt"
+for kind in swap fail late; do
+python3 - "$W/as.json" "$kind" <<'EOF'
+import json, sys
+u = lambda p: {"prompt_tokens": p, "completion_tokens": 5}
+t = [{"tool_calls": [{"name": "read", "arguments": {"path": "a.txt"}}], "usage": u(400)},
+     {"tool_calls": [{"name": "read", "arguments": {"path": "b.txt"}}], "usage": u(600)},
+     {"tool_calls": [{"name": "bash", "arguments": {"command": "echo PRE"}}], "usage": u(1060)},   # -> 71%: summary starts
+     {"tool_calls": [{"name": "bash", "arguments": {"command": "echo MID1"}}], "usage": u(1100)},
+     {"tool_calls": [{"name": "bash", "arguments": {"command": "echo MID2"}}], "usage": u(1200)}]  # -> 80%: swap
+if sys.argv[2] != "swap":
+    t.append({"content": "## Goal\nA-SUMMARY port it\n## Next Steps\ngo on"})  # A's serialized summary request
+t.append({"content": "done"})
+json.dump(t, open(sys.argv[1], "w"))
+EOF
+case $kind in
+  swap) echo '{"content": "## Goal\nSUMMARY-FROM-BACKGROUND port it\n## Next Steps\ngo on", "delay": 0.3}' >"$W/sum.json" ;;
+  fail) echo '{"status": 400, "content": "bad request"}' >"$W/sum.json" ;;
+  late) echo '{"content": "## Goal\nlate", "delay": 3}' >"$W/sum.json" ;;
+esac
+serve "$W/as.json" --ctx 1500 --summary "$W/sum.json" --raw 1
+out=$(cd "$W" && AWL_CTX_MODE=async AWL_ASYNC_WAIT=400 "$AWL" -p "go port it" 2>"$W/o"); rc=$?
+check=swap; [ $kind = swap ] || check=fallback
+if [ $rc = 0 ] && [ "$out" = done ] && python3 "$HERE/async_check.py" "$LOG" $check 2>"$W/o2"; then ok "async $kind: $(grep -o 'summary swapped in\|summarizing earlier work' "$W/o" | head -1)"; else bad "async $kind" "rc=$rc out=$out $(tail -4 "$W/o2") $(tail -3 "$W/o")"; fi
+stop
+done
+
 # 9. interactive TUI through a pty
 python3 "$HERE/tui.py" "$AWL" >"$W/tui.out" 2>&1 && ok "tui ($(grep -c '^ok' "$W/tui.out") checks)" || bad "tui" "$(grep FAIL "$W/tui.out")"
 
