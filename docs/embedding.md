@@ -51,6 +51,7 @@ awl reads only its environment; it has no config file. An embedder sets:
 | `AWL_MODEL` | Model name. Unset, awl uses the first model `/v1/models` lists. |
 | `AWL_MODE` | `auto` (no approvals), `ask`, or `plan` (files read-only). Under `-p` nobody can approve, so `ask` behaves like `auto` except for the refusals below. |
 | `AWL_MAX_STEPS` | Model replies per run (default 200). |
+| `AWL_NETWORK` | `off`: a command that asks for the network (`network: true`) is refused at once, with `not run: AWL_NETWORK=off: …` as its result, and `AWL_SANDBOX_NET=on` is ignored. The model is told in its system prompt. Any other value, or unset: the default (no network for commands; under `-p` a `network: true` command is refused because nobody can approve it). |
 | `HOME` | Where awl looks for the user's files (below). |
 | `XDG_STATE_HOME` | Session files go to `$XDG_STATE_HOME/awl/sessions/`, else `$HOME/.local/state/awl/sessions/`. |
 | `XDG_CONFIG_HOME` | User config, else `$HOME/.config`. |
@@ -61,6 +62,10 @@ The model's commands get awl's environment minus every variable that starts with
 `awl -h` lists the other settings. Leave `AWL_SANDBOX` unset: awl then runs every command in its own
 bubblewrap sandbox with no network, and refuses commands when `/usr/bin/bwrap` is missing or cannot
 start.
+
+`AWL_NETWORK=off` is a policy on what commands ask for. Commands are actually kept off the network by
+awl's sandbox (bubblewrap with its own network namespace). With `AWL_SANDBOX=off` there is no sandbox,
+and a command that does not say it needs the network can still reach it.
 
 ### What awl reads under `HOME`
 
@@ -123,7 +128,7 @@ A call that did not run has one of these results instead. Each opening is stable
 
 | Result starts with | Cause |
 |---|---|
-| `not run: ` | Refused before it started. Under `-p`: `not run: the network is off in the sandbox and only the user can approve…` for `network: true`; `not run: the sandbox did not start: …` or `not run: awl runs the model's commands in a bubblewrap sandbox and /usr/bin/bwrap is missing…`. |
+| `not run: ` | Refused before it started. Under `-p`: `not run: the network is off in the sandbox and only the user can approve…` or, with `AWL_NETWORK=off`, `not run: AWL_NETWORK=off: …` for `network: true`; `not run: the sandbox did not start: …` or `not run: awl runs the model's commands in a bubblewrap sandbox and /usr/bin/bwrap is missing…`. |
 | `[not run: ` | The reply was cut off by the token limit inside this call. |
 | `[skipped: ` | An earlier call in the same reply was interrupted. |
 | `not written: ` | `write`/`edit` outside the sandbox's writable paths, or to a guarded file (`.git/config`, `.git/hooks`, `AGENTS.md`, `.agents`) with nobody to approve. |

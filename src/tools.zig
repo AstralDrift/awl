@@ -279,6 +279,10 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
     } else if (eq(u8, name, "bash")) {
         const p = std.json.parseFromSliceLeaky(struct { command: Str, timeout: ?Int(u32) = null, background: bool = false, network: bool = false }, a, args, opts) catch return badArgs(out, name, args, &r);
         if (p.background) sum(&r, name, "&{s}", .{p.command.v}) else sum(&r, name, "{s}", .{p.command.v});
+        if (p.network and sandbox.no_net) {
+            out.add("not run: AWL_NETWORK=off: commands cannot use the network in this session, and nobody can approve it. Do without it: use what is installed and in the project.");
+            return r;
+        }
         const online = p.network and sandbox.on and !sandbox.net;
         if (online) {
             if (p.background) {

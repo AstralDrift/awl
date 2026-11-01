@@ -176,7 +176,8 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
   background is reachable from the next command) but nothing beyond it. When the model needs the
   internet it sets `network: true` on one bash call; awl shows the command and asks `allow? y/n` in every
   mode, for that call only. With no terminal (`awl -p`) the answer is no. `AWL_SANDBOX_NET=on` gives
-  every command the network without asking.
+  every command the network without asking. `AWL_NETWORK=off` refuses every such call without asking
+  and overrides `AWL_SANDBOX_NET=on` (for sandboxes and CI where nobody should be asked).
 - write/edit follow the same write rule after resolving symlinks, and ask before every change to `.git`,
   `AGENTS.md` or `.agents/`; read refuses the hidden paths. Without `/usr/bin/bwrap` the model's commands
   are refused (install bubblewrap); `AWL_SANDBOX=off` turns all of it off. Your own `!cmd` is never

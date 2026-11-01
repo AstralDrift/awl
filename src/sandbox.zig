@@ -17,6 +17,7 @@ pub var on = false; // commands run in the sandbox
 pub var missing = false; // wanted but no bwrap: the model's commands are refused
 pub var enforce = false; // path rules apply (everything but AWL_SANDBOX=off)
 pub var net = false; // AWL_SANDBOX_NET=on: the session sandbox keeps the host network
+pub var no_net = false; // AWL_NETWORK=off: commands never get the network, not even with approval
 var root_b: [4096]u8 = undefined;
 pub var root: []const u8 = "";
 var home: []const u8 = "";
@@ -36,7 +37,8 @@ pub fn setup(project_root: []const u8) void {
     enforce = !std.mem.eql(u8, sys.getenv("AWL_SANDBOX") orelse "on", "off");
     on = enforce and sys.exists(bwrap);
     missing = enforce and !on;
-    net = std.mem.eql(u8, sys.getenv("AWL_SANDBOX_NET") orelse "off", "on");
+    no_net = std.mem.eql(u8, sys.getenv("AWL_NETWORK") orelse "", "off");
+    net = !no_net and std.mem.eql(u8, sys.getenv("AWL_SANDBOX_NET") orelse "off", "on");
     const n = @min(project_root.len, root_b.len);
     @memcpy(root_b[0..n], project_root[0..n]);
     root = root_b[0..n];
@@ -51,7 +53,7 @@ pub fn setup(project_root: []const u8) void {
 pub fn describe(buf: []u8) []const u8 {
     if (missing) return "no sandbox: install bubblewrap to let the model run commands (or AWL_SANDBOX=off)";
     if (!on) return "sandbox off";
-    return std.fmt.bufPrint(buf, "sandbox: writes only to the project, /tmp and caches; network {s}", .{if (net) "on" else "off (bash network: true asks the user for one command)"}) catch "sandbox on";
+    return std.fmt.bufPrint(buf, "sandbox: writes only to the project, /tmp and caches; network {s}", .{if (net) "on" else if (no_net) "off (AWL_NETWORK=off: a command with network: true is refused)" else "off (bash network: true asks the user for one command)"}) catch "sandbox on";
 }
 
 // ---- the session sandbox ----

@@ -24,11 +24,12 @@ rc=$?
 serve() {
   LOG=$W/req-$RANDOM.jsonl
   python3 "$HERE/fake_sse.py" "$1" --log "$LOG" >"$W/port" &
+  SPID=$!
   for _ in $(seq 50); do [ -s "$W/port" ] && break; sleep 0.02; done
   PORT=$(cat "$W/port")
   : >"$W/port"
 }
-stop() { kill %% 2>/dev/null; wait 2>/dev/null; }
+stop() { kill $SPID 2>/dev/null; wait $SPID 2>/dev/null; }
 
 # run [VAR=value...] -- TASK: awl -p TASK the way an embedder runs it: no terminal, a cleared
 # environment, AWL_KEY always set (empty here), a scratch HOME and state dir. A key file
@@ -154,6 +155,32 @@ run XDG_CONFIG_HOME="$W/xdg" -- "hi"
 py 's = reqs[-1]["messages"][0]["content"]; assert "XDG-RULE-9" in s and "HOME-RULE-7" not in s' && ok "XDG_CONFIG_HOME wins over \$HOME/.config" || bad "XDG AGENTS.md" "see above"
 stop
 rm -rf "$H/.config"
+
+# 6. AWL_NETWORK=off: a command that asks for the network is refused without asking, and the
+#    result says why; it also beats AWL_SANDBOX_NET=on, so no command shares the host network.
+python3 "$HERE/fake_sse.py" "$W/hi.json" >"$W/tport" & # a host port for commands to try
+TPID=$!
+for _ in $(seq 50); do [ -s "$W/tport" ] && break; sleep 0.02; done
+TPORT=$(cat "$W/tport")
+cat >"$W/net.json" <<EOF
+[{"tool_calls":[{"name":"bash","arguments":{"command":"curl -sI https://example.com","network":true}},{"name":"bash","arguments":{"command":"(exec 3<>/dev/tcp/127.0.0.1/$TPORT) 2>/dev/null && echo reached || echo blocked"}}]},
+ {"content":"ok"}]
+EOF
+serve "$W/net.json"
+run AWL_NETWORK=off AWL_SANDBOX_NET=on -- "net"
+py '
+assert results[0].startswith("not run: AWL_NETWORK=off: commands cannot use the network in this session"), repr(results[0])
+assert results[1].strip() == "blocked", repr(results[1])
+s = reqs[0]["messages"][0]["content"]
+assert "AWL_NETWORK=off" in s, s[-400:]
+' && ok "AWL_NETWORK=off: network commands refused with a reason, AWL_SANDBOX_NET=on overruled, the model is told" || bad "AWL_NETWORK=off" "see above"
+stop
+serve "$W/net.json"
+run AWL_SANDBOX_NET=on -- "net"
+py 'assert results[1].strip() == "reached", repr(results[1])' && ok "control: AWL_SANDBOX_NET=on alone shares the host network" || bad "net control" "see above"
+stop
+kill $TPID 2>/dev/null
+wait $TPID 2>/dev/null
 
 echo "embed: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
