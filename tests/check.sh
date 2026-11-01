@@ -29,7 +29,7 @@ echo "    idle RSS ${idle} KB (reported, not checked)"
 if command -v hyperfine >/dev/null; then
   j=$(mktemp)
   hyperfine -N -w 20 -r 200 --export-json "$j" "$B --version" >/dev/null 2>&1
-  ms=$(python3 -c 'import json,sys; print(round(json.load(open(sys.argv[1]))["results"][0]["summary"]["time_wall_clock"]["mean"]*1000,3))' "$j")
+  ms=$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["results"][0]; print(round(r["summary"]["time_wall_clock"]["mean"]*1000 if "summary" in r else r["mean"]*1000,3))' "$j")
   rm -f "$j"
   python3 -c "import sys; sys.exit(0 if $ms <= 3 else 1)" || fail "startup ${ms} ms > 3 ms"
   ok "startup ${ms} ms"
