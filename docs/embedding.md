@@ -150,3 +150,9 @@ A call that did not run has one of these results instead. Each opening is stable
 | `The user declined` | A person said no (TUI and background agents only, never `-p`). |
 | `unknown tool: ` | The model named a tool awl does not have. |
 | `spawn pipe: `, `spawn fork: `, `background fork: `, `background /tmp/awl-…` | The system refused a pipe, fork or log file. |
+
+## Running awl inside another sandbox
+
+awl's command sandbox cannot start inside some outer sandboxes (nested user namespaces, a covered
+`/proc`). Commands then fail closed with `not run: the sandbox did not start: …`; awl never runs them
+unsandboxed on its own. The options, and their risks, are in [nested-sandbox.md](nested-sandbox.md).
