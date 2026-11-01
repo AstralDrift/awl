@@ -40,6 +40,7 @@ const usage =
     \\     AWL_MODELS (Ctrl-P cycles) AWL_STATUS (model,ctx,mode,branch,dir,session or off)
     \\     AWL_SANDBOX (off) AWL_SANDBOX_NET (off: no network for commands) AWL_SANDBOX_WRITE=dir:dir
     \\     AWL_NETWORK (off: refuse commands that ask for the network, without asking anyone)
+    \\     AWL_SANDBOX_SOCKETS=path:path (sockets under /tmp that commands may still reach)
     \\     AWL_THINK_BUDGET=N (SGLang --enable-strict-thinking: cap reasoning per reply)
     \\     AWL_THINK_MAX=N (any server: stop a reply that thinks past N tokens, then act)
     \\     AWL_THINKING (off: ask the chat template for no thinking on every request)

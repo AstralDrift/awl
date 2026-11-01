@@ -168,7 +168,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
   run in one sandbox per session. They see the filesystem read-only and can write only to the project
   (git root or cwd), `/tmp`, build caches and `AWL_SANDBOX_WRITE` dirs. Hidden from them: `~/.ssh`,
   `~/.gnupg`, cloud/gh credentials, keyrings, the Local AI key, `/run/user` (D-Bus, Hyprland, keyring
-  sockets), sockets under `/tmp`, the docker socket, other processes, and any environment variable not on
+  sockets), sockets under `/tmp` (two levels deep; `AWL_SANDBOX_SOCKETS=path:path` keeps named ones), the docker socket, other processes, and any environment variable not on
   a short allowlist (names with TOKEN, KEY, SECRET, PASS, AUTH, ... never pass). They cannot create user
   namespaces. The project's `.git/config`, `.git/hooks`, `AGENTS.md` and `.agents/` are read-only to them,
   since git runs hooks and fsmonitor outside the sandbox and the next session reads those instructions.

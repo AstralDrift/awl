@@ -23,6 +23,9 @@ pub var root: []const u8 = "";
 var home: []const u8 = "";
 var extra_b: [2048]u8 = undefined;
 var extra: []const u8 = ""; // AWL_SANDBOX_WRITE, ':'-separated
+/// AWL_SANDBOX_SOCKETS: ':'-separated socket paths under /tmp that the scan leaves reachable
+/// (an embedder's own helper socket). Read straight from the environment, so nothing is copied.
+var keep_sockets: []const u8 = "";
 
 /// Paths hidden from the model (empty tmpfs in the sandbox; read refuses them).
 const secrets = [_][]const u8{ "/.ssh", "/.gnupg", "/.aws", "/.config/gh", "/.local/state/omarchy", "/.password-store", "/.local/share/keyrings", "/.docker", "/.kube" };
@@ -42,6 +45,7 @@ pub fn setup(project_root: []const u8) void {
     const n = @min(project_root.len, root_b.len);
     @memcpy(root_b[0..n], project_root[0..n]);
     root = root_b[0..n];
+    keep_sockets = sys.getenv("AWL_SANDBOX_SOCKETS") orelse "";
     if (sys.getenv("AWL_SANDBOX_WRITE")) |w| {
         const m = @min(w.len, extra_b.len);
         @memcpy(extra_b[0..m], w[0..m]);
@@ -123,7 +127,9 @@ fn options(a: *Args, with_net: bool) void {
 }
 
 /// Sockets under /tmp (X11, browsers, other agents' daemons) let a command act outside the
-/// sandbox. Hide the ones there now, two levels deep; the X11/ICE folders entirely.
+/// sandbox. Hide the ones there now (when the session sandbox starts): /tmp/S and /tmp/D/S, not
+/// deeper; the X11/ICE folders entirely. AWL_SANDBOX_SOCKETS names ones to leave reachable.
+/// Embedders rely on this depth (docs/embedding.md, tests/sandbox.sh).
 fn maskTmpSockets(a: *Args) void {
     for ([_][]const u8{ "/tmp/.X11-unix", "/tmp/.ICE-unix" }) |d| if (sys.exists(d)) a.addAll(&.{ "--tmpfs", a.zs.z(d) });
     scanSockets(a, "/tmp", 1);
@@ -149,10 +155,17 @@ fn scanSockets(a: *Args, dir: []const u8, depth: u8) void {
             var pb: [1024]u8 = undefined;
             const p = std.fmt.bufPrint(&pb, "{s}/{s}", .{ dir, name }) catch continue;
             if (e.type == linux.DT.SOCK) {
+                if (kept(p)) continue;
                 a.addAll(&.{ "--ro-bind", "/dev/null", a.zs.z(p) });
             } else if (e.type == linux.DT.DIR and depth > 0) scanSockets(a, p, depth - 1);
         }
     }
+}
+
+fn kept(p: []const u8) bool {
+    var it = std.mem.splitScalar(u8, keep_sockets, ':');
+    while (it.next()) |k| if (std.mem.eql(u8, k, p)) return true;
+    return false;
 }
 
 /// Start the session sandbox unless it is running. null: ready; else why it failed.

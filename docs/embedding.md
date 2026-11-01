@@ -67,6 +67,18 @@ start.
 awl's sandbox (bubblewrap with its own network namespace). With `AWL_SANDBOX=off` there is no sandbox,
 and a command that does not say it needs the network can still reach it.
 
+### Sockets under `/tmp`
+
+Unix sockets let a command act outside the sandbox, so when the session sandbox starts (at the
+first command) awl hides every socket at `/tmp/NAME` and `/tmp/DIR/NAME`, and all of `/tmp/.X11-unix`
+and `/tmp/.ICE-unix`. It hides them by mounting `/dev/null` over each one. Sockets deeper than that,
+like `/tmp/DIR/SUB/NAME`, and sockets created after the sandbox started, stay reachable. This depth
+is tested (`tests/sandbox.sh`) and will not change without a release note.
+
+To give commands one socket of yours on purpose, name it: `AWL_SANDBOX_SOCKETS=/tmp/run-1/web/fetch.sock`
+(`:`-separated full paths, matched exactly). Every other socket stays hidden. Prefer this to relying on
+the depth.
+
 ### What awl reads under `HOME`
 
 Your scratch `HOME` is part of the contract. awl reads, if present:
