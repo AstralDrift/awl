@@ -11,7 +11,10 @@ const tui = @import("tui.zig");
 const bufm = @import("buf.zig");
 const agents = @import("agents.zig");
 
-pub const version = "0.1.0";
+const build_options = @import("build_options");
+pub const version = build_options.version;
+/// "0.1.0 (8d7c9ae)": the version and the commit this binary was built from.
+pub const version_line = version ++ " (" ++ build_options.commit[0..@min(7, build_options.commit.len)] ++ ")";
 
 // Release builds drop std's stack-trace machinery (DWARF, ELF, Io): it was most of the binary.
 pub const panic = if (@import("builtin").mode == .Debug) std.debug.FullPanic(std.debug.defaultPanic) else std.debug.FullPanic(shortPanic);
@@ -31,6 +34,7 @@ const usage =
     \\  -r FILE     resume a session file
     \\  --full      full-screen mode (also AWL_FULL=1, or /full)
     \\  --bg        with -p: run as a background agent (the TUI's ← view starts these)
+    \\  --version   print "awl VERSION (COMMIT)": the build's version and git commit
     \\env: AWL_URL AWL_MODEL AWL_KEY AWL_MODE AWL_REASONING AWL_MAX_TOKENS AWL_MAX_STEPS
     \\     AWL_RETRIES AWL_SYSTEM AWL_AGENTS (off) AWL_WELCOME (off: one line)
     \\     AWL_MODELS (Ctrl-P cycles) AWL_STATUS (model,ctx,mode,branch,dir,session or off)
@@ -65,7 +69,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         const a = std.mem.span(argv[i]);
         const eq = std.mem.eql;
         if (eq(u8, a, "--version")) {
-            sys.writeAll(sys.stdout, "awl " ++ version ++ "\n") catch {};
+            sys.writeAll(sys.stdout, "awl " ++ version_line ++ "\n") catch {};
             return 0;
         } else if (eq(u8, a, "-p") and i + 1 < argv.len) {
             i += 1;
