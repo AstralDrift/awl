@@ -58,6 +58,7 @@ noise. Method, per-task tables and every run are in [arena/LOG.md](arena/LOG.md)
     arena/awl-or.sh       # same, on an OpenRouter model (key in ~/.local/state/awl-arena/openrouter.key)
 
 Spec and history: [PLAN.md](PLAN.md). Sibling project for macOS: `nib`.
+Running awl from another program (`awl -p`, exit status, session file, tool results): [docs/embedding.md](docs/embedding.md).
 
 ## Building a release
 
