@@ -1,29 +1,72 @@
 name: Release
 
-# Push a tag like v0.2.0 to publish the static binary as a GitHub release.
+# Push a tag vX.Y.Z (matching build.zig.zon's version) to publish awl-linux-x86_64,
+# awl-linux-aarch64 and SHA256SUMS. Both runners build both binaries with
+# scripts/release.sh; the release goes out only if all four builds are byte-identical.
+# Run it by hand (workflow_dispatch) to check reproducibility without publishing.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - name: Build and unit test
+      - run: echo "XDG_CACHE_HOME=$RUNNER_TEMP/cache" >>"$GITHUB_ENV" # where release.sh keeps the pinned Zig
+      - name: Tag matches build.zig.zon
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
-          zig build -Doptimize=ReleaseSmall
-          zig build test
+          want=$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)
+          [ "$GITHUB_REF_NAME" = "v$want" ] || { echo "tag $GITHUB_REF_NAME, build.zig.zon says $want"; exit 1; }
+      - name: Release build (pinned Zig, checked against ziglang.org's sha256)
+        run: scripts/release.sh
+      - name: Native binary runs and passes the unit tests
+        run: |
+          arch=$(uname -m)
+          zig-out/release/awl-linux-$arch --version
+          "$XDG_CACHE_HOME/awl-release/zig-$arch-linux-0.16.0/zig" build test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          path: zig-out/release/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Both runners built the same bytes
+        run: |
+          cat release-*/SHA256SUMS
+          cmp release-ubuntu-24.04/SHA256SUMS release-ubuntu-24.04-arm/SHA256SUMS
+          cd release-ubuntu-24.04 && sha256sum -c SHA256SUMS
       - name: Publish
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp zig-out/bin/awl awl-x86_64-linux
-          sha256sum awl-x86_64-linux > awl-x86_64-linux.sha256
-          gh release create "$GITHUB_REF_NAME" awl-x86_64-linux awl-x86_64-linux.sha256 \
-            --title "$GITHUB_REF_NAME" --generate-notes
+          cd release-ubuntu-24.04
+          {
+            echo 'Static Linux binaries (no libc). Check a download with `sha256sum -c SHA256SUMS --ignore-missing`.'
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+            echo
+            echo "Rebuild and compare: \`git checkout $GITHUB_REF_NAME && scripts/release.sh\` (Zig 0.16.0, \`zig build release\`: ReleaseSmall, -Dcpu=baseline)."
+            echo "Both binaries were built on x86_64 and on aarch64 runners and were identical."
+          } >notes.md
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "awl $GITHUB_REF_NAME" \
+            --notes-file notes.md --generate-notes awl-linux-x86_64 awl-linux-aarch64 SHA256SUMS

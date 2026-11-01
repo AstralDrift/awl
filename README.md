@@ -59,6 +59,24 @@ noise. Method, per-task tables and every run are in [arena/LOG.md](arena/LOG.md)
 
 Spec and history: [PLAN.md](PLAN.md). Sibling project for macOS: `nib`.
 
+## Building a release
+
+Releases (tags `vX.Y.Z`) attach `awl-linux-x86_64`, `awl-linux-aarch64` and `SHA256SUMS`
+(`sha256sum` format). These names and that format stay as they are. The bytes depend only on the
+source and the Zig version, so you can rebuild a release and compare:
+
+    git checkout v0.1.0
+    scripts/release.sh    # fetches Zig 0.16.0 from ziglang.org, checks its sha256, runs `zig build release`
+    cat zig-out/release/SHA256SUMS
+
+`zig build release` builds both binaries with Zig 0.16.0, ReleaseSmall, `-Dcpu=baseline`, static with
+no libc. That gives the same bytes as `zig build -Dtarget=<arch>-linux -Dcpu=baseline` and as a cross
+build from any host. A plain `zig build` targets your own CPU, so its bytes differ. `awl --version` prints
+the version and commit (`awl 0.1.0 (8d7c9ae)`); without git the build has `(unknown)` in place of the
+commit, so build from a git checkout of the tag to match. To publish, push a tag matching
+`build.zig.zon`'s version. The Release workflow builds on x86_64 and arm64 runners and publishes only if
+all four builds are identical.
+
 ## The TUI
 
 Inline, so the terminal keeps its scrollback and plain copy and paste. Replies stream with light
@@ -265,5 +283,4 @@ numbers; the proposer sees them next time. Tier t5 is never shown to the propose
 ## License
 
 MIT (see [LICENSE](LICENSE)). The skills adapted from pstack keep pstack's MIT notice next to them.
-Releases: push a tag like `v0.2.0` and the Release workflow attaches the static `awl-x86_64-linux`
-binary and its SHA-256 to a GitHub release.
+Releases: see [Building a release](#building-a-release).

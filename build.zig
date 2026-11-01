@@ -24,6 +24,27 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{ .name = "awl", .root_module = mod });
     b.installArtifact(exe);
 
+    // zig build release: the published binaries. Baseline CPU and ReleaseSmall whatever
+    // -Dtarget/-Dcpu/-Doptimize say, so the bytes depend only on the source and the Zig
+    // version (scripts/release.sh pins it). zig-out/release/awl-linux-{x86_64,aarch64}.
+    const rel = b.step("release", "Reproducible release binaries in zig-out/release (see scripts/release.sh)");
+    for ([_]std.Target.Cpu.Arch{ .x86_64, .aarch64 }) |arch| {
+        const rel_mod = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .linux, .cpu_model = .baseline }),
+            .optimize = .ReleaseSmall,
+            .strip = true,
+            .single_threaded = true,
+            .link_libc = false,
+        });
+        rel_mod.addOptions("build_options", opts);
+        const rel_exe = b.addExecutable(.{ .name = "awl", .root_module = rel_mod });
+        rel.dependOn(&b.addInstallArtifact(rel_exe, .{
+            .dest_dir = .{ .override = .{ .custom = "release" } },
+            .dest_sub_path = b.fmt("awl-linux-{s}", .{@tagName(arch)}),
+        }).step);
+    }
+
     const run = b.addRunArtifact(exe);
     run.step.dependOn(b.getInstallStep());
     if (b.args) |args| run.addArgs(args);
