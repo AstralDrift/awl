@@ -12,6 +12,11 @@ pub fn build(b: *std.Build) void {
     const opts = b.addOptions();
     opts.addOption([]const u8, "version", @import("build.zig.zon").version);
     opts.addOption([]const u8, "commit", b.option([]const u8, "commit", "Commit shown by --version (default: git rev-parse HEAD)") orelse gitCommit(b));
+    // A/B variants for the arena (arena/notes/2026-11-01-less-but-better.md): a binary without the
+    // skills index or without the todo tool, run through AWL_BIN against the default build. These
+    // two options go once the arena has decided.
+    opts.addOption(bool, "no_skills", b.option(bool, "no_skills", "Variant: no Agent Skills index in the system prompt") orelse false);
+    opts.addOption(bool, "no_todo", b.option(bool, "no_todo", "Variant: no todo tool") orelse false);
 
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

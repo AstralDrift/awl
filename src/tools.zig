@@ -148,8 +148,11 @@ const schema_core =
     \\{"type":"function","function":{"name":"read","description":"Read a text file. The first line shown and every 10th line start with their number and an arrow (10→); the markers are not part of the file. For large files, grep for what you need first, then read with offset/limit (1-based).","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}},
     \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file with the given content. Creates parent directories.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
     \\{"type":"function","function":{"name":"edit","description":"Replace exact text in a file. One change: old_string + new_string. Several changes in one file: edits, a list of {old_string, new_string}, each matched against the file as it was before this call; all apply or none do. Each old_string must occur exactly once; include enough context. Read the file first; leave out read's N→ line markers.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","description":"with old_string: replace every occurrence (renames)"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["old_string","new_string"]}}},"required":["path"]}}},
-    \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s; a command still running then is not killed: it continues as a background job and you get its output so far and its log file.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"},"background":{"type":"boolean","description":"start it and return at once (servers, watchers, long test runs); output goes to a log file"},"network":{"type":"boolean","description":"needs the internet (install, download, clone); the user approves each such command"}},"required":["command"]}}},
-    \\{"type":"function","function":{"name":"todo","description":"Checklist for long tasks with several distinct steps; skip it for quick fixes. Send the whole list every time. status: pending, doing, done or skip (put the reason in text). Keep exactly one item doing. The latest list always stays in context.","parameters":{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"status":{"type":"string","enum":["pending","doing","done","skip"]}},"required":["text","status"]}}},"required":["items"]}}}
+    \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s; a command still running then is not killed: it continues as a background job and you get its output so far and its log file.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"},"background":{"type":"boolean","description":"start it and return at once (servers, watchers, long test runs); output goes to a log file"},"network":{"type":"boolean","description":"needs the internet (install, download, clone); the user approves each such command"}},"required":["command"]}}}
+++ (if (with_todo) schema_todo else "");
+const with_todo = !@import("build_options").no_todo; // -Dno_todo: an arena A/B variant (build.zig)
+const schema_todo =
+    \\,{"type":"function","function":{"name":"todo","description":"Checklist for long tasks with several distinct steps; skip it for quick fixes. Send the whole list every time. status: pending, doing, done or skip (put the reason in text). Keep exactly one item doing. The latest list always stays in context.","parameters":{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"status":{"type":"string","enum":["pending","doing","done","skip"]}},"required":["text","status"]}}},"required":["items"]}}}
 ;
 const schema_grep =
     \\,{"type":"function","function":{"name":"grep","description":"Search file contents with ripgrep (regex, smart case, respects .gitignore). Returns path:line:text, with path-line-text for context lines. Find several names in one call with alternatives (a|b|c), and set context to see the surrounding lines instead of reading the file separately.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string","description":"e.g. *.zig"},"context":{"type":"integer","description":"lines before and after each match (0-20)"},"ignore_case":{"type":"boolean"},"limit":{"type":"integer","description":"max output lines (default 200)"}},"required":["pattern"]}}}
@@ -165,10 +168,11 @@ pub fn schema(out: *Buf) void {
 }
 
 pub fn names() []const u8 {
-    if (have_rg and have_fd) return "read, write, edit, bash, todo, grep, find";
-    if (have_rg) return "read, write, edit, bash, todo, grep";
-    if (have_fd) return "read, write, edit, bash, todo, find";
-    return "read, write, edit, bash, todo";
+    const core = if (with_todo) "read, write, edit, bash, todo" else "read, write, edit, bash";
+    if (have_rg and have_fd) return core ++ ", grep, find";
+    if (have_rg) return core ++ ", grep";
+    if (have_fd) return core ++ ", find";
+    return core;
 }
 
 // Argument parsing scratch: a reserved region, reset after each tool call.

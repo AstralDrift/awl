@@ -80,7 +80,8 @@ pub fn init(cwd: []const u8) void {
     var rb: [1024]u8 = undefined;
     const user_dir = if (sys.getenv("HOME")) |h| (std.fmt.bufPrint(&hb, "{s}/.agents/skills", .{h}) catch "") else "";
     const proj_dir = std.fmt.bufPrint(&rb, "{s}/.agents/skills", .{projectRoot(cwd)}) catch "";
-    n_skills = skills.add(&head, if (std.mem.eql(u8, user_dir, proj_dir)) &.{user_dir} else &.{ proj_dir, user_dir });
+    if (!@import("build_options").no_skills) // -Dno_skills: an arena A/B variant (build.zig)
+        n_skills = skills.add(&head, if (std.mem.eql(u8, user_dir, proj_dir)) &.{user_dir} else &.{ proj_dir, user_dir });
     head.add("\"}");
 }
 
