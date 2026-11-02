@@ -49,11 +49,13 @@ run() {
   SESSION=$(ls "$W"/state/awl/sessions/*.jsonl 2>/dev/null | tail -n 1)
 }
 # py CODE: run a python check with LOG and SESSION as argv[1], argv[2]
-py() { python3 -c "import json, sys
+# results: tool results without the budget line fresh mode (the default) ends each one with; raw keeps it.
+py() { python3 -c "import json, re, sys
 reqs = [json.loads(l) for l in open(sys.argv[1])]
 lines = [json.loads(l) for l in open(sys.argv[2])] if sys.argv[2] else []
 msgs = [m for m in lines if 'role' in m]
-results = [m['content'] for m in msgs if m['role'] == 'tool']
+raw = [m['content'] for m in msgs if m['role'] == 'tool']
+results = [re.sub(r'\n?\[time [^]]*\]\Z', '', r) for r in raw]
 $1" "$LOG" "${SESSION:-}"; }
 
 # 1. A -p run: exit 0, empty AWL_KEY sent as is (no key file fallback), the session file in
@@ -85,13 +87,14 @@ assert msgs[-1] == {"role": "assistant", "content": "All done."} or msgs[-1]["co
 ' && ok "session lines: meta first, assistant tool_calls, tool messages with tool_call_id" || bad "session format" "see above"
 py '
 assert results[0] == "hi", repr(results[0])
+assert all(re.search(r"\n\[time \d+s(, context \S+ of \S+)?\]\Z", r) for r in raw), raw  # docs/embedding.md: the budget line
 assert results[1] == "out\n\n[exit 3]", repr(results[1])
 assert results[2] == "(no output)", repr(results[2])
 assert results[3].startswith("wrote ") or "new.txt" in results[3], repr(results[3])
 assert results[4] == "unknown tool: nope", repr(results[4])
 assert results[5].startswith("invalid arguments for bash: missing command"), repr(results[5])
 assert results[6] == "invalid arguments for bash: not valid JSON (was the call cut off?)", repr(results[6])
-' && ok "bash results: output, [exit N] last line, (no output); refusals: unknown tool:, invalid arguments for" || bad "result endings" "see above"
+' && ok "bash results: output, [exit N] last line, (no output); refusals: unknown tool:, invalid arguments for; budget line last" || bad "result endings" "see above"
 stop
 
 # 2. Without AWL_KEY the key file is the fallback (what embedders avoid by always setting it).

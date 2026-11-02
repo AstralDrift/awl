@@ -164,6 +164,11 @@ A background command's result is `started background job N (pid P); output goes 
 When a background job ends, the next tool result starts with one line per finished job:
 `[background job N (CMD) exited with code C; output in LOG]`.
 
+In the default context mode (`fresh`), every tool result except `todo`'s then ends with one more
+line, after the endings above: `\n[time T, context C of W]` (time since the run started, the context
+used and the window, e.g. `[time 3m12s, context 48k of 180k]`), or `\n[time T]` when the window is
+unknown. `AWL_CTX_MODE=compact` leaves it out.
+
 Notes awl adds at the end of a result, each on its own line, for the model's sake:
 `[awl: you have made this exact call N times …]`, `[awl stopped your reply here: at most 16 tool calls
 run per reply …]`, and `[awl: N steps are left in this run. …]`.
