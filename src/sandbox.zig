@@ -262,7 +262,7 @@ pub fn stop() void {
 /// The child stays outside as the waiter, so the caller's process group and timeouts work;
 /// the command runs as its grandchild. With `pid_fd`, the command leads its own process
 /// group and writes its pid as seen inside the sandbox there (for `kill -- -PID`).
-pub fn execIn(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const u8, cwd: [*:0]const u8, pid_fd: i32) noreturn {
+pub fn execIn(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const u8, cwd: [*:0]const u8, pid_fd: i32, own_group: bool) noreturn {
     _ = linux.prctl(@intFromEnum(linux.PR.SET_DUMPABLE), 0, 0, 0, 0); // nothing in the sandbox may ptrace us while we hold its capabilities
     const e = linux.errno(linux.setns(pidfd, all_ns));
     if (e != .SUCCESS) {
@@ -273,8 +273,8 @@ pub fn execIn(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const
     const pid_rc = linux.fork();
     if (linux.errno(pid_rc) != .SUCCESS) linux.exit_group(126);
     if (pid_rc == 0) {
+        if (own_group) _ = linux.setpgid(0, 0); // a job the model stops with kill -- -pid from inside the sandbox
         if (pid_fd >= 0) {
-            _ = linux.setpgid(0, 0);
             var nb: [16]u8 = undefined;
             sys.writeAll(pid_fd, std.fmt.bufPrint(&nb, "{d}", .{linux.getpid()}) catch "") catch {};
             sys.close(pid_fd);

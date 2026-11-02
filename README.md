@@ -7,8 +7,8 @@ the smallest possible footprint. One static Zig binary (no libc, no runtime, ~34
 to any OpenAI-compatible server: Omarchy Local AI on your GPU, or OpenRouter in the cloud.
 
 The model gets seven tools: read, write, edit (one change or an `edits` list, all or nothing),
-bash (with background jobs), todo (a checklist that survives context trimming), grep (ripgrep)
-and find (fd). Everything else is a lean loop that keeps the prompt small.
+bash (with background jobs; a command still running at its timeout becomes one instead of being
+killed), todo (a checklist that survives context trimming), grep (ripgrep) and find (fd). Everything else is a lean loop that keeps the prompt small.
 
 ## Results
 
