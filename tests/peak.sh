@@ -3,6 +3,9 @@
 set -eu
 AWL=$(realpath "${1:-zig-out/bin/awl}")
 HERE=$(cd "$(dirname "$0")" && pwd)
+# The caller's awl settings must not change the number (a system prompt file, a context mode).
+unset AWL_URL AWL_MODEL AWL_KEY AWL_SYSTEM AWL_MAX_STEPS AWL_AGENTS AWL_CTX_MODE AWL_REASONING AWL_MODE AWL_SANDBOX
+export XDG_CONFIG_HOME=/nonexistent
 W=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$W"' EXIT
 seq 1 400 | sed 's/^/line of text number /' >"$W/data.txt"

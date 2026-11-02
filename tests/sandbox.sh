@@ -31,6 +31,8 @@ printf -- '---\nname: demo\ndescription: d\n---\n' >.agents/skills/demo/SKILL.md
 ln -s .git/config linkcfg
 ln -s "$HOME/.bashrc_probe" linkrc
 ln -s "$HOME/.ssh/id_probe" linkssh
+ln -s / rootlink # "rootlink/..$HOME/x" is $HOME/x to the kernel, "x" under the project lexically
+mkfifo pipe.fifo
 cp .git/config "$W/config.before"
 # Another session (another project's, say) and another awl's session view: the model must see neither.
 mkdir -p "$XDG_STATE_HOME/awl/sessions"
@@ -54,6 +56,8 @@ bash_call() { python3 -c 'import json,sys; print(json.dumps({"name":"bash","argu
     'echo x 2>/dev/null >>AGENTS.md && echo ESCAPED-agentsmd' \
     'echo x 2>/dev/null >>.agents/skills/demo/SKILL.md && echo ESCAPED-skills' \
     'env | grep -q PROBE_SECRET_TOKEN && echo ESCAPED-env' \
+    'p=$(ls /tmp/awl-*-*.log 2>/dev/null | head -1 | sed "s/.*awl-\([0-9]*\)-.*/\1/"); for i in $(seq 1 20); do ln -s "$HOME/.bashrc_probe" /tmp/awl-$p-$i.log 2>/dev/null; [ $i -le 5 ] && ln -s "$HOME/.bashrc_probe" /tmp/awl-$p-job$i.log 2>/dev/null; done; echo PLANTED-$p' \
+    'seq 1 30000 | tr -d "\n" | head -c 100000; echo; echo INSIDE-longline' \
     'grep -q SECRETKEY ~/.ssh/id_probe 2>/dev/null && echo ESCAPED-sshbash' \
     'grep -a -l hunter2 /proc/*/environ 2>/dev/null | grep -q . && echo ESCAPED-procenv' \
     'cat "$XDG_STATE_HOME"/awl/sessions/*.jsonl 2>/dev/null | grep -q hunter3 && echo ESCAPED-sessions' \
@@ -83,7 +87,12 @@ bash_call() { python3 -c 'import json,sys; print(json.dumps({"name":"bash","argu
 {"name":"write","arguments":{"path":".git/config","content":"[core]\\n\\tfsmonitor = echo pwned\\n"}},
 {"name":"write","arguments":{"path":"AGENTS.md","content":"planted"}},
 {"name":"write","arguments":{"path":"linkcfg","content":"planted"}},
-{"name":"write","arguments":{"path":"linkrc","content":"planted"}},
+{"name":"write","arguments":{"path":"linkrc","content":"planted"}}
+]},{"tool_calls":[
+{"name":"write","arguments":{"path":"rootlink/..$HOME/.bashrc_probe","content":"planted"}},
+{"name":"edit","arguments":{"path":"rootlink/..$HOME/.bashrc_probe","old_string":"X=1","new_string":"X=planted"}},
+{"name":"read","arguments":{"path":"rootlink/..$HOME/.ssh/id_probe"}},
+{"name":"read","arguments":{"path":"pipe.fifo"}},
 {"name":"write","arguments":{"path":"ok.txt","content":"fine"}}
 ]},{"tool_calls":[
 {"name":"bash","arguments":{"command":"python3 -m http.server 8765 --bind 127.0.0.1","background":true}},
@@ -120,7 +129,10 @@ grep -q '1→{"n":2,"role":"user"}$' <<<"$results" && ok "read shows this sessio
 grep -q SECRETKEY <<<"$results" && bad "read/grep hide ~/.ssh" "$(grep SECRETKEY <<<"$results" | head -3)" || ok "read/grep hide ~/.ssh"
 cmp -s .git/config "$W/config.before" && ok ".git/config unchanged" || bad ".git/config unchanged" "$(cat .git/config)"
 [ "$(cat AGENTS.md)" = "# rules" ] && ok "AGENTS.md unchanged" || bad "AGENTS.md unchanged" "$(cat AGENTS.md)"
-[ "$(cat "$HOME/.bashrc_probe")" = "export X=1" ] && ok "symlink out of project refused" || bad "symlink out of project refused" "$(cat "$HOME/.bashrc_probe")"
+[ "$(cat "$HOME/.bashrc_probe")" = "export X=1" ] && ok "symlink out of project refused (direct, link/.., planted log links)" || bad "symlink out of project refused" "$(cat "$HOME/.bashrc_probe")"
+grep -q 'read pipe.fifo: is not a regular file' <<<"$results" && ok "read of a FIFO is refused, not a hang" || bad "read of a FIFO" "$(grep -i fifo <<<"$results" | head -2)"
+grep -q 'PLANTED-[0-9]' <<<"$results" && ok "planted /tmp log links: later commands still ran" || bad "planted log links probe" "did not run"
+find /tmp -maxdepth 1 -name 'awl-*.log' -type l -delete 2>/dev/null; true # the planted links
 [ "$(cat ok.txt 2>/dev/null)" = fine ] && ok "write in project works" || bad "write in project works" "no ok.txt"
 
 # Sockets under /tmp: hidden at /tmp/S and /tmp/D/S, left alone deeper (/tmp/D/E/S: Hearth's

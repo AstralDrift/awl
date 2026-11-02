@@ -33,8 +33,9 @@ the model gets says why (see [Tool results](#tool-results)).
 |---|---|
 | 0 | The model finished: a reply with no tool calls. |
 | 1 | The run stopped early: it hit the step limit (`AWL_MAX_STEPS`), or the model could not be reached or kept failing after retries. At the step limit awl first asks for one last report with tools off. |
-| 2 | Bad arguments or settings (`AWL_URL`, `AWL_MODE`), or no model at `AWL_URL` and no `AWL_MODEL`. Nothing ran. |
+| 2 | Nothing ran: bad arguments (`-h` prints usage and exits 0 on stdout; an unknown flag, `-c` with `-r`, or an empty `-p` prints it on stderr), a bad setting (`AWL_URL`, `AWL_MODE`, a numeric setting that is not a whole number, `AWL_MAX_STEPS=0`), no model at `AWL_URL` and no `AWL_MODEL`, a TLS failure, `-c` with no session started in this directory, `-r` of a file awl cannot read, or a session another awl holds. |
 | 130 | SIGINT: the running command was stopped and the run ended. |
+| 134 | awl itself failed (a panic); the message is on stderr. Please report it. |
 
 awl handles SIGINT only. SIGTERM and SIGKILL end it at once, and the session file then ends wherever
 the run had reached. Background jobs the model started are stopped when awl exits, unless it is
@@ -52,6 +53,7 @@ awl reads only its environment; it has no config file. An embedder sets:
 | `AWL_MODE` | `auto` (no approvals), `ask`, or `plan` (files read-only). Under `-p` nobody can approve, so `ask` behaves like `auto` except for the refusals below. |
 | `AWL_MAX_STEPS` | Model replies per run (default 200). |
 | `AWL_NETWORK` | `off`: a command that asks for the network (`network: true`) is refused at once, with `not run: AWL_NETWORK=off: …` as its result, and `AWL_SANDBOX_NET=on` is ignored. The model is told in its system prompt. Any other value, or unset: the default (no network for commands; under `-p` a `network: true` command is refused because nobody can approve it). |
+| `AWL_SUMMARY` | A file path. When the `-p` run ends, awl writes one JSON object there saying how it went (see [Run summary](#run-summary)). |
 | `HOME` | Where awl looks for the user's files (below). |
 | `XDG_STATE_HOME` | Session files go to `$XDG_STATE_HOME/awl/sessions/`, else `$HOME/.local/state/awl/sessions/`. |
 | `XDG_CONFIG_HOME` | User config, else `$HOME/.config`. |
@@ -89,14 +91,43 @@ Your scratch `HOME` is part of the contract. awl reads, if present:
 - `$XDG_CONFIG_HOME/awl/prompts/`, else `$HOME/.config/awl/prompts/`: slash-command prompts (TUI only).
 - `$HOME/.agents/skills/`: user skills, listed in the system prompt.
 - `$HOME/.local/state/omarchy/local-ai/gateway.key`: only when `AWL_KEY` is unset.
-- `$HOME/.local/state/omarchy/current/theme/colors.toml`: TUI colors only.
+- `$HOME/.local/state/omarchy/current/theme/colors.toml`: theme colors (read under `-p` too, unused there).
 
-It writes only session files, and in the TUI a status file next to them. `-p` writes no status file.
+Under `-p` it writes only session files (plus, with `AWL_CTX_MODE=fresh`, a `view-<pid>.txt` next
+to them for the run's duration). The TUI also keeps a status file next to each session and a
+prompt history file in the state directory. `-p` writes no status file and takes no session lock.
+
+## Run summary
+
+With `AWL_SUMMARY=/path/file.json`, a `-p` run writes one JSON object there as it ends, whatever
+the exit status (also on a bad setting, exit 2). It is written to a temporary file next to it and
+renamed into place, so a reader never sees half of it. A path that cannot be written is ignored:
+the run's own exit status stands. Without the variable nothing is written. Fields:
+
+| Field | Meaning |
+|---|---|
+| `version` | The format version, `1`. New fields may be added in a version; a changed or removed field bumps it. |
+| `awl` | The build, as `--version` prints it without the leading `awl `: `0.1.0 (8d7c9ae)`. |
+| `status` | `done` (exit 0), `step_limit` (exit 1), `error` (exit 1 or 2), `cancelled` (exit 130). |
+| `exit` | The exit status, as in the table above. |
+| `steps` | Model replies received. |
+| `tool_calls` | An object: tool name (as the model wrote it, unknown names included) to how many times it was called. |
+| `commands` | One object per `bash` call, in order: `command` (the command string, or `null` when the arguments were not valid) and exactly one outcome: `exit` (code), `timed_out: true`, `interrupted: true`, `background` (the job number: started as a job, or moved to one at its timeout), or `not_run` (the first line of the refusal the model got, at most 300 bytes; see [Tool results](#tool-results)). |
+| `files_written` | Paths `write` and `edit` changed, as the model wrote them (usually relative to the working directory), each once, in first-change order; at most 64, each at most 200 bytes. Files commands changed are not known. |
+| `session` | The session file's path. |
+| `error` | Only with `status: error`: the last error message awl printed. |
+
+```json
+{"version":1,"awl":"0.1.0 (8d7c9ae)","status":"done","exit":0,"steps":3,
+ "tool_calls":{"bash":2,"edit":1},
+ "commands":[{"command":"pytest -q","exit":1},{"command":"pytest -q","exit":0}],
+ "files_written":["src/app.py"],"session":"/home/u/.local/state/awl/sessions/20261101-120000-4242.jsonl"}
+```
 
 ## The session file
 
 One file per run, `$XDG_STATE_HOME/awl/sessions/<YYYYMMDD-HHMMSS>-<pid>.jsonl` (`_1`, `_2` appended
-if two start in the same second). The newest name sorts last. One JSON object per line:
+when the same process starts two in one second: `/new`, a rewind). The newest name sorts last. One JSON object per line:
 
 1. A meta line: `{"awl":"0.1.0","model":"…","cwd":"…"}`. Skip any line that has an `"awl"` key.
 2. Then OpenAI chat messages, in order, as sent to the model:

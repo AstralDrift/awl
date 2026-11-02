@@ -3,8 +3,9 @@
 [![CI](https://github.com/AstralDrift/awl/actions/workflows/ci.yml/badge.svg)](https://github.com/AstralDrift/awl/actions/workflows/ci.yml)
 
 A coding agent for the terminal, built to beat the popular ones on results, speed and cost with
-the smallest possible footprint. One static Zig binary (no libc, no runtime, ~340 KB) that talks
-to any OpenAI-compatible server: Omarchy Local AI on your GPU, or OpenRouter in the cloud.
+the smallest possible footprint. One static Zig binary (no libc, no runtime, ~720 KB with its own
+TLS and DNS) that talks to any OpenAI-compatible server: Omarchy Local AI on your GPU, or OpenRouter
+in the cloud.
 
 The model gets seven tools: read, write, edit (one change or an `edits` list, all or nothing),
 bash (with background jobs; a command still running at its timeout becomes one instead of being
@@ -44,9 +45,9 @@ noise. Method, per-task tables and every run are in [arena/LOG.md](arena/LOG.md)
 
 | | awl | pi |
 |---|---|---|
-| Install | **346 KB**, one static file | 107 MB binary |
+| Install | **716 KB** (x86_64; 654 KB aarch64), one static file | 107 MB binary |
 | Startup (`--version`) | **0.2 ms** | 205 ms |
-| Memory of the harness process | **~0.3 MB** idle, < 1 MB peak over 50 turns | ~135-155 MB |
+| Memory of the harness process | **~0.5 MB** idle, ~1 MB peak over 50 turns | ~135-155 MB |
 | Prompt per request (Terminal-Bench, local Qwen) | **8.9K tokens** | 17.5K tokens |
 
 ## Quick start
@@ -158,7 +159,9 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 - The status line shows `◆ 2 agents running` or `? 1 needs you`, and a note above the prompt
   says when an agent finished or is waiting.
 - A session is open in one place at a time: one in use by a background agent or another
-  terminal cannot be resumed (`-r`, `-c`, `/resume`, the view) until that one is done.
+  terminal cannot be resumed (`-r`, `-c`, `/resume`, the view) until that one is done. A plain
+  `awl -p` run neither holds nor checks that lock (it leaves no status file; scripts that resume
+  the same session from two `-p` runs at once must not).
 - How it works: every running awl keeps a small `<session>.live` status file and holds a lock
   on it, so a crashed agent never shows as running. A background agent reads messages from
   `<session>.inbox` and answers from `<session>.answer`; its own output goes to `<session>.log`.
@@ -226,18 +229,25 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_CA_FILE` | system bundle | PEM file of trusted CAs for `https://` (default: the first of /etc/ssl/certs/ca-certificates.crt, /etc/pki/tls/certs/ca-bundle.crt, /etc/ssl/ca-bundle.pem, /etc/ssl/cert.pem) |
 | `AWL_MODEL` | first model the server lists | model id |
 | `AWL_KEY` | Local AI gateway key | bearer token |
-| `AWL_MAX_STEPS` | 200 | model calls per prompt |
+| `AWL_MAX_STEPS` | 200 | model calls per prompt (at least 1) |
 | `AWL_RETRIES` | 5 | retries for transient model errors |
 | `AWL_CTX_MODE` | fresh | when the context fills: `fresh` (fresh context + session view) or `compact` (model-written summary; kept until the full Terminal-Bench run confirms fresh) |
 | `AWL_REASONING` | `medium` | `reasoning_effort` to send (`low`, `medium`, `xhigh`, ...; `off` sends none). Local AI's Qwen defaults to xhigh, about twice the tokens per turn; dropped automatically if a server rejects it |
 | `AWL_MAX_TOKENS` | `65536` | output cap per reply (`max_tokens`; `0` sends none). Generous so heavy thinkers are not cut off. A reply cut off before any tool call gets a note asking the model to continue; one cut off inside a tool call runs nothing and asks for the call again |
+| `AWL_SUMMARY` | unset | with `-p`: a file awl writes one JSON object to when the run ends (status, exit, steps, tool calls, each command's outcome, files written; [docs/embedding.md](docs/embedding.md#run-summary)) |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |
 | `AWL_AGENTS` | on | `off` loads no AGENTS.md files (clean evals and benchmarks) |
+| `AWL_SANDBOX` | on | `off`: the model's commands run unsandboxed (no bubblewrap: WSL, some containers). See Safety |
+| `AWL_SANDBOX_NET` | off | `on`: every command gets the host network without asking |
+| `AWL_NETWORK` | unset | `off`: a command that asks for the network is refused without asking anyone, and `AWL_SANDBOX_NET=on` is ignored (CI, sandboxes) |
+| `AWL_SANDBOX_WRITE` | unset | `dir:dir`: more places commands may write (the project, `/tmp` and build caches always are) |
+| `AWL_SANDBOX_SOCKETS` | unset | `path:path`: Unix sockets under `/tmp` that commands may still reach (every other one is hidden) |
 | `AWL_MODE` | `auto` | `auto`, `ask` (approve commands and edits) or `plan` (read-only) |
 | `AWL_STATUS` | `model,ctx,mode,branch,agents` | items of the status line under the prompt, in order: `model`, `ctx`, `mode`, `branch`, `dir`, `session`, `agents` (background agents running or waiting); `off` hides it |
 | `AWL_WELCOME` | on | `off` shrinks the startup screen to one line |
 | `AWL_MODELS` | unset | comma-separated models that Ctrl-P cycles through |
 | `AWL_THINK_BUDGET` | unset | `N`: send `custom_params: {thinking_budget: N}` (SGLang started with `--enable-strict-thinking` ends reasoning after N tokens) |
+| `AWL_THINK_MAX` | unset | `N`: a reply that has thought past N tokens is stopped, its reasoning so far stays in the history, and the next request asks the model to act without thinking (opt-in; cut one first think from ~16 min to ~3 min on a 33B model) |
 | `AWL_THINKING` | on | `off`: every request sends `chat_template_kwargs: {enable_thinking: false}` (Nanbeige4.3, Qwen3.x templates); faster, less deliberate |
 | `AWL_KEEP_REASONING` | on | send each turn's reasoning back as `reasoning_content`, so the model sees its own plan. Qwen3-style templates re-render every tool-call turn's reasoning into the prompt, so a long run carries all of it (two thirds of each request at medium effort). `N`: only the newest N turns' reasoning goes back (the older turns are rewritten, one short re-prefill per step); `0`: none |
 | `AWL_THINK_ROWS` | `6` | rows of the model's newest reasoning shown live (word-wrapped, above the timer); they fold into one `∴ thought Ns` line when it answers. `0`: timer only |
@@ -245,6 +255,9 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_TITLE` | on | `off`: leave the terminal's title alone |
 | `AWL_FULL` | unset | `1` starts in full-screen mode (same as `--full`) |
 | `NO_COLOR` | unset | any value drops colors ([no-color.org](https://no-color.org)); bold and layout stay |
+
+A numeric setting that is not a whole number (`AWL_MAX_STEPS=many`) is refused at start, exit 2,
+like a bad `AWL_MODE`; nothing runs.
 
 ## Benchmarks
 

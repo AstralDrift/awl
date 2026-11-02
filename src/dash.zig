@@ -356,6 +356,9 @@ fn inputKey(k: Key) ?Action {
         },
         .enter => if (pasting) {
             addInput('\n');
+        } else if (mode == .confirm_delete) { // "y deletes · any other key keeps it": Enter keeps it
+            mode = .list;
+            return null;
         } else return submit(),
         .char => |c| {
             if (mode == .confirm_delete) {

@@ -83,6 +83,17 @@ else
   [ $c = 1 ] || ok "every src commit over main carries a measured figure"
 fi
 
+# Every AWL_* setting the code reads is documented twice: a row in README's Settings table and a
+# mention in `awl -h` (main.zig's usage text). Five drifted before this check existed.
+# AWL_RSS is the budget probe's own switch (tests/peak.sh), not a setting.
+d=0
+for v in $(grep -oh 'getenv("AWL_[A-Z_]*")' src/*.zig | sed 's/getenv("\(.*\)")/\1/' | sort -u); do
+  [ "$v" = AWL_RSS ] && continue
+  grep -q "^| \`$v\` |" README.md || { fail "$v is read by src/ but has no row in README's Settings table"; d=1; }
+  grep -q "$v" src/main.zig || { fail "$v is read by src/ but \`awl -h\` (main.zig usage) does not mention it"; d=1; }
+done
+[ $d = 1 ] || ok "every AWL_* setting is in README's table and in awl -h"
+
 # arena/tasks and arena/qa hold task fixtures with planted bugs; they are not linted.
 sh_files=$(git ls-files '*.sh' ':!arena/tasks' ':!arena/qa')
 py_files=$(git ls-files '*.py' ':!arena/tasks')

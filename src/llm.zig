@@ -59,6 +59,7 @@ pub const Turn = struct {
             c.name.n = 0;
         }
         self.n = 0;
+        self.prompt_tokens = 0;
         self.completion_tokens = 0;
         self.reasoning_bytes = 0;
         self.length_cut = false;
@@ -124,18 +125,36 @@ pub fn stream(cfg: Cfg, body: []const []const u8, t: *Turn) Error!void {
         last_status = r.status;
         return error.Status;
     }
+    var events: usize = 0;
+    var first: [200]u8 = undefined;
+    var first_n: usize = 0;
     while (try r.nextLine()) |line| {
+        if (first_n == 0 and line.len > 0) {
+            first_n = @min(line.len, first.len);
+            @memcpy(first[0..first_n], line[0..first_n]);
+        }
         if (!std.mem.startsWith(u8, line, "data:")) continue;
+        events += 1;
         const data = std.mem.trim(u8, line[5..], " ");
         if (std.mem.eql(u8, data, "[DONE]")) break;
         try event(data, t);
         if (t.overflow or t.think_cut) break; // closing the connection makes the server stop generating
     }
+    if (events == 0) { // a 200 that is not an event stream (stream: true ignored, a proxy's page): not an empty reply
+        var tmp: [300]u8 = undefined;
+        setDetail(std.fmt.bufPrint(&tmp, "the server sent no event stream (not SSE): {s}", .{first[0..first_n]}) catch "no event stream");
+        return error.Server;
+    }
 }
 
 fn event(data: []const u8, t: *Turn) Error!void {
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
-    const c = std.json.parseFromSliceLeaky(Chunk, fba.allocator(), data, .{ .ignore_unknown_fields = true }) catch {
+    // An event bigger than the scratch (a server that sends whole tool arguments in one delta,
+    // a buffering proxy) gets heap pages for this one parse instead of failing the run.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = if (data.len * 4 > scratch.len) arena.allocator() else fba.allocator();
+    const c = std.json.parseFromSliceLeaky(Chunk, alloc, data, .{ .ignore_unknown_fields = true }) catch {
         setDetail(data);
         return error.Server;
     };
@@ -165,7 +184,9 @@ fn event(data: []const u8, t: *Turn) Error!void {
             ui.content(s);
         };
         if (d.tool_calls) |tcs| for (tcs) |tc| {
-            const i = if (tc.index) |x| x.v else (if (t.n > 0) t.n - 1 else 0);
+            // No index (some servers): a delta with a new id opens the next call, the rest continue the last one.
+            const new_id = tc.id != null and tc.id.?.v.len > 0 and (t.n == 0 or !std.mem.eql(u8, t.calls[t.n - 1].id.get(), tc.id.?.v));
+            const i = if (tc.index) |x| x.v else if (t.n == 0) 0 else if (new_id) t.n else t.n - 1;
             if (i >= max_calls) {
                 t.overflow = true;
                 return;
@@ -187,15 +208,26 @@ fn event(data: []const u8, t: *Turn) Error!void {
 
 pub const ModelInfo = struct { id: []const u8, ctx: u64 };
 
-/// First model from GET /v1/models: id (copied into `out`) and context length if reported.
-pub fn firstModel(cfg: Cfg, out: []u8) Error!ModelInfo {
-    var ids = Buf.init(64 << 10);
+/// The model to use, from GET /v1/models: `want` (AWL_MODEL) when the server lists it, else the first
+/// one. The id is copied into `out`; ctx is the context length the server reports for that model, or 0.
+/// A wanted model the list does not name keeps a single-model server's one length (vLLM's
+/// --served-model-name alias is a common case) and is otherwise unknown (AWL_CTX sets it).
+pub fn pickModel(cfg: Cfg, want: ?[]const u8, out: []u8) Error!ModelInfo {
+    var ids = Buf.init(1 << 20);
     defer ids.free();
-    var one: [1]ModelInfo = undefined;
-    const l = try models(cfg, &ids, &one);
-    const n = @min(out.len, l[0].id.len);
-    @memcpy(out[0..n], l[0].id[0..n]);
-    return .{ .id = out[0..n], .ctx = l[0].ctx };
+    var list: [1024]ModelInfo = undefined;
+    const l = try models(cfg, &ids, &list);
+    var pick = l[0];
+    if (want) |w| {
+        pick.ctx = if (l.len == 1) l[0].ctx else 0;
+        for (l) |m| if (std.mem.eql(u8, m.id, w)) {
+            pick = m;
+            break;
+        };
+    }
+    const n = @min(out.len, pick.id.len);
+    @memcpy(out[0..n], pick.id[0..n]);
+    return .{ .id = out[0..n], .ctx = pick.ctx };
 }
 
 /// Every model GET /v1/models lists (at most out.len); ids are copied into `ids`.
@@ -232,6 +264,13 @@ test "event accumulates content and split tool calls" {
     try event("{\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}", &t);
     try std.testing.expectEqualStrings("hello é", t.content.items());
     try std.testing.expectEqual(@as(usize, 1), t.n);
+    // no index: a new id opens the next call, deltas without one continue the last
+    try event("{\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"c2\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"co\"}}]}}]}", &t);
+    try event("{\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"mmand\\\":\\\"ls\\\"}\"}}]}}]}", &t);
+    try std.testing.expectEqual(@as(usize, 2), t.n);
+    try std.testing.expectEqualStrings("bash", t.calls[1].name.get());
+    try std.testing.expectEqualStrings("{\"command\":\"ls\"}", t.calls[1].args.items());
+    try std.testing.expectEqualStrings("{\"path\":\"a\"}", t.calls[0].args.items());
     try std.testing.expectEqualStrings("c1", t.calls[0].id.get());
     try std.testing.expectEqualStrings("read", t.calls[0].name.get());
     try std.testing.expectEqualStrings("{\"path\":\"a\"}", t.calls[0].args.items());

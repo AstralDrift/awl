@@ -81,7 +81,8 @@ pub fn append(json: []const u8) void {
     const iov = [_]std.posix.iovec_const{ .{ .base = json.ptr, .len = json.len }, .{ .base = "\n", .len = 1 } };
     const want = json.len + 1;
     const rc = linux.writev(fd, &iov, 2);
-    if (linux.errno(rc) == .SUCCESS and rc < want) { // short write (disk full, signal): finish it
+    if (linux.errno(rc) != .SUCCESS) return; // not written (disk full, I/O error): later line numbers must not count it
+    if (rc < want) { // short write (disk full, signal): finish it
         if (rc < json.len) sys.writeAll(fd, json[rc..]) catch {};
         sys.writeAll(fd, "\n") catch {};
     }

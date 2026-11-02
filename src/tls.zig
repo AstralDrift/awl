@@ -10,10 +10,11 @@ const Buf = @import("buf.zig").Buf;
 const Client = std.crypto.tls.Client;
 const Bundle = std.crypto.Certificate.Bundle;
 
-pub const Error = error{ Tls, Closed, Cancel };
+pub const Error = error{ Tls, Closed, Cancel, Timeout };
 
 var fd: i32 = -1;
 var cancelled = false;
+var timed_out = false;
 var sock_in: std.Io.Reader = undefined;
 var sock_out: std.Io.Writer = undefined;
 var in_buf: [Client.min_buffer_len]u8 = undefined;
@@ -37,10 +38,14 @@ const sock_out_vt: std.Io.Writer.VTable = .{ .drain = drainOut };
 fn streamIn(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
     _ = r;
     const dest = limit.slice(try w.writableSliceGreedy(1));
-    _ = http.wait(fd, -1) catch |e| {
+    const ready = http.wait(fd, http.idle_ms) catch |e| {
         if (e == error.Cancel) cancelled = true;
         return error.ReadFailed;
     };
+    if (!ready) {
+        timed_out = true;
+        return error.ReadFailed;
+    }
     const n = sys.read(fd, dest) catch return error.ReadFailed;
     if (n == 0) return error.EndOfStream;
     w.advance(n);
@@ -65,6 +70,7 @@ fn drainOut(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Wr
 pub fn connect(s: i32, host: []const u8) Error!void {
     fd = s;
     cancelled = false;
+    timed_out = false;
     loadBundle() catch |e| {
         detail = switch (e) {
             error.NoBundle => "no CA bundle found (set AWL_CA_FILE)",
@@ -106,7 +112,7 @@ pub fn read(dest: []u8) Error!usize {
     const r = &client.reader;
     if (r.buffered().len == 0) r.fill(1) catch |e| switch (e) {
         error.EndOfStream => return 0,
-        error.ReadFailed => return if (cancelled) error.Cancel else error.Closed,
+        error.ReadFailed => return if (cancelled) error.Cancel else if (timed_out) error.Timeout else error.Closed,
     };
     const have = r.buffered();
     const n = @min(have.len, dest.len);

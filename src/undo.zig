@@ -133,8 +133,11 @@ pub fn undo(write: *const fn ([]const u8, []const []const u8, *Buf) bool, out: *
         } else {
             var pb: [4096]u8 = undefined;
             const rc = linux.unlinkat(linux.AT.FDCWD, sys.z(&pb, r.path), 0);
-            if (linux.errno(rc) == .SUCCESS or linux.errno(rc) == .NOENT) {
+            if (linux.errno(rc) == .SUCCESS) {
                 out.print("removed {s} (created by that turn)\n", .{r.path});
+                n += 1;
+            } else if (linux.errno(rc) == .NOENT) {
+                out.print("{s} (created by that turn) was already gone\n", .{r.path});
                 n += 1;
             } else out.print("could not remove {s}\n", .{r.path});
         }

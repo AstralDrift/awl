@@ -20,12 +20,16 @@ serve() {
   shift
   LOG=$W/req-$RANDOM.jsonl
   python3 "$HERE/fake_sse.py" "$script" --log "$LOG" "$@" >"$W/port" &
-  for _ in $(seq 50); do [ -s "$W/port" ] && break; sleep 0.02; done
+  SPID=$!
+  for _ in $(seq 100); do [ -s "$W/port" ] && break; sleep 0.02; done
   PORT=$(cat "$W/port")
+  [ -n "$PORT" ] || { echo "FAIL fake server did not start for $script"; kill "$SPID" 2>/dev/null; exit 1; }
   : >"$W/port"
   export AWL_URL=http://127.0.0.1:$PORT
 }
-stop() { kill %% 2>/dev/null; wait 2>/dev/null; }
+# Stops this server only, by pid: a bare `wait` would block on any older server a missed stop
+# left behind (a merge once dropped one and CI hung until its 30-minute limit).
+stop() { kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null; }
 
 # 1. streaming in every transfer mode and split size
 echo '[{"content":"héllo ✓ there"}]' >"$W/hi.json"

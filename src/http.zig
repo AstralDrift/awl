@@ -58,11 +58,22 @@ pub fn resolve(u: *Url) Error!void {
     u.ip = dns.resolve(u.name) orelse return error.Resolve;
 }
 
+/// No byte from the model for this long ends the request (AWL_TIMEOUT; < 0: wait forever). A worker
+/// that died without closing TCP, or a NAT that dropped an idle connection, would otherwise hang a
+/// run forever: there is no kernel timeout on a read.
+pub var idle_ms: i32 = 600_000;
+/// Connecting: a dropped SYN would otherwise block ~2 minutes per attempt with Ctrl-C ignored.
+pub const connect_ms: i32 = 15_000;
+
 /// Block until `fd` is readable. SIGINT (via sys.sigfd) turns into error.Cancel.
 /// timeout_ms < 0 waits forever; returns false on timeout.
 pub fn wait(fd: sys.fd_t, timeout_ms: i32) Error!bool {
+    return waitFor(fd, linux.POLL.IN, timeout_ms);
+}
+
+pub fn waitFor(fd: sys.fd_t, events: i16, timeout_ms: i32) Error!bool {
     var p = [2]linux.pollfd{
-        .{ .fd = fd, .events = linux.POLL.IN, .revents = 0 },
+        .{ .fd = fd, .events = events, .revents = 0 },
         .{ .fd = sys.sigfd, .events = linux.POLL.IN, .revents = 0 },
     };
     var left = timeout_ms;
@@ -93,12 +104,25 @@ pub fn connect(u: Url) Error!sys.fd_t {
     const fd: sys.fd_t = @intCast(try sys.check(linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)));
     errdefer sys.close(fd);
     var addr = linux.sockaddr.in{ .port = std.mem.nativeToBig(u16, u.port), .addr = @bitCast(u.ip) };
-    _ = sys.check(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) catch return error.Connect;
+    // Non-blocking connect, awaited with poll: bounded by connect_ms and interruptible by Ctrl-C.
+    const fl = linux.fcntl(fd, linux.F.GETFL, 0);
+    const nonblock: usize = @as(u32, @bitCast(linux.O{ .NONBLOCK = true }));
+    _ = linux.fcntl(fd, linux.F.SETFL, fl | nonblock);
+    const rc = linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
+    if (linux.errno(rc) == .INPROGRESS) {
+        if (!try waitFor(fd, linux.POLL.OUT, connect_ms)) return error.Connect;
+        var err: i32 = 0;
+        var len: u32 = @sizeOf(i32);
+        _ = linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&err), &len);
+        if (err != 0) return error.Connect;
+    } else _ = sys.check(rc) catch return error.Connect;
+    _ = linux.fcntl(fd, linux.F.SETFL, fl);
     const one: i32 = 1;
     _ = linux.setsockopt(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, std.mem.asBytes(&one), @sizeOf(i32));
     if (u.tls) tls.connect(fd, u.name) catch |e| return switch (e) {
         error.Cancel => error.Cancel,
         error.Closed => error.Closed,
+        error.Timeout => error.Timeout,
         error.Tls => error.Tls,
     };
     return fd;
@@ -113,13 +137,17 @@ pub fn send(fd: sys.fd_t, u: Url, method: []const u8, path: []const u8, key: ?[]
     var total: usize = 0;
     for (body) |b| total += b.len;
     var hb: [1024]u8 = undefined;
-    var auth_b: [600]u8 = undefined;
-    const auth = if (key) |k| std.fmt.bufPrint(&auth_b, "Authorization: Bearer {s}\r\n", .{k}) catch "" else "";
     var host_b: [300]u8 = undefined;
     const default_port = u.port == (if (u.tls) @as(u16, 443) else 80);
     const host = if (default_port) u.name else std.fmt.bufPrint(&host_b, "{s}:{d}", .{ u.name, u.port }) catch u.host;
-    const head = std.fmt.bufPrint(&hb, "{s} {s}{s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: awl\r\nAccept: text/event-stream\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n{s}\r\n", .{ method, u.prefix, path, host, total, auth }) catch return error.Http;
+    const head = std.fmt.bufPrint(&hb, "{s} {s}{s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: awl\r\nAccept: text/event-stream\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n", .{ method, u.prefix, path, host, total }) catch return error.Http;
     try writeOut(fd, u, head);
+    if (key) |k| { // written as its own segments: a key of any length (gateway JWTs run to 2 KB)
+        try writeOut(fd, u, "Authorization: Bearer ");
+        try writeOut(fd, u, k);
+        try writeOut(fd, u, "\r\n");
+    }
+    try writeOut(fd, u, "\r\n");
     for (body) |b| try writeOut(fd, u, b);
     if (u.tls) tls.flush() catch return error.Closed;
 }
@@ -149,9 +177,10 @@ pub const Response = struct {
         }
         const n = if (self.tls) tls.read(self.buf[self.end..]) catch |e| return switch (e) {
             error.Cancel => error.Cancel,
+            error.Timeout => error.Timeout,
             else => error.Closed,
         } else blk: {
-            _ = try wait(self.fd, -1);
+            if (!try wait(self.fd, idle_ms)) return error.Timeout;
             break :blk try sys.read(self.fd, self.buf[self.end..]);
         };
         self.end += n;
@@ -201,6 +230,10 @@ pub const Response = struct {
                 return null;
             }
             self.left = n;
+        }
+        if (!self.chunked and self.left != null and self.left.? == 0) { // Content-Length: 0 (an empty 401 or 204): nothing to wait for
+            self.done = true;
+            return null;
         }
         if (self.pos == self.end and !try self.fill()) {
             self.done = true;

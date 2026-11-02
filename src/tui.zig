@@ -213,15 +213,25 @@ pub fn repl() u8 {
         };
         var expanded = Buf.init(8 << 20);
         defer expanded.free();
-        if (text[0] == '/' and promptCommand(text, &expanded)) text = expanded.items();
-        if (text[0] == '!') {
+        // A prompt command's body comes from a file, maybe the project's (.agents/prompts in a cloned
+        // repo): it is text for the model, never a `!` command to run here or `@` files to attach.
+        var from_file = false;
+        if (text[0] == '/' and promptCommand(text, &expanded)) {
+            text = expanded.items();
+            from_file = true;
+        } else if (text[0] == '/' and looksLikeCommand(text)) {
+            const word = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
+            ui.note("unknown command {s} (/help lists them; a leading space sends the line as text)", .{word});
+            continue;
+        }
+        if (!from_file and text[0] == '!') {
             shell(text[1..]);
             continue;
         }
         var msg = Buf.init(text.len + (1 << 20));
         defer msg.free();
         msg.add(text);
-        attach(text, &msg);
+        if (!from_file) attach(text, &msg);
         agent.user(msg.items());
         runAgent(&ed);
         if (screen.on) ui.raw("") else out("\n");
@@ -530,6 +540,7 @@ var esc: enum { none, esc, seq } = .none;
 var ta_seq: [16]u8 = undefined;
 var seq_n: usize = 0;
 var ta_paste = false;
+var ta_last_cr = false; // the previous type-ahead byte was a pasted '\r' (CRLF counts once)
 
 var hist: ?*Buf = null; // the editor's history: queued messages are added to it
 
@@ -589,8 +600,7 @@ fn takeQueued() ?[]const u8 {
     if (q_count == 0) return null;
     const t = q_mem[0..q_n];
     if (hist) |h| {
-        h.add(t);
-        h.byte(0);
+        histPush(h, t);
         session.appendHistory(t);
     }
     q_n = 0;
@@ -652,11 +662,13 @@ fn key(c: u8) void {
         },
         .none => {},
     }
+    const ta_after_cr = ta_last_cr;
+    ta_last_cr = c == '\r' and ta_paste;
     switch (c) {
         27 => esc = .esc,
         '\r' => if (ta_paste) addDraft("\n") else queueDraft(),
         '\t' => if (ta_paste) addDraft("\t") else replayAdd("\t"), // completion runs in the editor
-        '\n' => addDraft("\n"),
+        '\n' => if (!ta_after_cr) addDraft("\n"),
         127, 8 => {
             while (draft_n > 0) {
                 draft_n -= 1;
@@ -690,10 +702,7 @@ fn heldCommand() []const u8 {
     cmd_n = 0;
     @memcpy(cmd_out[0..n], cmd_mem[0..n]);
     ui.userEcho(cmd_out[0..n]);
-    if (hist) |h| {
-        h.add(cmd_out[0..n]);
-        h.byte(0);
-    }
+    if (hist) |h| histPush(h, cmd_out[0..n]);
     session.appendHistory(cmd_out[0..n]);
     return cmd_out[0..n];
 }
@@ -833,6 +842,31 @@ test "shownLine makes control bytes visible" {
 }
 
 /// `/name args` for a prompt command (prompts.zig): its text, filled in, in `out`.
+/// "/word" or "/word args" with a plain word: a command that does not exist, not a path like
+/// /etc/hosts or /tmp/x.py that the user meant as text.
+fn looksLikeCommand(text: []const u8) bool {
+    const word = text[1 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
+    if (word.len == 0 or word.len > 32) return false;
+    for (word) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_')) return false;
+    return true;
+}
+
+test "looksLikeCommand: a bare word is one, a path is not" {
+    try std.testing.expect(looksLikeCommand("/comand"));
+    try std.testing.expect(looksLikeCommand("/resum x"));
+    try std.testing.expect(!looksLikeCommand("/etc/hosts has a bug"));
+    try std.testing.expect(!looksLikeCommand("/tmp/x.py"));
+    try std.testing.expect(!looksLikeCommand("/"));
+}
+
+/// Append a prompt-history entry, 0-terminated; an entry that does not fit whole is left out
+/// (a truncated entry without its 0 would break the ↑ walk).
+fn histPush(h: *Buf, t: []const u8) void {
+    const before = h.len;
+    h.add(t);
+    if (h.len - before < t.len or h.full()) h.truncate(before) else h.byte(0);
+}
+
 fn promptCommand(text: []const u8, dst: *Buf) bool {
     const end = std.mem.indexOfAny(u8, text, " \t\n") orelse text.len;
     const name = text[1..end];
@@ -941,7 +975,7 @@ fn command(text: []const u8) ?bool {
         } else {
             const list = std.mem.trimEnd(u8, o.items(), "\n");
             ui.note("{s}", .{list});
-            agent.pending_note.print("[The user ran /undo. Your file changes from the previous turn were reverted:\n{s}\nThe files are back to how they were before that turn.]", .{list});
+            agent.pending_note.print("[The user ran /undo. Your file changes from the newest turn that changed files were reverted:\n{s}\nThe files are back to how they were before that turn.]", .{list});
         }
     } else if (eq(u8, text, "/mode") or std.mem.startsWith(u8, text, "/mode ")) {
         const arg = std.mem.trim(u8, text[5..], " ");
@@ -1493,6 +1527,7 @@ const Editor = struct {
     hist: Buf = Buf.init(4 << 20), // entries separated by 0
     hpos: ?usize = null, // byte offset of the history entry being shown
     pasting: bool = false,
+    last_cr: bool = false,
     ctrl_c: bool = false,
     in: *[4096]u8 = &in_mem,
     in_n: usize = 0,
@@ -1547,6 +1582,7 @@ const Editor = struct {
         self.preset = 0;
         self.row = 0;
         self.hpos = null;
+        self.pasting = false; // a paste cut short by Ctrl-C (the kernel flushed its end marker) must not stick
         self.foot = true;
         ui.themeTick();
         branch = gitBranch(&branch_b);
@@ -1559,6 +1595,8 @@ const Editor = struct {
             if (c != 3) self.ctrl_c = false;
             if (c != 18) self.search_n = null;
             if (c != 27) esc_armed = 0;
+            const after_cr = self.last_cr; // "\r\n" in a paste (Windows text through WSL, PuTTY) is one newline
+            self.last_cr = c == '\r' and self.pasting;
             switch (c) {
                 '\r' => {
                     if (self.pasting) {
@@ -1571,13 +1609,12 @@ const Editor = struct {
                     } else self.leave();
                     const t = self.text[0..self.len];
                     if (std.mem.trim(u8, t, " \n").len > 0) {
-                        self.hist.add(t);
-                        self.hist.byte(0);
+                        histPush(&self.hist, t);
                         session.appendHistory(t);
                     }
                     return t;
                 },
-                '\n' => self.insert("\n"),
+                '\n' => if (!after_cr) self.insert("\n"),
                 3 => { // Ctrl-C
                     if (self.len > 0) {
                         self.len = 0;

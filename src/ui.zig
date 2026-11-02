@@ -431,7 +431,9 @@ fn checklist() void {
             '-' => .{ muted(), "–" },
             else => .{ muted(), "○" },
         };
-        print("  {s}{s}{s} {s}{s}{s}\n", .{ st[0], st[1], reset(), if (l[1] == '>') sgr(&th.fg) else muted(), cut(l[4..], w), reset() });
+        print("  {s}{s}{s} {s}", .{ st[0], st[1], reset(), if (l[1] == '>') sgr(&th.fg) else muted() });
+        putSafe(cut(l[4..], w));
+        print("{s}\n", .{reset()});
     }
     flush();
 }
@@ -510,10 +512,47 @@ pub fn content(s0: []const u8) void {
         return;
     }
     if (!color) {
-        put(s);
+        putSafe(s);
         bol = s[s.len - 1] == '\n';
-    } else for (s) |c| md(c);
+    } else for (s) |c| {
+        // Text from the model (or a file it read) is never a terminal command: ESC, other C0 bytes
+        // and C1 controls (U+0080-U+009F, which some terminals read as CSI/OSC) are dropped. OSC 52
+        // could write the clipboard or, with a permissive terminal, read it back into the prompt.
+        if (held_c2) {
+            held_c2 = false;
+            if (c >= 0x80 and c <= 0x9F) continue;
+            md(0xC2);
+        }
+        if (c == 0xC2) {
+            held_c2 = true;
+            continue;
+        }
+        if ((c < 0x20 and c != '\n' and c != '\t') or c == 0x7f) continue;
+        md(c);
+    }
     flush();
+}
+var held_c2 = false; // a 0xC2 lead byte waiting to see whether it starts a C1 control
+
+/// put() for text the model or a tool produced: control bytes (except newline and tab), DEL and
+/// C1 controls are left out, so a README or a command's output cannot drive the terminal.
+fn putSafe(s: []const u8) void {
+    var i: usize = 0;
+    var start: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        const c1 = c == 0xC2 and i + 1 < s.len and s[i + 1] >= 0x80 and s[i + 1] <= 0x9F;
+        if ((c < 0x20 and c != '\n' and c != '\t') or c == 0x7f or c1) {
+            put(s[start..i]);
+            if (c1) i += 1;
+            start = i + 1;
+        }
+    }
+    put(s[start..]);
+}
+
+test "putSafe drops control and C1 bytes, keeps text, newline and tab" {
+    try std.testing.expectEqualStrings("a]52;c;xxb\tc\nd\xc2\xa9e", try render(putSafe, .{"a\x1b]52;c;xx\x07b\tc\n\xc2\x9bd\xc2\xa9e\x7f"}));
 }
 
 // Markdown-lite, one byte at a time so replies still stream: headings, **bold**,
@@ -532,7 +571,7 @@ const Lead = enum { wait, heading, bullet, done, todo, fence, quote, table, text
 fn classify(p: []const u8, in_fence: bool) Lead {
     const s = std.mem.trimStart(u8, p, " ");
     if (s.len == 0) return .wait;
-    if (std.mem.allEqual(u8, s, '`')) return if (s.len == 3) .fence else if (s.len < 3) .wait else .text;
+    if (std.mem.allEqual(u8, s, '`')) return if (s.len >= 3) .fence else .wait; // ```` fences too
     if (in_fence) return .text;
     if (s[0] == '#') {
         const h = std.mem.indexOfNone(u8, s, "#") orelse return if (s.len <= 6) .wait else .text;
@@ -687,7 +726,7 @@ fn wrapPiece(s: []const u8, w: usize) []const u8 {
 /// A table too wide for the terminal: each row as a record, its first cell bold, then "Header: value" lines
 /// that the terminal wraps. Readable at any width, unlike pipes broken across lines.
 fn tableRecords(text: []const u8, ncols: usize) void {
-    var head: [16][]const u8 = undefined;
+    var head: [16][]const u8 = .{""} ** 16; // a ragged row may have more cells than the header
     var it = std.mem.splitScalar(u8, text, '\n');
     var row: usize = 0;
     while (it.next()) |line| {
@@ -876,9 +915,9 @@ fn linkChar(c: u8) bool {
         return true;
     }
     put("\x1b]8;;");
-    put(url);
+    putSafe(url);
     put("\x1b\\\x1b[4m");
-    put(text);
+    putSafe(text);
     put("\x1b[24m\x1b]8;;\x1b\\");
     return true;
 }
@@ -1012,7 +1051,9 @@ pub fn tool(name: []const u8, summary: []const u8) void {
     @memcpy(tool_name[0..tool_name_n], name[0..tool_name_n]);
     const w = @as(usize, sys.termCols()) -| (name.len + 4);
     const sm = cut(summary, w);
-    print("{s}▸ {s}{s} {s}{s}\n", .{ accent(), name, reset(), sm, if (sm.len < summary.len) "…" else "" });
+    print("{s}▸ {s}{s} ", .{ accent(), name, reset() });
+    putSafe(sm); // the summary is the model's command or path
+    put(if (sm.len < summary.len) "…\n" else "\n");
     flush();
     diff_lines = 0;
     diffed = false;
@@ -1084,7 +1125,7 @@ fn diffLine(st: *const Sgr, mark: []const u8, l: []const u8, w: usize) void {
     put(sgr(st));
     put(mark);
     const t = cut(l, w);
-    put(t);
+    putSafe(t);
     if (t.len < l.len) put("…");
     put(reset());
     put("\n");
@@ -1142,7 +1183,7 @@ pub fn toolOutput(text: []const u8, ok: bool) void {
     while (it.next()) |l| : (i += 1) {
         if (if (at_end) i + keep < total else i >= keep) continue;
         put("  ");
-        put(cut(l, w));
+        putSafe(cut(l, w));
         put("\n");
     }
     if (!at_end and total > keep) print("  … {d} more lines\n", .{total - keep});
@@ -1208,6 +1249,7 @@ test "end-of-turn line: items drop from the end to fit" {
 }
 
 pub fn err(comptime f: []const u8, a: anytype) void {
+    @import("summary.zig").noteError(f, a);
     endMessage();
     put(sgr(&th.red));
     print(f, a);
@@ -1251,7 +1293,7 @@ pub fn lastCodeBlock(s: []const u8) ?[]const u8 {
 pub fn expand() void {
     if (last_tool.len == 0) return note("no tool output yet", .{});
     endMessage();
-    put(last_tool.items());
+    putSafe(last_tool.items());
     if (last_tool.items()[last_tool.len - 1] != '\n') put("\n");
     flush();
 }
