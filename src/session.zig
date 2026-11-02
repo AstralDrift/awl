@@ -127,7 +127,7 @@ pub var view_path: []const u8 = "";
 pub var view_lines: u32 = 0;
 
 /// Create the view, or empty it in place (same file: a sandbox mount of it stays valid).
-pub var view_on = false; // AWL_CTX_MODE=fresh/async: the view exists (compact writes none)
+pub var view_on = false; // set from AWL_CTX_MODE at startup: fresh (default) writes the view, compact writes none
 
 fn viewReset() void {
     view_lines = 0;
