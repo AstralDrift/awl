@@ -599,10 +599,18 @@ pub fn putSidecar(jsonl: []const u8, ext: []const u8, text: []const u8) bool {
     const p = sidecar(jsonl, ext, &pb);
     var zb: [600]u8 = undefined;
     if (text.len == 0) return linux.errno(linux.unlinkat(linux.AT.FDCWD, sys.z(&zb, p), 0)) == .SUCCESS;
-    const f = sys.open(p, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600) catch return false;
-    defer sys.close(f);
-    sys.writeAll(f, text) catch return false;
-    return true;
+    // Written whole, then renamed into place: the agent polls .answer every 300 ms and reads an
+    // empty file as "no", so an O_TRUNC write could turn a y into a decline.
+    var tb: [608]u8 = undefined;
+    const tmp = std.fmt.bufPrint(&tb, "{s}.tmp", .{p}) catch return false;
+    const f = sys.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600) catch return false;
+    sys.writeAll(f, text) catch {
+        sys.close(f);
+        return false;
+    };
+    sys.close(f);
+    var zt: [616]u8 = undefined;
+    return linux.errno(linux.renameat(linux.AT.FDCWD, sys.z(&zt, tmp), linux.AT.FDCWD, sys.z(&zb, p))) == .SUCCESS;
 }
 
 /// Queue a message for a background agent (it reads its inbox before each step).

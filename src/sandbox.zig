@@ -32,7 +32,7 @@ var keep_sockets: []const u8 = "";
 
 /// Paths hidden from the model (empty tmpfs in the sandbox; read refuses them).
 const secrets = [_][]const u8{ "/.ssh", "/.gnupg", "/.aws", "/.config/gh", "/.local/state/omarchy", "/.password-store", "/.local/share/keyrings", "/.docker", "/.kube" };
-const sockets = [_][]const u8{ "/run/docker.sock", "/var/run/docker.sock" };
+const sockets = [_][]const u8{ "/run/docker.sock", "/var/run/docker.sock", "/run/dbus/system_bus_socket", "/run/libvirt/libvirt-sock", "/run/snapd.socket", "/run/podman/podman.sock" };
 const caches = [_][]const u8{ "/.cache", "/.npm", "/.cargo/registry", "/go/pkg" };
 /// Project paths that shape what runs outside the sandbox or what the next session is told:
 /// read-only to commands; write/edit need the user's approval every time.
@@ -61,7 +61,8 @@ pub fn setup(project_root: []const u8) void {
 pub fn describe(buf: []u8) []const u8 {
     if (missing) return "no sandbox: install bubblewrap to let the model run commands (or AWL_SANDBOX=off)";
     if (!on) return "sandbox off";
-    return std.fmt.bufPrint(buf, "sandbox: writes only to the project, /tmp and caches; network {s}", .{if (net) "on" else if (no_net) "off (AWL_NETWORK=off: a command with network: true is refused)" else "off (bash network: true asks the user for one command)"}) catch "sandbox on";
+    const wide = std.mem.eql(u8, root, home) or std.mem.eql(u8, root, "/");
+    return std.fmt.bufPrint(buf, "sandbox: writes only to the project{s}, /tmp and caches; network {s}", .{ if (wide) " (which is your whole home folder: start awl inside a project to narrow it)" else "", if (net) "on" else if (no_net) "off (AWL_NETWORK=off: a command with network: true is refused)" else "off (bash network: true asks the user for one command)" }) catch "sandbox on";
 }
 
 // ---- the session sandbox ----
@@ -78,14 +79,15 @@ fn joinNs() u32 {
 }
 
 const Args = struct {
-    v: [256:null]?[*:0]const u8 = undefined,
+    v: [1024:null]?[*:0]const u8 = undefined,
     n: usize = 0,
+    overflow: bool = false, // more mounts than fit: the sandbox must not start thinner than asked
     zs: ZStrings = .{},
     fn add(self: *Args, s: [*:0]const u8) void {
-        if (self.n < self.v.len - 8) {
+        if (self.n < self.v.len - 8 and !self.zs.overflow) {
             self.v[self.n] = s;
             self.n += 1;
-        }
+        } else self.overflow = true;
     }
     fn addAll(self: *Args, ss: []const [*:0]const u8) void {
         for (ss) |s| self.add(s);
@@ -201,6 +203,7 @@ pub fn ready() ?[]const u8 {
     options(a, net);
     // "ready" comes from inside, so every mount is in place before the first command joins.
     a.addAll(&.{ "--info-fd", "100", "--", "/bin/sh", "-c", "echo ready; exec /usr/bin/sleep infinity" });
+    if (a.overflow) return "the sandbox did not start: too many paths to hide (sockets under /tmp?); AWL_SANDBOX_SOCKETS names ones to keep, or clean /tmp";
     a.v[a.n] = null;
     var p: [2]i32 = undefined;
     if (linux.errno(linux.pipe2(&p, .{ .CLOEXEC = true })) != .SUCCESS) return "pipe failed";
@@ -313,7 +316,9 @@ pub fn execIn(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const
         _ = linux.prctl(@intFromEnum(linux.PR.SET_PDEATHSIG), @intFromEnum(linux.SIG.KILL), 0, 0, 0);
         _ = linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
         if (linux.errno(linux.chdir(cwd)) != .SUCCESS) _ = linux.chdir(@ptrCast(root_z()));
-        // exec as our own uid (not 0) drops the capabilities setns gave us
+        // exec as our own uid (not 0) drops the capabilities setns gave us; as uid 0 (a dev container,
+        // CI) it would keep them all, so the bounding set goes first: nothing exec'd can hold a capability
+        for (0..64) |c| _ = linux.prctl(@intFromEnum(linux.PR.CAPBSET_DROP), c, 0, 0, 0);
         _ = linux.execve(argv[0].?, argv, env);
         linux.exit_group(127);
     }
@@ -382,10 +387,14 @@ pub fn envp(src: []const [*:0]const u8, buf: []?[*:0]const u8) [*:null]const ?[*
 
 /// Small arena for NUL-terminated strings.
 pub const ZStrings = struct {
-    b: [32768]u8 = undefined,
+    b: [131072]u8 = undefined,
     n: usize = 0,
+    overflow: bool = false,
     pub fn z(self: *ZStrings, s: []const u8) [*:0]const u8 {
-        if (self.n + s.len + 1 > self.b.len) return "/nonexistent";
+        if (self.n + s.len + 1 > self.b.len) {
+            self.overflow = true;
+            return "/nonexistent";
+        }
         const start = self.n;
         @memcpy(self.b[start .. start + s.len], s);
         self.b[start + s.len] = 0;
@@ -396,8 +405,10 @@ pub const ZStrings = struct {
 
 // ---- path rules for read/write/edit (in-process) ----
 
-/// `abs` with symlinks resolved as far as the path exists (the rest appended as is).
-/// A dangling symlink resolves to "/nonexistent" so nothing writes through it.
+/// `abs` as the kernel sees it: the longest existing prefix is opened and its real path read back
+/// (symlinks and ".." resolved in the kernel's order, so "link/../x" is what the kernel would open,
+/// not the lexical "x"); the missing rest is appended with "." and ".." folded. A dangling symlink
+/// or an unreadable real path resolves to "/nonexistent" so nothing writes through it.
 pub fn resolve(abs: []const u8, out: []u8) []const u8 {
     var cut = abs.len;
     while (true) {
@@ -407,16 +418,17 @@ pub fn resolve(abs: []const u8, out: []u8) []const u8 {
             var lb: [64]u8 = undefined;
             const link = std.fmt.bufPrint(&lb, "/proc/self/fd/{d}", .{fd}) catch unreachable;
             var zb: [64]u8 = undefined;
-            const rc = linux.readlink(sys.z(&zb, link), out.ptr, out.len);
-            if (linux.errno(rc) != .SUCCESS) return abs;
+            var jb: [8192]u8 = undefined;
+            const rc = linux.readlink(sys.z(&zb, link), &jb, jb.len);
+            if (linux.errno(rc) != .SUCCESS) return "/nonexistent";
             var n: usize = rc;
             const rest = abs[cut..];
             if (n == 1 and rest.len > 0) n = 0; // "/" + "/rest"
-            if (n + rest.len > out.len) return abs;
-            @memcpy(out[n .. n + rest.len], rest);
-            return out[0 .. n + rest.len];
+            if (n + rest.len > jb.len) return "/nonexistent";
+            @memcpy(jb[n .. n + rest.len], rest);
+            return normalize(jb[0 .. n + rest.len], "/", out);
         } else |_| {}
-        if (cut == 0) return abs;
+        if (cut == 0) return normalize(abs, "/", out);
         if (cut == abs.len) { // the leaf is missing: is it a dangling symlink?
             var zb: [4096]u8 = undefined;
             var tb: [8]u8 = undefined;
@@ -426,8 +438,28 @@ pub fn resolve(abs: []const u8, out: []u8) []const u8 {
     }
 }
 
-/// write/edit: may the model write this path? `abs` is absolute with no ".." (see normalize);
-/// symlinks are resolved here. Always yes when the sandbox is off.
+/// The real path of an open descriptor (what the kernel opened), or null.
+pub fn fdPath(fd: i32, out: []u8) ?[]const u8 {
+    var lb: [64]u8 = undefined;
+    const link = std.fmt.bufPrint(&lb, "/proc/self/fd/{d}", .{fd}) catch return null;
+    var zb: [64]u8 = undefined;
+    const rc = linux.readlink(sys.z(&zb, link), out.ptr, out.len);
+    if (linux.errno(rc) != .SUCCESS or rc == out.len) return null;
+    return out[0..rc];
+}
+
+/// `path` made absolute against `cwd`, nothing else folded: resolve() lets the kernel do that.
+pub fn absolute(path: []const u8, cwd: []const u8, out: []u8) []const u8 {
+    if (path.len > 0 and path[0] == '/') {
+        const n = @min(path.len, out.len);
+        @memcpy(out[0..n], path[0..n]);
+        return out[0..n];
+    }
+    return std.fmt.bufPrint(out, "{s}/{s}", .{ cwd, path }) catch out[0..0];
+}
+
+/// write/edit: may the model write this path? `abs` is absolute (see absolute); symlinks and ".."
+/// are resolved here, the kernel's way. Always yes when the sandbox is off.
 pub fn writable(abs: []const u8) bool {
     if (!enforce) return true;
     var rb: [4096]u8 = undefined;
@@ -448,7 +480,8 @@ pub fn guardedPath(abs: []const u8) bool {
     var pb: [4200]u8 = undefined;
     for ([_][]const u8{ "/.git", "/AGENTS.md", "/.agents" }) |g|
         if (under(p, std.fmt.bufPrint(&pb, "{s}{s}", .{ root, g }) catch continue)) return true;
-    return false;
+    // a nested AGENTS.md is loaded by every session started in or below its folder
+    return under(p, root) and std.mem.endsWith(u8, p, "/AGENTS.md");
 }
 
 /// read: hidden from the model? Secrets, other processes (/proc), the user's sockets (/run/user),

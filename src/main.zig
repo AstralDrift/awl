@@ -31,16 +31,18 @@ fn shortPanic(msg: []const u8, _: ?usize) noreturn {
 const usage =
     \\usage: awl [-p PROMPT] [-c | -r FILE] [--full]
     \\  -p PROMPT   run once and print the reply (no TUI)
-    \\  -c          continue the latest session
+    \\  -c          continue the latest session started in this directory
     \\  -r FILE     resume a session file
     \\  --full      full-screen mode (also AWL_FULL=1, or /full)
     \\  --bg        with -p: run as a background agent (the TUI's ← view starts these)
     \\  --version   print "awl VERSION (COMMIT)": the build's version and git commit
     \\env: AWL_URL (http:// or https://, name or address) AWL_CA_FILE (PEM bundle for https)
     \\     AWL_MODEL AWL_KEY AWL_MODE AWL_REASONING AWL_MAX_TOKENS AWL_MAX_STEPS
-    \\     AWL_RETRIES AWL_SYSTEM AWL_AGENTS (off) AWL_WELCOME (off: one line)
-    \\     AWL_MODELS (Ctrl-P cycles) AWL_STATUS (model,ctx,mode,branch,dir,session or off)
-    \\     AWL_SANDBOX (off) AWL_SANDBOX_NET (off: no network for commands) AWL_SANDBOX_WRITE=dir:dir
+    \\     AWL_RETRIES AWL_TIMEOUT (s without data from the model, default 600; 0: none)
+    \\     AWL_CTX (context window in tokens, when the server does not report it) AWL_SYSTEM
+    \\     AWL_AGENTS (off) AWL_WELCOME (off: one line)
+    \\     AWL_MODELS (Ctrl-P cycles) AWL_STATUS (model,ctx,mode,branch,dir,session,agents or off)
+    \\     AWL_SANDBOX (off: no sandbox) AWL_SANDBOX_NET (on: every command gets the network) AWL_SANDBOX_WRITE=dir:dir
     \\     AWL_NETWORK (off: refuse commands that ask for the network, without asking anyone)
     \\     AWL_SANDBOX_SOCKETS=path:path (sockets under /tmp that commands may still reach)
     \\     AWL_SUMMARY=FILE (with -p: write a JSON summary of the run there; docs/embedding.md)
@@ -51,9 +53,15 @@ const usage =
     \\     AWL_THINK_ROWS (reasoning rows shown live, default 6; 0: timer only)
     \\     AWL_CTX_MODE (compact: summarize when the window fills; fresh: fresh context + session view)
     \\     AWL_DEBUG_KEYS=FILE (log raw input, escaped: for keyboard / paste problems)
-    \\     AWL_TITLE (off: leave the terminal title alone)
+    \\     AWL_TITLE (off: leave the terminal title alone) NO_COLOR (any value: no colors)
     \\
 ;
+
+/// A numeric setting: unset gives `default`; anything but a whole number is exit 2.
+fn num(comptime name: []const u8, comptime T: type, default: T) T {
+    const s = sys.getenv(name) orelse return default;
+    return std.fmt.parseInt(T, s, 10) catch die(name ++ " must be a whole number, not \"{s}\"", .{s});
+}
 
 fn die(comptime f: []const u8, a: anytype) noreturn {
     ui.err(f, a);
@@ -92,10 +100,17 @@ pub fn main(init: std.process.Init.Minimal) u8 {
             bg = true;
         } else if (eq(u8, a, "--idle-rss")) {
             idle = true;
+        } else if (eq(u8, a, "-h") or eq(u8, a, "--help")) {
+            sys.writeAll(sys.stdout, usage) catch {};
+            return 0;
         } else {
             sys.writeAll(sys.stderr, usage) catch {};
-            return if (eq(u8, a, "-h") or eq(u8, a, "--help")) 0 else 2;
+            return 2;
         }
+    }
+    if ((cont and resume_path != null) or (prompt != null and prompt.?.len == 0)) { // -c with -r; an empty prompt
+        sys.writeAll(sys.stderr, usage) catch {};
+        return 2;
     }
 
     if (bg and prompt == null) {
@@ -122,13 +137,20 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     http.resolve(&agent.cfg.url) catch die("cannot resolve {s} (checked /etc/hosts and the resolv.conf nameservers)", .{agent.cfg.url.name});
     var key_b: [512]u8 = undefined;
     agent.cfg.key = sys.getenv("AWL_KEY") orelse gatewayKey(&key_b);
-    if (sys.getenv("AWL_THINK_MAX")) |s| llm.think_max = 4 * (std.fmt.parseInt(usize, s, 10) catch 0);
-    if (sys.getenv("AWL_MAX_STEPS")) |s| agent.max_steps = std.fmt.parseInt(usize, s, 10) catch 200;
-    if (sys.getenv("AWL_RETRIES")) |s| agent.max_retries = std.fmt.parseInt(u32, s, 10) catch 5;
+    // Numeric settings: a value that is not a whole number is a mistake, not a default (exit 2,
+    // like a bad AWL_MODE), so an embedder's typo cannot run 200 steps or 65536 tokens unnoticed.
+    llm.think_max = 4 * num("AWL_THINK_MAX", usize, 0);
+    agent.max_steps = num("AWL_MAX_STEPS", usize, 200);
+    if (agent.max_steps == 0) die("AWL_MAX_STEPS must be at least 1", .{});
+    agent.max_retries = num("AWL_RETRIES", u32, 5);
+    _ = num("AWL_MAX_TOKENS", u32, 65536); // agent.zig reads it again (0: no cap)
+    _ = num("AWL_THINK_BUDGET", u32, 0); // agent.zig reads it again
+    const timeout_s = num("AWL_TIMEOUT", u32, 600);
+    http.idle_ms = if (timeout_s == 0) -1 else @intCast(@min(timeout_s, 2_000_000) * 1000);
     tui.keylog_path = sys.getenv("AWL_DEBUG_KEYS");
     if (sys.getenv("AWL_THINKING")) |s| agent.thinking = !std.mem.eql(u8, s, "off");
-    if (sys.getenv("AWL_KEEP_REASONING")) |s| agent.keep_reasoning = if (std.mem.eql(u8, s, "off")) 0 else std.fmt.parseInt(usize, s, 10) catch std.math.maxInt(usize);
-    if (sys.getenv("AWL_THINK_ROWS")) |s| ui.think_rows = @min(std.fmt.parseInt(usize, s, 10) catch 6, 64);
+    agent.keep_reasoning = if (sys.getenv("AWL_KEEP_REASONING")) |s| (if (std.mem.eql(u8, s, "off")) 0 else if (std.mem.eql(u8, s, "on")) std.math.maxInt(usize) else num("AWL_KEEP_REASONING", usize, 0)) else std.math.maxInt(usize);
+    ui.think_rows = @min(num("AWL_THINK_ROWS", usize, 6), 64);
     if (sys.getenv("AWL_FULL")) |s| tui.start_full = tui.start_full or std.mem.eql(u8, s, "1");
     if (sys.getenv("AWL_MODE")) |s| tools.mode = std.meta.stringToEnum(tools.Mode, s) orelse die("AWL_MODE must be auto, ask or plan", .{});
 
@@ -141,12 +163,14 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     }
 
     var model_b: [256]u8 = undefined;
-    const info: ?llm.ModelInfo = llm.firstModel(agent.cfg, &model_b) catch |e| switch (e) {
+    const info: ?llm.ModelInfo = llm.pickModel(agent.cfg, sys.getenv("AWL_MODEL"), &model_b) catch |e| switch (e) {
         error.Tls => die("TLS to {s} failed: {s}. AWL_CA_FILE=path points at another CA bundle.", .{ agent.cfg.url.host, @import("tls.zig").detail }),
         else => null,
     };
     agent.cfg.model = sys.getenv("AWL_MODEL") orelse if (info) |m| m.id else die("no model at {s}. Start one with Omarchy Local AI, or set AWL_URL / AWL_MODEL.", .{agent.cfg.url.host});
     if (info) |m| agent.ctx_limit = m.ctx;
+    const ctx_override = num("AWL_CTX", u64, 0); // the server did not say, or said it for another model
+    if (ctx_override > 0) agent.ctx_limit = ctx_override;
     agent.init(cwd);
     defer tools.killJobs(); // background jobs never outlive awl
     ui.cwd = cwd; // main's buffer lives as long as the program

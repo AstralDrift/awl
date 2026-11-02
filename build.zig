@@ -76,14 +76,14 @@ pub fn build(b: *std.Build) void {
     check.addArtifactArg(exe);
     b.step("check", "Assert RSS / startup budgets").dependOn(&check.step);
 
-    const e2e = b.addSystemCommand(&.{ "bash", "tests/e2e.sh" });
+    const e2e = b.addSystemCommand(&.{ "timeout", "20m", "bash", "tests/e2e.sh" });
     e2e.addArtifactArg(exe);
-    const embed = b.addSystemCommand(&.{ "bash", "tests/embed.sh" });
+    const embed = b.addSystemCommand(&.{ "timeout", "20m", "bash", "tests/embed.sh" });
     embed.addArtifactArg(exe);
     embed.step.dependOn(&e2e.step); // one fake server at a time, readable output
     b.step("e2e", "End-to-end tests against tests/fake_sse.py").dependOn(&embed.step);
 
-    const sbx = b.addSystemCommand(&.{ "bash", "tests/sandbox.sh" });
+    const sbx = b.addSystemCommand(&.{ "timeout", "20m", "bash", "tests/sandbox.sh" });
     sbx.addArtifactArg(exe);
     b.step("sandbox", "Sandbox escape checks against tests/fake_sse.py").dependOn(&sbx.step);
 }

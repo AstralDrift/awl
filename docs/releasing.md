@@ -28,8 +28,10 @@ workflow artifact, kept 14 days. A weekly scheduled run catches runner image cha
 
 4. The Release workflow checks the tag against `build.zig.zon`, checks the commit is on
    `main` and that `lint` and both `test` jobs passed on it, builds both binaries on two
-   runners, and publishes only if all four builds are byte-identical. Release notes are
-   GitHub's generated list of merged PRs, under the checksums.
+   runners, runs the embedder contract (`tests/embed.sh`) and the unit tests against the
+   native release binary on each, and publishes only if all four builds are byte-identical.
+   Release notes are the tag's section of `CHANGELOG.md` (write it in the version PR), the
+   checksums, and GitHub's generated list of merged PRs.
 
 If the gate fails because CI was still running, re-run the workflow from the Actions tab
 once CI is green. A bad tag: delete the release and the tag, fix on `main`, and use the

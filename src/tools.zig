@@ -381,8 +381,9 @@ fn workdir() []const u8 {
 
 /// write/edit outside what the sandbox allows: refuse, and say what is writable.
 fn outside(path: []const u8, out: *Buf) bool {
+    var ab: [4096]u8 = undefined;
     var nb: [4096]u8 = undefined;
-    const abs = sandbox.normalize(path, workdir(), &nb);
+    const abs = sandbox.resolve(sandbox.absolute(path, workdir(), &ab), &nb);
     if (sandbox.writable(abs)) return false;
     out.print("not written: {s} is outside the sandbox (writable: the project {s}, /tmp, build caches; the user can add AWL_SANDBOX_WRITE=dir)", .{ abs, sandbox.root });
     return true;
@@ -394,8 +395,9 @@ pub var asking_once = false;
 /// write/edit to the project's .git, AGENTS.md or .agents: the user says yes every time, in
 /// every mode; with nobody to ask, no. true: refused, and `out` says why.
 fn guarded(name: []const u8, path: []const u8, out: *Buf) error{Cancel}!bool {
+    var ab: [4096]u8 = undefined;
     var nb: [4096]u8 = undefined;
-    const abs = sandbox.normalize(path, workdir(), &nb);
+    const abs = sandbox.resolve(sandbox.absolute(path, workdir(), &ab), &nb);
     if (!sandbox.guardedPath(abs)) return false;
     const f = ask orelse {
         out.print("not written: {s} is guarded (git config and hooks run outside the sandbox; AGENTS.md and skills instruct later sessions). Only the user can approve this, in a terminal session.", .{abs});
@@ -504,6 +506,9 @@ fn errMsg(out: *Buf, what: []const u8, path: []const u8, e: anyerror) bool {
         error.NotFound => "no such file or directory",
         error.Access => "permission denied",
         error.IsDir => "is a directory",
+        error.NotRegular => "is not a regular file (a pipe, socket or device)",
+        error.Hidden => "is hidden from the model (secrets, other processes, the user's sockets)",
+        error.Exists => "already exists",
         else => @tagName(sys.last_errno),
     } });
     if (e == error.NotFound) _ = pathHint(out, path);
@@ -550,6 +555,7 @@ pub fn pathHint(out: *Buf, path: []const u8) bool {
     };
     // else: names in `dir` that start like the missing one
     const want = miss[0 .. std.mem.indexOfScalar(u8, miss, '/') orelse miss.len];
+    if (sandbox.hidden(dir)) return false; // a command's "No such file" line must not list ~/.ssh
     const dfd = sys.open(dir, .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch return false;
     defer sys.close(dfd);
     var best: [5][]const u8 = undefined;
@@ -644,19 +650,27 @@ const Map = struct {
 };
 
 fn mapFile(path: []const u8) !Map {
-    const fd = try sys.open(path, .{ .CLOEXEC = true }, 0);
+    // NONBLOCK: a named pipe with no writer would otherwise block the open forever (Ctrl-C is masked)
+    const fd = try sys.open(path, .{ .CLOEXEC = true, .NONBLOCK = true }, 0);
     defer sys.close(fd);
     var st: linux.Statx = undefined;
     _ = try sys.check(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .SIZE = true, .TYPE = true }, &st));
     if (linux.S.ISDIR(st.mode)) return error.IsDir;
+    if (!linux.S.ISREG(st.mode)) return error.NotRegular;
+    // The rule is checked on the file the kernel opened: "link/../x" is not the lexical x.
+    var rb: [4096]u8 = undefined;
+    if (sandbox.fdPath(fd, &rb)) |real| {
+        if (sandbox.hidden(real)) return error.Hidden;
+    } else if (sandbox.enforce) return error.Hidden;
     if (st.size == 0) return .{ .bytes = &.{} };
     const rc = try sys.check(linux.mmap(null, st.size, .{ .READ = true }, .{ .TYPE = .PRIVATE }, fd, 0));
     return .{ .bytes = @as([*]const u8, @ptrFromInt(rc))[0..st.size] };
 }
 
 fn read(path: []const u8, offset: usize, limit: usize, out: *Buf) bool {
+    var ab: [4096]u8 = undefined;
     var nb: [4096]u8 = undefined;
-    if (sandbox.hidden(sandbox.normalize(path, workdir(), &nb))) {
+    if (sandbox.hidden(sandbox.resolve(sandbox.absolute(path, workdir(), &ab), &nb))) {
         out.print("not read: {s} is hidden from the model (secrets, other processes, the user's sockets)", .{path});
         return false;
     }
@@ -684,7 +698,7 @@ fn read(path: []const u8, offset: usize, limit: usize, out: *Buf) bool {
             break;
         }
         if (ln < start) continue;
-        if (shown == max or out.len + line0.len + 16 > out_cap) continue;
+        if (shown == max or out.len + @min(line0.len, 2000) + 24 > out_cap) continue;
         if (shown == 0 or ln % 10 == 0) out.print("{d}→", .{ln});
         const line = std.mem.trimEnd(u8, line0, "\r");
         if (line.len > 2000) {
@@ -712,29 +726,55 @@ fn mkdirs(path: []const u8) void {
     }
 }
 
-/// Atomic write: temp file in the same directory, then rename over the target.
+/// Atomic write: temp file in the same directory, then rename over the target. The directory is
+/// opened first and everything happens relative to it, checked against its real path: a symlink
+/// or ".." in the model's path, or one a background job plants between the check and the write,
+/// cannot move the target. The temp name is random and opened O_EXCL|O_NOFOLLOW, so a planted
+/// link cannot catch it either.
 fn write(path: []const u8, parts: []const []const u8, out: *Buf) bool {
-    mkdirs(path);
-    var tb: [4096]u8 = undefined;
-    const tmp = std.fmt.bufPrint(&tb, "{s}.awl-{d}", .{ path, linux.getpid() }) catch return errMsg(out, "write", path, error.Sys);
+    var ab: [4096]u8 = undefined;
+    var rb: [4096]u8 = undefined;
+    const real = sandbox.resolve(sandbox.absolute(path, workdir(), &ab), &rb);
+    const slash = std.mem.lastIndexOfScalar(u8, real, '/') orelse return errMsg(out, "write", path, error.Sys);
+    const leaf = real[slash + 1 ..];
+    if (leaf.len == 0 or leaf.len > 255) return errMsg(out, "write", path, error.Sys);
+    mkdirs(real);
+    const dir = if (slash == 0) "/" else real[0..slash];
+    const dfd = sys.open(dir, .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true }, 0) catch |e| return errMsg(out, "write", path, e);
+    defer sys.close(dfd);
+    var db: [4096]u8 = undefined;
+    var fb: [4400]u8 = undefined;
+    const dreal = sandbox.fdPath(dfd, &db) orelse return errMsg(out, "write", path, error.Access);
+    const freal = std.fmt.bufPrint(&fb, "{s}/{s}", .{ if (dreal.len == 1) "" else dreal, leaf }) catch return errMsg(out, "write", path, error.Sys);
+    if (!sandbox.writable(freal)) return errMsg(out, "write", path, error.Access);
+    var rnd: [4]u8 = undefined;
+    _ = linux.getrandom(&rnd, rnd.len, 0);
+    var tb: [300]u8 = undefined;
+    const tmp = std.fmt.bufPrint(&tb, "{s}.awl-{x}", .{ leaf, std.mem.readInt(u32, &rnd, .little) }) catch return errMsg(out, "write", path, error.Sys);
     var fmode: linux.mode_t = 0o644;
-    var pb: [4096]u8 = undefined;
+    var zl: [256]u8 = undefined;
     var st: linux.Statx = undefined;
-    if (linux.errno(linux.statx(linux.AT.FDCWD, sys.z(&pb, path), 0, .{ .MODE = true }, &st)) == .SUCCESS) fmode = st.mode & 0o7777;
-    const fd = sys.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, fmode) catch |e| return errMsg(out, "write", path, e);
+    if (linux.errno(linux.statx(dfd, sys.z(&zl, leaf), 0, .{ .MODE = true }, &st)) == .SUCCESS) fmode = st.mode & 0o7777;
+    var zt: [300]u8 = undefined;
+    const fd_rc = linux.openat(dfd, sys.z(&zt, tmp), .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, fmode);
+    const fd: i32 = @intCast(sys.check(fd_rc) catch |e| return errMsg(out, "write", path, e));
     var ok = true;
     for (parts) |p| sys.writeAll(fd, p) catch {
         ok = false;
     };
     sys.close(fd);
-    var tz: [4096]u8 = undefined;
-    if (ok) ok = linux.errno(linux.renameat(linux.AT.FDCWD, sys.z(&tz, tmp), linux.AT.FDCWD, sys.z(&pb, path))) == .SUCCESS;
+    if (ok) ok = linux.errno(linux.renameat(dfd, sys.z(&zt, tmp), dfd, sys.z(&zl, leaf))) == .SUCCESS;
     if (!ok) {
-        _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&tz, tmp), 0);
+        _ = linux.unlinkat(dfd, sys.z(&zt, tmp), 0);
         return errMsg(out, "write", path, error.Sys);
     }
     return true;
 }
+
+/// Log files under /tmp are created fresh and never through a link: /tmp is writable from inside the
+/// sandbox, so a command could plant `/tmp/awl-PID-N.log -> ~/.bashrc` for the next command's output.
+const log_flags: linux.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true };
+const log_cap: usize = 64 << 20;
 
 /// Results start with this; context elision keeps every message that carries it.
 pub const todo_marker = "Checklist (current):";
@@ -1055,8 +1095,19 @@ fn startJob(cmd: [*:0]const u8, out: *Buf) bool {
         return false;
     };
     job_seq += 1;
-    const path = std.fmt.bufPrint(&slot.log, "/tmp/awl-{d}-job{d}.log", .{ linux.getpid(), job_seq }) catch return false;
-    const lfd = sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600) catch |e| return errMsg(out, "background", path, e);
+    var path = std.fmt.bufPrint(&slot.log, "/tmp/awl-{d}-job{d}.log", .{ linux.getpid(), job_seq }) catch return false;
+    var lfd: sys.fd_t = -1;
+    var tries: usize = 0;
+    while (tries < 8) : (tries += 1) { // a name a command planted (a link into $HOME) is skipped, never followed
+        lfd = sys.open(path, log_flags, 0o600) catch |e| {
+            if (e != error.Exists) return errMsg(out, "background", path, e);
+            job_seq += 1;
+            path = std.fmt.bufPrint(&slot.log, "/tmp/awl-{d}-job{d}.log", .{ linux.getpid(), job_seq }) catch return false;
+            continue;
+        };
+        break;
+    }
+    if (lfd < 0) return errMsg(out, "background", path, error.Exists);
     var pp: [2]i32 = .{ -1, -1 };
     if (sandbox.on) _ = linux.pipe2(&pp, .{ .CLOEXEC = true });
     const pid_rc = linux.fork();
@@ -1218,10 +1269,16 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
     var log_path: []const u8 = "";
     var log_fd: sys.fd_t = -1;
     if (kind == .bash) {
-        log_seq += 1;
-        log_path = std.fmt.bufPrint(&log_b, "/tmp/awl-{d}-{d}.log", .{ linux.getpid(), log_seq }) catch "";
-        if (log_path.len > 0) log_fd = sys.open(log_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600) catch -1;
+        var tries: usize = 0;
+        while (log_fd < 0 and tries < 8) : (tries += 1) { // a planted name (a link into $HOME) is skipped, never followed
+            log_seq += 1;
+            log_path = std.fmt.bufPrint(&log_b, "/tmp/awl-{d}-{d}.log", .{ linux.getpid(), log_seq }) catch "";
+            if (log_path.len == 0) break;
+            log_fd = sys.open(log_path, log_flags, 0o600) catch -1;
+        }
+        if (log_fd < 0) log_path = "";
     }
+    var log_total: usize = 0;
     var total: usize = 0;
     var dropped: usize = 0;
     var tn: usize = 0; // bytes written into tail ring (monotonic)
@@ -1269,7 +1326,11 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
         if (n == 0) break;
         var c = chunk[0..n];
         total += n;
-        if (log_fd >= 0) sys.writeAll(log_fd, c) catch {};
+        if (log_fd >= 0 and log_total < log_cap) { // a runaway command must not fill a RAM-backed /tmp
+            sys.writeAll(log_fd, c) catch {};
+            log_total += n;
+            if (log_total >= log_cap) sys.writeAll(log_fd, "\n[awl: log capped at 64 MB; the command went on]\n") catch {};
+        }
         const room = head_cap -| (out.len - base);
         if (room > 0) {
             const k = @min(room, c.len);

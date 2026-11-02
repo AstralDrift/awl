@@ -427,6 +427,7 @@ pub fn run() Outcome {
                     return .cancelled;
                 },
                 error.Connect => ui.err("cannot reach the model at {s}. Is a Local AI model running?", .{cfg.url.host}),
+                error.Timeout => ui.err("no data from the model at {s} for {d} s (AWL_TIMEOUT); giving up", .{ cfg.url.host, @divTrunc(http.idle_ms, 1000) }),
                 error.Tls => ui.err("TLS to {s} failed: {s}. AWL_CA_FILE=path points at another CA bundle.", .{ cfg.url.host, @import("tls.zig").detail }),
                 error.Status, error.Server => ui.err("model error: {s}", .{llm.detail[0..llm.detail_len]}),
                 else => ui.err("stream failed: {s}", .{@errorName(e)}),
@@ -434,8 +435,15 @@ pub fn run() Outcome {
             return .failed;
         };
         ui.endMessage();
+        if (cancel_pending) { // Ctrl-C landed in the summary request compact() made before this step
+            cancel_pending = false;
+            ui.note("interrupted", .{});
+            return .cancelled;
+        }
         const secs = @as(f64, @floatFromInt(sys.nowNs() - t0)) / 1e9;
-        ctx_tokens = turn.prompt_tokens + turn.completion_tokens;
+        // The server's count when it sends usage; else bytes / 4 (older llama.cpp, some proxies send
+        // none, and 0 would turn elision and compaction off for the whole run).
+        ctx_tokens = if (turn.prompt_tokens > 0) turn.prompt_tokens + turn.completion_tokens else (head.len + msgs.len + turn.content.len + turn.reasoning.len) / 4;
         pushAssistant(step);
         elide();
         no_think = false;
@@ -602,6 +610,8 @@ const cut_call_note = "[not run: your reply hit the output token limit while wri
 
 pub var max_retries: u32 = 5;
 var cap_max: u32 = 0;
+/// Ctrl-C during a request made outside the step loop (the summary before a step): run() ends on it.
+var cancel_pending = false;
 
 /// Rewrite the request's max_tokens in place (the field is 10 characters wide, space padded).
 fn setCap(n: u64) void {
@@ -666,12 +676,12 @@ fn streamRetrying(mid: []const u8, tail: []const u8) llm.Error!void {
         turn.reset();
         llm.stream(cfg, &.{ head.items(), mid, tail }, &turn) catch |e| {
             const transient = switch (e) {
-                error.Cancel => false,
                 error.Status => switch (llm.last_status) {
                     408, 425, 429, 500, 502, 503, 504 => true,
                     else => false,
                 },
-                else => true,
+                error.Closed, error.Connect, error.Timeout, error.Server => true,
+                else => false, // Cancel; Tls, Http, Resolve, Sys: the same request would fail the same way
             };
             if (e == error.Status and llm.last_status == 400 and dropReasoning()) {
                 attempt -|= 1;
@@ -853,9 +863,13 @@ fn compact(force: bool) bool {
 
         const was_quiet = ui.quiet;
         ui.quiet = true;
-        streamRetrying("", req.items()) catch {
+        streamRetrying("", req.items()) catch |e| {
             ui.endMessage();
             ui.quiet = was_quiet;
+            if (e == error.Cancel) { // Ctrl-C: the run stops here, not one request later
+                cancel_pending = true;
+                return false;
+            }
             ui.note("summary request failed; keeping the full history", .{});
             return false;
         };
