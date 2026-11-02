@@ -77,7 +77,8 @@ def check_openrouter_model(model):
 
 
 def version(h):
-    cmd = {"awl": [os.path.join(REPO, "zig-out/bin/awl"), "--version"]}.get(h, [h, "--version"])
+    awl = [os.path.join(REPO, "zig-out/bin/awl"), "--version"]
+    cmd = awl if h.startswith("awl") else [h, "--version"]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         return (out.stdout or out.stderr).strip().splitlines()[0][:80]
@@ -142,8 +143,12 @@ def run_one(h, task, rep, base, model, timeout, outdir, wd_root, env0):
     tdir = os.path.join(ROOT, "tasks", task)
     shutil.copytree(os.path.join(tdir, "setup"), wd)
     env = dict(env0, SETUP=os.path.join(tdir, "setup"), TASK=tdir)
-    if os.path.exists(os.path.join(tdir, "ctx")):  # task-specific context window (forces compaction)
-        env["ARENA_CTX"] = open(os.path.join(tdir, "ctx")).read().strip()
+    # The window the harness is told: the task's own (forces compaction), and/or ARENA_CTX when set
+    # explicitly (the smaller wins), so a context-strategy A/B can make every task overflow.
+    wins = [int(open(os.path.join(tdir, "ctx")).read().strip())] if os.path.exists(os.path.join(tdir, "ctx")) else []
+    wins += [int(os.environ["ARENA_CTX"])] if os.environ.get("ARENA_CTX") else []
+    if wins:
+        env["ARENA_CTX"] = str(min(wins))
         os.makedirs(os.path.join(outdir, "proxy"), exist_ok=True)  # the proxy answers /v1/models with it for this run
         with open(os.path.join(outdir, "proxy", rid + ".ctx"), "w") as f:
             f.write(f"{model}\n{env['ARENA_CTX']}\n")

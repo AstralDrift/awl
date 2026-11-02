@@ -1740,8 +1740,7 @@ const Editor = struct {
         const title = agents.titleOf(old, &tb, &sb);
         var nb: [200]u8 = undefined;
         if (!std.mem.endsWith(u8, title, "(before rewind)")) _ = agents.putSidecar(old, ".title", std.fmt.bufPrint(&nb, "{s} (before rewind)", .{cutCols(title, 150)}) catch title);
-        session.restart();
-        for (0..i) |j| session.append(agent.message(j));
+        agent.restartSessionAt(i);
         agent.rewind(i);
         ui.clearPlan();
         if (put_back) {
