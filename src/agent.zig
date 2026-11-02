@@ -31,7 +31,7 @@ const max_index = 16384;
 var offs: [max_index]usize = undefined;
 
 const base_prompt =
-    \\You are awl, a coding agent in a terminal on Omarchy Linux. You complete software tasks in the working directory by calling tools.
+    \\You are awl, a coding agent in a terminal. You complete software tasks in the working directory by calling tools.
     \\- Read a file before you edit it. Use edit for changes, write for new files.
     \\- Use grep and find to search; they are faster than bash.
     \\- Check your work: run the tests or the program. Say something works only when tool output shows it.
@@ -70,6 +70,9 @@ pub fn init(cwd: []const u8) void {
     const md = yd.calculateMonthDay();
     var tb: [600]u8 = undefined;
     bufm.escape(&head, std.fmt.bufPrint(&tb, "\nTools: {s}.\nWorking directory: {s}\nDate: {d}-{d:0>2}-{d:0>2}", .{ tools.names(), cwd, yd.year, md.month.numeric(), md.day_index + 1 }) catch "");
+    var ob: [4096]u8 = undefined;
+    var nb: [160]u8 = undefined;
+    if (osName(&ob, &nb)) |os| bufm.escape(&head, std.fmt.bufPrint(&tb, "\nSystem: {s}{s}", .{ os, if (sys.exists("/.dockerenv") or sys.exists("/run/.containerenv")) ", in a container" else "" }) catch "");
     var sb: [160]u8 = undefined;
     if (sandbox.on) bufm.escape(&head, std.fmt.bufPrint(&tb, "\nCommands run in a sandbox: {s}.", .{sandbox.describe(&sb)["sandbox: ".len..]}) catch "");
     addAgentsMd(cwd);
@@ -79,6 +82,30 @@ pub fn init(cwd: []const u8) void {
     const proj_dir = std.fmt.bufPrint(&rb, "{s}/.agents/skills", .{projectRoot(cwd)}) catch "";
     n_skills = skills.add(&head, if (std.mem.eql(u8, user_dir, proj_dir)) &.{user_dir} else &.{ proj_dir, user_dir });
     head.add("\"}");
+}
+
+/// The OS as /etc/os-release names it (PRETTY_NAME, else NAME), so the model reaches for the right package
+/// manager and paths wherever awl runs (a Debian task container is not Omarchy). Null when there is no such file.
+fn osName(fb: *[4096]u8, dst: *[160]u8) ?[]const u8 {
+    const t = sys.readFile("/etc/os-release", fb) catch return null;
+    var name: ?[]const u8 = null;
+    var it = std.mem.splitScalar(u8, t, '\n');
+    while (it.next()) |l| {
+        const v = if (std.mem.startsWith(u8, l, "PRETTY_NAME=")) l[12..] else if (name == null and std.mem.startsWith(u8, l, "NAME=")) l[5..] else continue;
+        name = std.mem.trim(u8, v, "\"' \r");
+        if (l[0] == 'P') break;
+    }
+    const n = name orelse return null;
+    if (n.len == 0 or n.len > dst.len) return null;
+    @memcpy(dst[0..n.len], n);
+    return dst[0..n.len];
+}
+
+test "os name from /etc/os-release" {
+    var fb: [4096]u8 = undefined;
+    var nb: [160]u8 = undefined;
+    const r = osName(&fb, &nb);
+    if (sys.exists("/etc/os-release")) try std.testing.expect(r != null and r.?.len > 0) else try std.testing.expect(r == null);
 }
 
 var model_b: [256]u8 = undefined;
@@ -164,7 +191,9 @@ fn addAgentsFile(dir: []const u8, used: *usize) void {
 }
 
 pub fn resume_(path: []const u8) !usize {
-    return try session.load(path, addLoaded);
+    const n = try session.load(path, addLoaded);
+    dropOldReasoning();
+    return n;
 }
 
 fn addLoaded(line: []const u8) void {
@@ -376,6 +405,7 @@ pub fn run() Outcome {
                     return .cancelled;
                 },
                 error.Connect => ui.err("cannot reach the model at {s}. Is a Local AI model running?", .{cfg.url.host}),
+                error.Tls => ui.err("TLS to {s} failed: {s}. AWL_CA_FILE=path points at another CA bundle.", .{ cfg.url.host, @import("tls.zig").detail }),
                 error.Status, error.Server => ui.err("model error: {s}", .{llm.detail[0..llm.detail_len]}),
                 else => ui.err("stream failed: {s}", .{@errorName(e)}),
             }
@@ -854,18 +884,68 @@ fn callId(c: *const llm.Call, step: usize, i: usize, b: []u8) []const u8 {
 /// that think long on every turn (Nanbeige4.3) when speed matters more than deliberation.
 pub var thinking = true;
 
-/// AWL_KEEP_REASONING (default on; 0 = off): the reasoning goes back with the turn as reasoning_content.
-/// Chat templates (Nanbeige4.3, Qwen3.x) re-render it in the turn's <think> block; without it the
-/// re-rendered history differs from the tokens the model generated, so the server's prefix cache
-/// misses from the first assistant turn on and every step prefills that again.
-pub var keep_reasoning = true;
+/// AWL_KEEP_REASONING (default on = every turn; 0 = none; N = the newest N turns): the reasoning goes back
+/// with its turn as reasoning_content. Chat templates (Nanbeige4.3, Qwen3.x) re-render it in the turn's
+/// <think> block, and Qwen3's keeps it for every tool-call turn since the last user message, so with "on"
+/// a 40-step run carries ~40 turns of reasoning in each request (two thirds of the prompt at medium
+/// effort: arena/render_check.py). A window keeps the newest plan in view and bounds that cost.
+pub var keep_reasoning: usize = std.math.maxInt(usize);
+
+/// Strip reasoning_content from assistant turns older than the newest `keep_reasoning` that carry it.
+/// Editing an old message makes the prefix cache miss from there, so this costs one re-prefill of the
+/// window per step; the session log keeps the full text, and a resumed session is windowed the same way.
+fn dropOldReasoning() void {
+    if (keep_reasoning == std.math.maxInt(usize) or n_msgs > max_index) return;
+    const key = ",\"reasoning_content\":\"";
+    var seen: usize = 0;
+    var i = n_msgs;
+    while (i > 0) {
+        i -= 1;
+        const m = message(i);
+        if (!std.mem.startsWith(u8, m, "{\"role\":\"assistant\"")) continue;
+        const k = std.mem.indexOf(u8, m, key) orelse continue;
+        seen += 1;
+        if (seen <= keep_reasoning) continue;
+        var j = k + key.len; // the closing quote of the escaped string
+        while (j < m.len and m[j] != '"') : (j += 1) {
+            if (m[j] == '\\') j += 1;
+        }
+        if (j >= m.len) continue;
+        const start = offs[i] + 1 + k;
+        const cut = j + 1 - k;
+        const all = msgs.items();
+        std.mem.copyForwards(u8, all[start .. all.len - cut], all[start + cut ..]);
+        msgs.truncate(msgs.len - cut);
+        for (i + 1..n_msgs) |q| offs[q] -= cut;
+    }
+}
+
+test "reasoning window strips the oldest turns' reasoning, escaped quotes and all" {
+    const saved = keep_reasoning;
+    defer keep_reasoning = saved;
+    defer clear();
+    clear();
+    add("{\"role\":\"user\",\"content\":\"go\"}");
+    add("{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"a \\\"q\\\" \\\\\",\"tool_calls\":[]}");
+    add("{\"role\":\"tool\",\"tool_call_id\":\"c\",\"content\":\"x\"}");
+    add("{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"b\",\"tool_calls\":[]}");
+    add("{\"role\":\"tool\",\"tool_call_id\":\"d\",\"content\":\"y\"}");
+    keep_reasoning = 1;
+    dropOldReasoning();
+    try std.testing.expectEqualStrings("{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[]}", message(1));
+    try std.testing.expectEqualStrings("{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"b\",\"tool_calls\":[]}", message(3));
+    try std.testing.expectEqualStrings("{\"role\":\"tool\",\"tool_call_id\":\"d\",\"content\":\"y\"}", message(4));
+    keep_reasoning = 0;
+    dropOldReasoning();
+    try std.testing.expectEqualStrings("{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[]}", message(3));
+}
 
 fn pushAssistant(step: usize) void {
     var m = Buf.init(turn.content.len * 6 + turn.reasoning.len * 6 + (1 << 20));
     defer m.free();
     m.add("{\"role\":\"assistant\",\"content\":");
     bufm.str(&m, turn.content.items());
-    if (keep_reasoning and turn.reasoning.len > 0 and !turn.length_cut) { // a cut-off thought is incomplete and huge: not sent back
+    if (keep_reasoning > 0 and turn.reasoning.len > 0 and !turn.length_cut) { // a cut-off thought is incomplete and huge: not sent back
         m.add(",\"reasoning_content\":");
         bufm.str(&m, std.mem.trim(u8, turn.reasoning.items(), " \n"));
     }
@@ -886,6 +966,7 @@ fn pushAssistant(step: usize) void {
     }
     m.byte('}');
     push(&m);
+    dropOldReasoning();
 }
 
 /// Arguments that are not a JSON object (a call cut off by the output cap) go back as {}: chat templates

@@ -7,8 +7,8 @@ the smallest possible footprint. One static Zig binary (no libc, no runtime, ~34
 to any OpenAI-compatible server: Omarchy Local AI on your GPU, or OpenRouter in the cloud.
 
 The model gets seven tools: read, write, edit (one change or an `edits` list, all or nothing),
-bash (with background jobs), todo (a checklist that survives context trimming), grep (ripgrep)
-and find (fd). Everything else is a lean loop that keeps the prompt small.
+bash (with background jobs; a command still running at its timeout becomes one instead of being
+killed), todo (a checklist that survives context trimming), grep (ripgrep) and find (fd). Everything else is a lean loop that keeps the prompt small.
 
 ## Results
 
@@ -212,7 +212,8 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AWL_URL` | `http://127.0.0.1:12434` | OpenAI-compatible server (plain HTTP) |
+| `AWL_URL` | `http://127.0.0.1:12434` | OpenAI-compatible server: `http://` or `https://`, an address or a host name (resolved through /etc/hosts and the resolv.conf nameservers), with an optional path prefix (`https://openrouter.ai/api`) |
+| `AWL_CA_FILE` | system bundle | PEM file of trusted CAs for `https://` (default: the first of /etc/ssl/certs/ca-certificates.crt, /etc/pki/tls/certs/ca-bundle.crt, /etc/ssl/ca-bundle.pem, /etc/ssl/cert.pem) |
 | `AWL_MODEL` | first model the server lists | model id |
 | `AWL_KEY` | Local AI gateway key | bearer token |
 | `AWL_MAX_STEPS` | 200 | model calls per prompt |
@@ -227,7 +228,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_MODELS` | unset | comma-separated models that Ctrl-P cycles through |
 | `AWL_THINK_BUDGET` | unset | `N`: send `custom_params: {thinking_budget: N}` (SGLang started with `--enable-strict-thinking` ends reasoning after N tokens) |
 | `AWL_THINKING` | on | `off`: every request sends `chat_template_kwargs: {enable_thinking: false}` (Nanbeige4.3, Qwen3.x templates); faster, less deliberate |
-| `AWL_KEEP_REASONING` | on | send each turn's reasoning back as `reasoning_content`; chat templates (Nanbeige4.3, Qwen3.x) re-render it, so the history matches what the model generated and the server's prefix cache keeps hitting. `0`: off |
+| `AWL_KEEP_REASONING` | on | send each turn's reasoning back as `reasoning_content`, so the model sees its own plan. Qwen3-style templates re-render every tool-call turn's reasoning into the prompt, so a long run carries all of it (two thirds of each request at medium effort). `N`: only the newest N turns' reasoning goes back (the older turns are rewritten, one short re-prefill per step); `0`: none |
 | `AWL_THINK_ROWS` | `6` | rows of the model's newest reasoning shown live (word-wrapped, above the timer); they fold into one `∴ thought Ns` line when it answers. `0`: timer only |
 | `AWL_DEBUG_KEYS` | unset | file to append every raw input chunk to, escaped (`\e` = Esc): shows exactly what the terminal sends on a keypress or paste |
 | `AWL_TITLE` | on | `off`: leave the terminal's title alone |

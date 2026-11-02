@@ -18,7 +18,8 @@ import time
 
 args = sys.argv[1:]
 script = json.load(open(args[0]))
-opt = {"--port": "0", "--log": "", "--split": "0", "--mode": "chunked", "--ctx": "0", "--comments": "0", "--models": ""}
+opt = {"--port": "0", "--log": "", "--split": "0", "--mode": "chunked", "--ctx": "0", "--comments": "0", "--models": "",
+       "--cert": "", "--key": ""}  # --cert/--key: serve HTTPS with this certificate
 for i in range(1, len(args), 2):
     opt[args[i]] = args[i + 1]
 split = int(opt["--split"])
@@ -127,6 +128,13 @@ def handle(conn):
         conn.close()
 
 
+def quiet(c):
+    try:
+        handle(c)
+    except OSError:  # the client closed first (awl stops at [DONE]); over TLS that is an SSLEOFError
+        pass
+
+
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("127.0.0.1", int(opt["--port"])))
@@ -134,4 +142,13 @@ s.listen(16)
 print(s.getsockname()[1], flush=True)
 while True:
     c, _ = s.accept()
-    threading.Thread(target=handle, args=(c,), daemon=True).start()
+    if opt["--cert"]:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(opt["--cert"], opt["--key"])
+        try:
+            c = ctx.wrap_socket(c, server_side=True)
+        except ssl.SSLError:
+            c.close()
+            continue
+    threading.Thread(target=quiet, args=(c,), daemon=True).start()
