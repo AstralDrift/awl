@@ -62,7 +62,7 @@ elif [ "${TB_UPSTREAM:-local}" = openrouter ]; then
   MODEL=${TB_MODEL:-deepseek/deepseek-v4.1-flash-1017} CTX=${TB_CTX:-262144}
   UPARGS=(--upstream https://openrouter.ai/api --budget "${TB_BUDGET:-2}" ${TB_PROVIDER:+--provider "$TB_PROVIDER"})
 else
-  PORT=18080 PROXY=awl-tbproxy RUN=$AGENT
+  PORT=18080 PROXY=awl-tbproxy RUN=$AGENT${AWL_CTX_MODE:+-$AWL_CTX_MODE} # awl-fresh, awl-async: the context A/B
   GW=$(docker ps --format '{{.Names}}' | grep -- '-gateway$' | head -1)
   [ -n "$GW" ] || { echo "tb: no Local AI gateway container is running"; exit 2; }
   NET=$(docker inspect "$GW" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')

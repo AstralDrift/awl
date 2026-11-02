@@ -191,13 +191,19 @@ def run_one(h, task, rep, base, model, timeout, outdir, wd_root, env0):
             why = "" if ok else ((c.stdout + c.stderr).strip().splitlines() or ["check failed"])[-1][:200]
         except subprocess.TimeoutExpired:
             why = "check timed out"
+    probe = None  # a task's probe.sh checks one thing apart from the pass (recall: the exact detail was used)
+    if os.path.exists(os.path.join(tdir, "probe.sh")):
+        try:
+            probe = subprocess.run(["sh", os.path.join(tdir, "probe.sh")], cwd=wd, env=env, capture_output=True, timeout=60).returncode == 0
+        except subprocess.TimeoutExpired:
+            probe = False
     reqs = []
     pf = os.path.join(outdir, "proxy", rid + ".jsonl")
     if os.path.exists(pf):
         reqs = [json.loads(l) for l in open(pf)]
     model_s = sum(r["model_s"] for r in reqs)
     return {
-        "harness": h, "task": task, "rep": rep, "success": ok, "why": why, "timed_out": timed_out, "exit": p.returncode,
+        "harness": h, "task": task, "rep": rep, "success": ok, "probe": probe, "why": why, "timed_out": timed_out, "exit": p.returncode,
         "wall_s": round(wall, 2), "model_s": round(model_s, 2), "harness_s": round(wall - model_s, 2),
         "turns": len(reqs), "tool_calls": sum(r["tool_calls"] for r in reqs),
         "prompt_tokens": sum(r["prompt_tokens"] for r in reqs),
