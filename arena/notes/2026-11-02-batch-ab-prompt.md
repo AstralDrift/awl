@@ -7,3 +7,18 @@ Background: on the 10-28 TB2 run, awl and pi both average ~1.0 tool calls per re
 3. Report per arm: tasks passed, timeouts, wall time, model requests, tool calls per reply, prompt and completion tokens. Use arena/tb_report.py and the calls-per-reply script in the tool-calls note.
 4. Add one row to arena/LOG.md with the hypothesis, the change, the result and a decision. Run-to-run spread is about ±2 tasks at n=20, so call it a win only if calls per reply goes up, requests and wall time go down, and the pass count doesn't drop. Otherwise revert the prompt change and keep only the LOG row.
 5. Commit to this branch (tb-batch-ab) and push it. Don't merge.
+
+## Overnight run (step 2, about 5 hours on the local engine)
+
+Smoke done on 2026-11-02 (LOG row of that date). The full runs, arms in A B B A order so drift hits both:
+
+```sh
+for a in default batch batch default; do
+  if [ $a = batch ]; then AWL_BATCH=1 arena/tb.sh awl $(arena/tb.sh --subset)
+  else env -u AWL_BATCH arena/tb.sh awl $(arena/tb.sh --subset); fi
+done
+arena/tb_report.py $(ls arena/results/tb/jobs | grep -E '^awl(-batch)?-MMDD-')   # tonight's four jobs
+```
+
+Calls per reply per job: the script in arena/notes/2026-11-02-tb-tool-calls.md, limited to each job's time window.
+
