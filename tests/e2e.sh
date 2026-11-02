@@ -135,7 +135,7 @@ python3 - "$LOG" "$out" "$W/slowp" <<'EOF2' && ok "a command past its timeout co
 import json, re, sys
 r = [json.loads(l) for l in open(sys.argv[1])]
 assert sys.argv[2] == "bg done", sys.argv[2]
-t = [x["content"] for x in r[3]["messages"] if x["role"] == "tool"]
+t = [re.sub(r"\n?\[time [^]]*\]$", "", x["content"]) for x in r[3]["messages"] if x["role"] == "tool"]  # without fresh's budget line
 assert t[0].startswith("begun\n") and "still running after 1 s" in t[0] and "background job 1" in t[0] and "killed" not in t[0], t[0]
 assert "finished" not in t[0], t[0]
 log = re.search(r"(/tmp/awl-\d+-\d+\.log)", t[0]).group(1)

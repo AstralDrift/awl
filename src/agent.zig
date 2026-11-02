@@ -499,7 +499,8 @@ fn budget(o: *Buf, ns: u64) void {
     const t = (if (s < 60) std.fmt.bufPrint(&tb, "{d}s", .{s}) else if (s < 3600) std.fmt.bufPrint(&tb, "{d}m{d:0>2}s", .{ s / 60, s % 60 }) else std.fmt.bufPrint(&tb, "{d}h{d:0>2}m", .{ s / 3600, s / 60 % 60 })) catch "";
     var cb: [24]u8 = undefined;
     var lb: [24]u8 = undefined;
-    if (ctx_limit > 0) o.print("\n[time {s}, context {s} of {s}]", .{ t, tokens(ctx_tokens, &cb), tokens(ctx_limit, &lb) }) else o.print("\n[time {s}]", .{t});
+    if (!(o.len > 0 and o.items()[o.len - 1] == '\n')) o.byte('\n'); // output that ends a line gets no blank line
+    if (ctx_limit > 0) o.print("[time {s}, context {s} of {s}]", .{ t, tokens(ctx_tokens, &cb), tokens(ctx_limit, &lb) }) else o.print("[time {s}]", .{t});
 }
 
 fn tokens(n: u64, b: []u8) []const u8 {
@@ -527,6 +528,10 @@ test "budget line: time and context, short" {
     ctx_limit = 0;
     budget(&o, 3725 * std.time.ns_per_s);
     try std.testing.expectEqualStrings("\n[time 1h02m]", o.items());
+    o.reset();
+    o.add("1→hello\n");
+    budget(&o, 0);
+    try std.testing.expectEqualStrings("1→hello\n[time 0s]", o.items());
 }
 
 /// The step before the last few: the model is told how many remain so it can stop checking and report.
