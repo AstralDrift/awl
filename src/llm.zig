@@ -108,7 +108,7 @@ fn setDetail(s: []const u8) void {
 pub fn stream(cfg: Cfg, body: []const []const u8, t: *Turn) Error!void {
     last_status = 0;
     const fd = try http.connect(cfg.url);
-    var r = http.Response{ .fd = fd };
+    var r = http.Response{ .fd = fd, .tls = cfg.url.tls };
     defer r.deinit();
     try http.send(fd, cfg.url, "POST", "/v1/chat/completions", cfg.key, body);
     try r.readHead();
@@ -201,7 +201,7 @@ pub fn firstModel(cfg: Cfg, out: []u8) Error!ModelInfo {
 /// Every model GET /v1/models lists (at most out.len); ids are copied into `ids`.
 pub fn models(cfg: Cfg, ids: *Buf, out: []ModelInfo) Error![]ModelInfo {
     const fd = try http.connect(cfg.url);
-    var r = http.Response{ .fd = fd };
+    var r = http.Response{ .fd = fd, .tls = cfg.url.tls };
     defer r.deinit();
     try http.send(fd, cfg.url, "GET", "/v1/models", cfg.key, &.{});
     try r.readHead();
