@@ -28,11 +28,23 @@ def start(cmd):
     return p, int(p.stdout.readline())
 
 
+def record(out, run):
+    """The newest proxy record of `run` (written after the reply is sent: wait for it)."""
+    f = os.path.join(out, run + ".jsonl")
+    for _ in range(100):
+        if os.path.exists(f) and open(f).read().endswith("\n"):
+            return [json.loads(l) for l in open(f)][-1]
+        time.sleep(0.05)
+    return {}
+
+
 with tempfile.TemporaryDirectory() as w:
     script = os.path.join(w, "s.json")
     json.dump([{"status": 429, "content": "slow down"},
                {"reasoning": "hmm", "content": "ok there", "usage": {"prompt_tokens": 50, "completion_tokens": 5, "cost": 0.0012}},
-               {"content": "awl ok"}, {"content": "r ok"},
+               {"content": "awl ok"},
+               {"reasoning": "deep " * 40, "content": "slow reply " * 60, "pace": 0.01, "usage": {"prompt_tokens": 9, "completion_tokens": 999}},
+               {"content": "r ok"},
                {"content": "paid", "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0012}}], open(script, "w"))
     keyf = os.path.join(w, "k")
     open(keyf, "w").write("sk-test\n")
@@ -66,7 +78,7 @@ with tempfile.TemporaryDirectory() as w:
         check("usage requested", u.get("stream_options") == {"include_usage": True}, u.get("stream_options"))
         check("no /models sent upstream", all(not x["_path"].endswith("/models") for x in ups))
 
-        rec = [json.loads(l) for l in open(os.path.join(out, "r1.jsonl"))][-1]
+        rec = record(out, "r1")
         check("record: tokens, cost, retries, reasoning",
               rec["prompt_tokens"] == 50 and rec["cost"] == 0.0012 and rec["retries"] == 1 and rec["reasoning_chars"] == 3, rec)
 
@@ -76,6 +88,21 @@ with tempfile.TemporaryDirectory() as w:
         check("awl end to end through hosted proxy", r.returncode == 0 and r.stdout.strip() == "awl ok", r.stdout + r.stderr)
         sysmsg = [json.loads(l) for l in open(log)][-1]["messages"][0]["content"]
         check("sandbox outside any repo: no AGENTS.md in awl's system prompt", "AGENTS.md" not in sysmsg, sysmsg[-300:])
+
+        # a reply the harness stops mid-stream (awl closes the socket past 16 calls / AWL_THINK_MAX / Ctrl-C): the usage
+        # event never arrives, so the record counts the streamed text instead of 0 and marks it
+        import socket
+        c = socket.create_connection(("127.0.0.1", pport))
+        b = json.dumps({"model": "m", "stream": True, "messages": [{"role": "user", "content": "x"}]}).encode()
+        c.sendall(b"POST /run/r3/v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(b) + b)
+        got = b""
+        while b"slow" not in got:
+            got += c.recv(4096)
+        c.close()
+        rec = record(out, "r3")
+        check("cut reply: streamed tokens counted, marked as estimated and cut",
+              rec.get("cut") is True and rec.get("completion_estimated") is True and 0 < rec["completion_tokens"] < 999 and rec["reasoning_chars"] > 0,
+              rec)
 
         p2, port2 = start([sys.executable, os.path.join(ROOT, "proxy.py"), "--upstream", f"http://127.0.0.1:{fport}",
                            "--out", out, "--key-file", keyf, "--model", "m", "--ctx", "9", "--reasoning", "low",

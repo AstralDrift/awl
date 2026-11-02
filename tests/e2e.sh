@@ -74,6 +74,22 @@ assert names[:4] == ["read", "write", "edit", "bash"], names
 EOF
 stop
 
+# 2a. the system prompt names the real OS (from /etc/os-release), never a hard-coded distribution
+serve "$W/hi.json"
+(cd "$W" && "$AWL" -p hi >/dev/null 2>&1)
+python3 - "$LOG" <<'EOF2' && ok "system prompt names the OS from /etc/os-release" || bad "system prompt OS name" "see above"
+import json, os, re, sys
+sysmsg = json.loads(open(sys.argv[1]).readline())["messages"][0]["content"]
+assert "Omarchy Linux" not in sysmsg or "Omarchy" in open("/etc/os-release").read(), sysmsg[:300]
+if os.path.exists("/etc/os-release"):
+    kv = dict(re.findall(r'^(\w+)=(.*)$', open("/etc/os-release").read(), re.M))
+    want = (kv.get("PRETTY_NAME") or kv.get("NAME")).strip('"')
+    assert f"\nSystem: {want}" in sysmsg, sysmsg[:400]
+    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+        assert f"System: {want}, in a container" in sysmsg, sysmsg[:400]
+else:
+    assert "\nSystem:" not in sysmsg, sysmsg[:300]
+EOF2
 # 2a. a model command still running at its timeout is not killed: it goes on as a background job
 mkdir -p "$W/slowp"
 cat >"$W/slow.json" <<'EOF2'
@@ -441,6 +457,31 @@ stop
 serve "$W/keep.json"
 out=$(cd "$W" && AWL_KEEP_REASONING=0 "$AWL" -p go 2>/dev/null)
 python3 -c "import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; a=[m for m in r[1]['messages'] if m['role']=='assistant'][-1]; assert 'reasoning_content' not in a, a" "$LOG" && ok "AWL_KEEP_REASONING=0 sends none" || bad "keep reasoning off" "$out"
+stop
+# AWL_KEEP_REASONING=N: only the newest N assistant turns carry their reasoning (Qwen3-style templates
+# re-render every earlier tool-call turn's reasoning into the prompt, so a long run pays for all of it)
+cat >"$W/keep3.json" <<'EOF2'
+[{"reasoning":"first thought","tool_calls":[{"name":"bash","arguments":{"command":"true"}}]},
+ {"reasoning":"second \"quoted\" thought\\","tool_calls":[{"name":"bash","arguments":{"command":"true"}}]},
+ {"reasoning":"third thought","tool_calls":[{"name":"bash","arguments":{"command":"true"}}]},
+ {"content":"windowed"}]
+EOF2
+serve "$W/keep3.json"
+out=$(cd "$W" && AWL_KEEP_REASONING=1 "$AWL" -p go 2>/dev/null)
+python3 - "$LOG" "$out" <<'EOF2' && ok "AWL_KEEP_REASONING=1 keeps only the newest turn's reasoning" || bad "keep reasoning window" "$out"
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "windowed", sys.argv[2]
+a = [m for m in r[3]["messages"] if m["role"] == "assistant"]
+assert [m.get("reasoning_content") for m in a] == [None, None, "third thought"], a
+a2 = [m for m in r[2]["messages"] if m["role"] == "assistant"]
+assert [m.get("reasoning_content") for m in a2] == [None, 'second "quoted" thought\\'], a2
+assert all(m["tool_calls"][0]["function"]["name"] == "bash" for m in a), a
+EOF2
+stop
+serve "$W/keep3.json"
+out=$(cd "$W" && "$AWL" -p go 2>/dev/null)
+python3 -c "import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; a=[m for m in r[3]['messages'] if m['role']=='assistant']; assert [m.get('reasoning_content') for m in a]==['first thought','second \"quoted\" thought\\\\','third thought'], a" "$LOG" && ok "default keeps every turn's reasoning" || bad "keep reasoning default" "$out"
 stop
 # grep and find given an absolute path inside the project print short relative paths (long absolute ones get mis-copied)
 mkdir -p "$W/relsub" && echo "needle_rel" > "$W/relsub/r.txt"
