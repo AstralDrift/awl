@@ -1,3 +1,4 @@
+# shellcheck shell=bash disable=SC2034 # sourced; the adapter uses these
 # Sourced by adapters. Args: WORKDIR PROMPT_FILE BASE_URL MODEL
 # BASE_URL has no /v1 suffix. Config files holding the gateway key live under
 # ~/.local/state/awl-arena, never in the repo.
@@ -9,7 +10,7 @@ KEY=$(cat "$HOME/.local/state/omarchy/local-ai/gateway.key")
 CTX=${ARENA_CTX:-262144}
 STATE=$HOME/.local/state/awl-arena
 mkdir -p "$STATE"
-cd "$WD"
+cd "$WD" || exit
 
 pi_models() { # write a pi/omp models.json into $1
   mkdir -p "$1"

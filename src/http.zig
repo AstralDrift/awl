@@ -1,40 +1,61 @@
-//! Minimal HTTP/1.1 client over a raw IPv4 socket. Plain HTTP only (localhost).
-//! Body is written from caller-owned segments (no request buffer); the
-//! response is read through a fixed 16 KB buffer and de-chunked line by line.
+//! Minimal HTTP/1.1 client over a raw IPv4 socket: plain HTTP, or HTTPS through tls.zig
+//! (std.crypto.tls) with host names resolved by dns.zig. Body is written from caller-owned
+//! segments (no request buffer); the response is read through a fixed 16 KB buffer and
+//! de-chunked line by line.
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
+const dns = @import("dns.zig");
+const tls = @import("tls.zig");
 const Buf = @import("buf.zig").Buf;
 
 pub const Url = struct {
     ip: [4]u8 = .{ 127, 0, 0, 1 },
     port: u16 = 80,
-    host: []const u8 = "127.0.0.1",
+    host: []const u8 = "127.0.0.1", // as typed: name or address, with its port if any
+    name: []const u8 = "127.0.0.1", // host without the port (Host header, TLS server name)
     prefix: []const u8 = "", // path before /v1, e.g. "/run/7" behind a proxy
+    tls: bool = false,
+    named: bool = false, // ip comes from resolve(), not the URL
 };
 
-pub const Error = error{ BadUrl, Connect, Http, Closed, Cancel } || sys.Error;
+pub const Error = error{ BadUrl, Connect, Http, Closed, Cancel, Resolve, Tls } || sys.Error;
 
+/// http://host[:port][/prefix] or https://…; a host name needs resolve() before connect().
 pub fn parseUrl(s0: []const u8) Error!Url {
     var s = s0;
-    if (std.mem.startsWith(u8, s, "http://")) s = s[7..] else if (std.mem.indexOf(u8, s, "://") != null) return error.BadUrl;
-    var prefix: []const u8 = "";
+    var u = Url{};
+    if (std.mem.startsWith(u8, s, "http://")) s = s[7..] else if (std.mem.startsWith(u8, s, "https://")) {
+        s = s[8..];
+        u.tls = true;
+        u.port = 443;
+    } else if (std.mem.indexOf(u8, s, "://") != null) return error.BadUrl;
     if (std.mem.indexOfScalar(u8, s, '/')) |i| {
-        prefix = std.mem.trimEnd(u8, s[i..], "/");
-        if (std.mem.endsWith(u8, prefix, "/v1")) prefix = prefix[0 .. prefix.len - 3];
+        u.prefix = std.mem.trimEnd(u8, s[i..], "/");
+        if (std.mem.endsWith(u8, u.prefix, "/v1")) u.prefix = u.prefix[0 .. u.prefix.len - 3];
         s = s[0..i];
     }
-    var u = Url{ .host = s, .prefix = prefix };
-    var host = s;
+    u.host = s;
+    u.name = s;
     if (std.mem.lastIndexOfScalar(u8, s, ':')) |i| {
         u.port = std.fmt.parseInt(u16, s[i + 1 ..], 10) catch return error.BadUrl;
-        host = s[0..i];
+        u.name = s[0..i];
     }
-    if (std.mem.eql(u8, host, "localhost")) return u;
-    var it = std.mem.splitScalar(u8, host, '.');
-    for (&u.ip) |*b| b.* = std.fmt.parseInt(u8, it.next() orelse return error.BadUrl, 10) catch return error.BadUrl;
-    if (it.next() != null) return error.BadUrl;
+    if (u.name.len == 0) return error.BadUrl;
+    if (std.mem.eql(u8, u.name, "localhost")) return u;
+    if (dns.parseIp(u.name)) |ip| {
+        u.ip = ip;
+        return u;
+    }
+    for (u.name) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '.')) return error.BadUrl;
+    u.named = true;
     return u;
+}
+
+/// Look up a host name once (/etc/hosts, then the resolv.conf nameservers). Addresses pass through.
+pub fn resolve(u: *Url) Error!void {
+    if (!u.named) return;
+    u.ip = dns.resolve(u.name) orelse return error.Resolve;
 }
 
 /// Block until `fd` is readable. SIGINT (via sys.sigfd) turns into error.Cancel.
@@ -67,6 +88,7 @@ pub fn wait(fd: sys.fd_t, timeout_ms: i32) Error!bool {
     }
 }
 
+/// A connected socket; for https the TLS handshake is done (tls.detail says why when it fails).
 pub fn connect(u: Url) Error!sys.fd_t {
     const fd: sys.fd_t = @intCast(try sys.check(linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0)));
     errdefer sys.close(fd);
@@ -74,7 +96,16 @@ pub fn connect(u: Url) Error!sys.fd_t {
     _ = sys.check(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) catch return error.Connect;
     const one: i32 = 1;
     _ = linux.setsockopt(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, std.mem.asBytes(&one), @sizeOf(i32));
+    if (u.tls) tls.connect(fd, u.name) catch |e| return switch (e) {
+        error.Cancel => error.Cancel,
+        error.Closed => error.Closed,
+        error.Tls => error.Tls,
+    };
     return fd;
+}
+
+fn writeOut(fd: sys.fd_t, u: Url, data: []const u8) Error!void {
+    if (u.tls) tls.writeAll(data) catch return error.Closed else try sys.writeAll(fd, data);
 }
 
 /// Send a request. `body` segments are written back to back after the header.
@@ -84,13 +115,18 @@ pub fn send(fd: sys.fd_t, u: Url, method: []const u8, path: []const u8, key: ?[]
     var hb: [1024]u8 = undefined;
     var auth_b: [600]u8 = undefined;
     const auth = if (key) |k| std.fmt.bufPrint(&auth_b, "Authorization: Bearer {s}\r\n", .{k}) catch "" else "";
-    const head = std.fmt.bufPrint(&hb, "{s} {s}{s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: awl\r\nAccept: text/event-stream\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n{s}\r\n", .{ method, u.prefix, path, u.host, total, auth }) catch return error.Http;
-    try sys.writeAll(fd, head);
-    for (body) |b| try sys.writeAll(fd, b);
+    var host_b: [300]u8 = undefined;
+    const default_port = u.port == (if (u.tls) @as(u16, 443) else 80);
+    const host = if (default_port) u.name else std.fmt.bufPrint(&host_b, "{s}:{d}", .{ u.name, u.port }) catch u.host;
+    const head = std.fmt.bufPrint(&hb, "{s} {s}{s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: awl\r\nAccept: text/event-stream\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n{s}\r\n", .{ method, u.prefix, path, host, total, auth }) catch return error.Http;
+    try writeOut(fd, u, head);
+    for (body) |b| try writeOut(fd, u, b);
+    if (u.tls) tls.flush() catch return error.Closed;
 }
 
 pub const Response = struct {
     fd: sys.fd_t,
+    tls: bool = false,
     buf: [16 * 1024]u8 = undefined,
     pos: usize = 0,
     end: usize = 0,
@@ -111,8 +147,13 @@ pub const Response = struct {
             self.end -= self.pos;
             self.pos = 0;
         }
-        _ = try wait(self.fd, -1);
-        const n = try sys.read(self.fd, self.buf[self.end..]);
+        const n = if (self.tls) tls.read(self.buf[self.end..]) catch |e| return switch (e) {
+            error.Cancel => error.Cancel,
+            else => error.Closed,
+        } else blk: {
+            _ = try wait(self.fd, -1);
+            break :blk try sys.read(self.fd, self.buf[self.end..]);
+        };
         self.end += n;
         return n > 0;
     }
@@ -217,5 +258,13 @@ test "parseUrl" {
     try std.testing.expectEqualStrings("127.0.0.1:12434", u.host);
     try std.testing.expectEqualStrings("", u.prefix);
     try std.testing.expectEqualStrings("/run/7", (try parseUrl("http://localhost:9/run/7/v1/")).prefix);
-    try std.testing.expectError(error.BadUrl, parseUrl("https://x"));
+    const h = try parseUrl("https://openrouter.ai/api/v1");
+    try std.testing.expect(h.tls and h.named and h.port == 443);
+    try std.testing.expectEqualStrings("openrouter.ai", h.name);
+    try std.testing.expectEqualStrings("/api", h.prefix);
+    const hp = try parseUrl("https://localhost:8443");
+    try std.testing.expect(hp.tls and !hp.named and hp.port == 8443 and hp.ip[0] == 127);
+    try std.testing.expectError(error.BadUrl, parseUrl("ftp://x"));
+    try std.testing.expectError(error.BadUrl, parseUrl("http://bad_host"));
+    try std.testing.expectError(error.BadUrl, parseUrl("http://:80"));
 }

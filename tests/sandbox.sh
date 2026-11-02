@@ -24,7 +24,7 @@ export HOME=$W/home
 mkdir -p "$HOME/.ssh" "$W/proj/.agents/skills/demo"
 echo SECRETKEY >"$HOME/.ssh/id_probe"
 echo "export X=1" >"$HOME/.bashrc_probe"
-cd "$W/proj"
+cd "$W/proj" || exit
 git init -q
 echo "# rules" >AGENTS.md
 printf -- '---\nname: demo\ndescription: d\n---\n' >.agents/skills/demo/SKILL.md
@@ -96,7 +96,8 @@ EOF
 LOG=$W/req.jsonl
 python3 "$HERE/fake_sse.py" "$W/script.json" --log "$LOG" >"$W/port" &
 for _ in $(seq 50); do [ -s "$W/port" ] && break; sleep 0.02; done
-export AWL_URL=http://127.0.0.1:$(cat "$W/port")
+AWL_URL=http://127.0.0.1:$(cat "$W/port")
+export AWL_URL
 export AWL_CTX_MODE=fresh # the session view exists only in fresh/async; other sessions are hidden in every mode
 "$AWL" -p "probe" >"$W/out" 2>&1 || bad "awl exit" "$(tail -5 "$W/out")"
 
@@ -121,6 +122,50 @@ cmp -s .git/config "$W/config.before" && ok ".git/config unchanged" || bad ".git
 [ "$(cat AGENTS.md)" = "# rules" ] && ok "AGENTS.md unchanged" || bad "AGENTS.md unchanged" "$(cat AGENTS.md)"
 [ "$(cat "$HOME/.bashrc_probe")" = "export X=1" ] && ok "symlink out of project refused" || bad "symlink out of project refused" "$(cat "$HOME/.bashrc_probe")"
 [ "$(cat ok.txt 2>/dev/null)" = fine ] && ok "write in project works" || bad "write in project works" "no ok.txt"
+
+# Sockets under /tmp: hidden at /tmp/S and /tmp/D/S, left alone deeper (/tmp/D/E/S: Hearth's
+# /tmp/hearth-awl-<id>/web/fetch.sock), as they are
+# when the first command starts. AWL_SANDBOX_SOCKETS=path:path leaves exactly those reachable.
+# Embedders depend on both (docs/embedding.md).
+S=/tmp/awl-sbx-$$
+mkdir -p "$S/d/e"
+python3 - "$S" <<'EOF' &
+import socket, sys, os, time
+socks = []
+for p in ("%s.sock" % sys.argv[1], sys.argv[1] + "/d.sock", sys.argv[1] + "/d/e.sock", sys.argv[1] + "/d/e/f.sock"):
+    s = socket.socket(socket.AF_UNIX); s.bind(p); s.listen(); socks.append(s)
+open(sys.argv[1] + "/ready", "w").close()
+time.sleep(60)
+EOF
+SOCK_PID=$!
+for _ in $(seq 100); do [ -e "$S/ready" ] && break; sleep 0.02; done
+probe='for p in '"$S"'.sock '"$S"'/d.sock '"$S"'/d/e.sock '"$S"'/d/e/f.sock; do python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])" $p 2>/dev/null && echo "open $p" || echo "hidden $p"; done'
+sock_run() {
+  printf '[{"tool_calls":[%s]},{"content":"ok"}]' "$(bash_call "$probe")" >"$W/sock.json"
+  python3 "$HERE/fake_sse.py" "$W/sock.json" --log "$W/sock.jsonl" >"$W/sport" &
+  local spid=$!
+  for _ in $(seq 50); do [ -s "$W/sport" ] && break; sleep 0.02; done
+  AWL_URL=http://127.0.0.1:$(cat "$W/sport") "$@" "$AWL" -p sockets >/dev/null 2>&1
+  kill $spid; wait $spid 2>/dev/null
+  : >"$W/sport"
+  # the probe's output without fresh mode's trailing "[time …, context …]" line
+  python3 -c 'import json,re,sys; print(re.sub(r"\n\[time [^]]*\]$", "", [json.loads(l) for l in open(sys.argv[1])][-1]["messages"][-1]["content"]))' "$W/sock.jsonl"
+  rm -f "$W/sock.jsonl"
+}
+got=$(sock_run env)
+want="hidden $S.sock
+hidden $S/d.sock
+open $S/d/e.sock
+open $S/d/e/f.sock"
+[ "$got" = "$want" ] && ok "sockets in /tmp hidden two levels deep, reachable deeper" || bad "socket depth" "$got"
+got=$(sock_run env AWL_SANDBOX_SOCKETS="$S/d.sock:/nonexistent.sock")
+want="hidden $S.sock
+open $S/d.sock
+open $S/d/e.sock
+open $S/d/e/f.sock"
+[ "$got" = "$want" ] && ok "AWL_SANDBOX_SOCKETS leaves exactly the named sockets reachable" || bad "AWL_SANDBOX_SOCKETS" "$got"
+kill $SOCK_PID; wait $SOCK_PID 2>/dev/null
+rm -rf "$S" "$S.sock"
 
 echo "sandbox: $pass passed, $fail failed"
 [ $fail -eq 0 ] || { echo "$results" >"${SANDBOX_DUMP:-/dev/null}"; exit 1; }
