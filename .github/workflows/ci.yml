@@ -68,7 +68,7 @@ jobs:
       - name: Sandbox escape tests
         run: zig build sandbox
       - name: Offline arena proxy test
-        run: python3 arena/test_proxy.py zig-out/bin/awl
+        run: python3 arena/test_proxy.py "$PWD/zig-out/bin/awl"
 
   # Every commit on main gets downloadable release binaries (zig build release; same
   # flags as a release, but the Zig comes from mise, not release.sh's checked download).
