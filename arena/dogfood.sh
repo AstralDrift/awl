@@ -46,7 +46,8 @@ run() { # harness
     --model "$MODEL" --ctx 262144 --provider "$PROVIDER" >"$out/port" &
   local proxy=$!
   for _ in $(seq 100); do [ -s "$out/port" ] && break; sleep 0.05; done
-  local url=http://127.0.0.1:$(cat "$out/port")
+  local url
+  url=http://127.0.0.1:$(cat "$out/port")
   # Guard: stop the harness when it passes the budget, or stalls (no first request within 120 s,
   # or no new request for 300 s). Nothing may sit silently.
   (

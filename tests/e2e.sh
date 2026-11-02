@@ -42,6 +42,35 @@ out=$(cd "$W" && "$AWL" -p hi 2>&1)
 [ "$out" = "héllo ✓ there" ] && ok "stream with SSE comment lines" || bad "stream with SSE comment lines" "$out"
 stop
 
+# 1b. https (std.crypto.tls, no libc) against a self-signed CA, and a host name from /etc/hosts
+if command -v openssl >/dev/null; then
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$W/k.pem" -out "$W/c.pem" \
+    -subj /CN=localhost -addext subjectAltName=DNS:localhost -days 2 >/dev/null 2>&1
+  serve "$W/hi.json" --cert "$W/c.pem" --key "$W/k.pem" --split 3
+  out=$(cd "$W" && AWL_URL=https://localhost:$PORT AWL_CA_FILE=$W/c.pem "$AWL" -p hi 2>&1)
+  [ "$out" = "héllo ✓ there" ] && ok "https stream (TLS 1.3, self-signed CA through AWL_CA_FILE)" || bad "https stream" "$out"
+  out=$(cd "$W" && AWL_URL=https://localhost:$PORT AWL_CA_FILE=/nonexistent "$AWL" -p hi 2>&1)
+  rc=$?
+  case "$out" in *TLS*|*CA*) [ $rc -ne 0 ] && ok "https refused without a CA bundle (exit $rc)" || bad "https no bundle: exit 0" "$out" ;; *) bad "https no bundle" "$out" ;; esac
+  # the real check: the system bundle is loaded and must not trust the self-signed server
+  if [ -r /etc/ssl/certs/ca-certificates.crt ] || [ -r /etc/pki/tls/certs/ca-bundle.crt ]; then
+    out=$(cd "$W" && AWL_URL=https://localhost:$PORT "$AWL" -p hi 2>&1)
+    rc=$?
+    case "$out" in *TlsCertificateNotVerified*) [ $rc -eq 2 ] && ok "https: a self-signed server is refused against the system bundle" || bad "https self-signed: exit $rc" "$out" ;; *) bad "https self-signed not refused" "$out" ;; esac
+  fi
+  stop
+else
+  echo "skip https (no openssl)"
+fi
+if getent hosts awl-e2e.test >/dev/null 2>&1; then
+  serve "$W/hi.json" --split 2
+  out=$(cd "$W" && AWL_URL=http://awl-e2e.test:$PORT "$AWL" -p hi 2>&1)
+  [ "$out" = "héllo ✓ there" ] && ok "host name in AWL_URL resolved through /etc/hosts" || bad "hosts resolution" "$out"
+  stop
+else
+  echo "skip host-name URL (no awl-e2e.test in /etc/hosts; docker run --add-host awl-e2e.test:127.0.0.1)"
+fi
+
 # 2. tool loop: read -> edit + grep -> done
 mkdir -p "$W/proj"
 echo "hello world" >"$W/proj/hello.txt"
@@ -72,6 +101,49 @@ assert reqs[0]["stream"] is True
 names = [t["function"]["name"] for t in reqs[0]["tools"]]
 assert names[:4] == ["read", "write", "edit", "bash"], names
 EOF
+stop
+
+# 2a. the system prompt names the real OS (from /etc/os-release), never a hard-coded distribution
+serve "$W/hi.json"
+(cd "$W" && "$AWL" -p hi >/dev/null 2>&1)
+python3 - "$LOG" <<'EOF2' && ok "system prompt names the OS from /etc/os-release" || bad "system prompt OS name" "see above"
+import json, os, re, sys
+sysmsg = json.loads(open(sys.argv[1]).readline())["messages"][0]["content"]
+assert "Omarchy Linux" not in sysmsg or "Omarchy" in open("/etc/os-release").read(), sysmsg[:300]
+if os.path.exists("/etc/os-release"):
+    kv = dict(re.findall(r'^(\w+)=(.*)$', open("/etc/os-release").read(), re.M))
+    want = (kv.get("PRETTY_NAME") or kv.get("NAME")).strip('"')
+    assert f"\nSystem: {want}" in sysmsg, sysmsg[:400]
+    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+        assert f"System: {want}, in a container" in sysmsg, sysmsg[:400]
+else:
+    assert "\nSystem:" not in sysmsg, sysmsg[:300]
+EOF2
+stop
+# 2b. a model command still running at its timeout is not killed: it goes on as a background job
+mkdir -p "$W/slowp"
+cat >"$W/slow.json" <<'EOF2'
+[{"tool_calls":[{"name":"bash","arguments":{"command":"echo begun; sleep 2; echo late > marker.txt; echo finished","timeout":1}}]},
+ {"tool_calls":[{"name":"bash","arguments":{"command":"sleep 3; cat marker.txt"}}]},
+ {"tool_calls":[{"name":"bash","arguments":{"command":"true"}}]},
+ {"content":"bg done"}]
+EOF2
+serve "$W/slow.json"
+t0=$(date +%s)
+out=$(cd "$W/slowp" && "$AWL" -p go 2>/dev/null)
+python3 - "$LOG" "$out" "$W/slowp" <<'EOF2' && ok "a command past its timeout continues as a background job" || bad "timeout to background" "$out"
+import json, re, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "bg done", sys.argv[2]
+t = [x["content"] for x in r[3]["messages"] if x["role"] == "tool"]
+assert t[0].startswith("begun\n") and "still running after 1 s" in t[0] and "background job 1" in t[0] and "killed" not in t[0], t[0]
+assert "finished" not in t[0], t[0]
+log = re.search(r"(/tmp/awl-\d+-\d+\.log)", t[0]).group(1)
+assert t[1].strip() == "late", t[1]  # the command finished on its own after the timeout
+assert t[2].startswith("[background job 1 (echo begun; sleep 2;") and "exited with code 0" in t[2] and log in t[2], t[2]
+assert open(log).read() == "begun\nfinished\n", open(log).read()
+EOF2
+[ $(( $(date +%s) - t0 )) -le 6 ] && ok "the timed-out call returned at its timeout" || bad "timeout to background: slow" "$(( $(date +%s) - t0 )) s"
 stop
 
 # 2b. child processes get awl's env minus AWL_*: a bash `env` must not leak the key
@@ -415,6 +487,31 @@ stop
 serve "$W/keep.json"
 out=$(cd "$W" && AWL_KEEP_REASONING=0 "$AWL" -p go 2>/dev/null)
 python3 -c "import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; a=[m for m in r[1]['messages'] if m['role']=='assistant'][-1]; assert 'reasoning_content' not in a, a" "$LOG" && ok "AWL_KEEP_REASONING=0 sends none" || bad "keep reasoning off" "$out"
+stop
+# AWL_KEEP_REASONING=N: only the newest N assistant turns carry their reasoning (Qwen3-style templates
+# re-render every earlier tool-call turn's reasoning into the prompt, so a long run pays for all of it)
+cat >"$W/keep3.json" <<'EOF2'
+[{"reasoning":"first thought","tool_calls":[{"name":"bash","arguments":{"command":"true"}}]},
+ {"reasoning":"second \"quoted\" thought\\","tool_calls":[{"name":"bash","arguments":{"command":"true"}}]},
+ {"reasoning":"third thought","tool_calls":[{"name":"bash","arguments":{"command":"true"}}]},
+ {"content":"windowed"}]
+EOF2
+serve "$W/keep3.json"
+out=$(cd "$W" && AWL_KEEP_REASONING=1 "$AWL" -p go 2>/dev/null)
+python3 - "$LOG" "$out" <<'EOF2' && ok "AWL_KEEP_REASONING=1 keeps only the newest turn's reasoning" || bad "keep reasoning window" "$out"
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+assert sys.argv[2] == "windowed", sys.argv[2]
+a = [m for m in r[3]["messages"] if m["role"] == "assistant"]
+assert [m.get("reasoning_content") for m in a] == [None, None, "third thought"], a
+a2 = [m for m in r[2]["messages"] if m["role"] == "assistant"]
+assert [m.get("reasoning_content") for m in a2] == [None, 'second "quoted" thought\\'], a2
+assert all(m["tool_calls"][0]["function"]["name"] == "bash" for m in a), a
+EOF2
+stop
+serve "$W/keep3.json"
+out=$(cd "$W" && "$AWL" -p go 2>/dev/null)
+python3 -c "import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; a=[m for m in r[3]['messages'] if m['role']=='assistant']; assert [m.get('reasoning_content') for m in a]==['first thought','second \"quoted\" thought\\\\','third thought'], a" "$LOG" && ok "default keeps every turn's reasoning" || bad "keep reasoning default" "$out"
 stop
 # grep and find given an absolute path inside the project print short relative paths (long absolute ones get mis-copied)
 mkdir -p "$W/relsub" && echo "needle_rel" > "$W/relsub/r.txt"

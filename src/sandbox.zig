@@ -17,11 +17,15 @@ pub var on = false; // commands run in the sandbox
 pub var missing = false; // wanted but no bwrap: the model's commands are refused
 pub var enforce = false; // path rules apply (everything but AWL_SANDBOX=off)
 pub var net = false; // AWL_SANDBOX_NET=on: the session sandbox keeps the host network
+pub var no_net = false; // AWL_NETWORK=off: commands never get the network, not even with approval
 var root_b: [4096]u8 = undefined;
 pub var root: []const u8 = "";
 var home: []const u8 = "";
 var extra_b: [2048]u8 = undefined;
 var extra: []const u8 = ""; // AWL_SANDBOX_WRITE, ':'-separated
+/// AWL_SANDBOX_SOCKETS: ':'-separated socket paths under /tmp that the scan leaves reachable
+/// (an embedder's own helper socket). Read straight from the environment, so nothing is copied.
+var keep_sockets: []const u8 = "";
 
 /// Paths hidden from the model (empty tmpfs in the sandbox; read refuses them).
 const secrets = [_][]const u8{ "/.ssh", "/.gnupg", "/.aws", "/.config/gh", "/.local/state/omarchy", "/.password-store", "/.local/share/keyrings", "/.docker", "/.kube" };
@@ -36,10 +40,12 @@ pub fn setup(project_root: []const u8) void {
     enforce = !std.mem.eql(u8, sys.getenv("AWL_SANDBOX") orelse "on", "off");
     on = enforce and sys.exists(bwrap);
     missing = enforce and !on;
-    net = std.mem.eql(u8, sys.getenv("AWL_SANDBOX_NET") orelse "off", "on");
+    no_net = std.mem.eql(u8, sys.getenv("AWL_NETWORK") orelse "", "off");
+    net = !no_net and std.mem.eql(u8, sys.getenv("AWL_SANDBOX_NET") orelse "off", "on");
     const n = @min(project_root.len, root_b.len);
     @memcpy(root_b[0..n], project_root[0..n]);
     root = root_b[0..n];
+    keep_sockets = sys.getenv("AWL_SANDBOX_SOCKETS") orelse "";
     if (sys.getenv("AWL_SANDBOX_WRITE")) |w| {
         const m = @min(w.len, extra_b.len);
         @memcpy(extra_b[0..m], w[0..m]);
@@ -51,7 +57,7 @@ pub fn setup(project_root: []const u8) void {
 pub fn describe(buf: []u8) []const u8 {
     if (missing) return "no sandbox: install bubblewrap to let the model run commands (or AWL_SANDBOX=off)";
     if (!on) return "sandbox off";
-    return std.fmt.bufPrint(buf, "sandbox: writes only to the project, /tmp and caches; network {s}", .{if (net) "on" else "off (bash network: true asks the user for one command)"}) catch "sandbox on";
+    return std.fmt.bufPrint(buf, "sandbox: writes only to the project, /tmp and caches; network {s}", .{if (net) "on" else if (no_net) "off (AWL_NETWORK=off: a command with network: true is refused)" else "off (bash network: true asks the user for one command)"}) catch "sandbox on";
 }
 
 // ---- the session sandbox ----
@@ -61,6 +67,11 @@ var holder_out: i32 = -1; // its info/stderr pipe, kept open while it runs
 var pidfd: i32 = -1; // the sandbox's first process; setns on it joins its namespaces at once
 // (one namespace file at a time fails: the kernel refuses the mount namespace with EPERM)
 const all_ns = linux.CLONE.NEWUSER | linux.CLONE.NEWNS | linux.CLONE.NEWNET | linux.CLONE.NEWPID;
+// With AWL_SANDBOX_NET=on the sandbox keeps the host's network namespace, which only root may
+// setns into (EPERM otherwise); the command is already in it, so it is left out.
+fn joinNs() u32 {
+    return if (net) all_ns & ~@as(u32, linux.CLONE.NEWNET) else all_ns;
+}
 
 const Args = struct {
     v: [256:null]?[*:0]const u8 = undefined,
@@ -121,7 +132,9 @@ fn options(a: *Args, with_net: bool) void {
 }
 
 /// Sockets under /tmp (X11, browsers, other agents' daemons) let a command act outside the
-/// sandbox. Hide the ones there now, two levels deep; the X11/ICE folders entirely.
+/// sandbox. Hide the ones there now (when the session sandbox starts): /tmp/S and /tmp/D/S, not
+/// deeper; the X11/ICE folders entirely. AWL_SANDBOX_SOCKETS names ones to leave reachable.
+/// Embedders rely on this depth (docs/embedding.md, tests/sandbox.sh).
 fn maskTmpSockets(a: *Args) void {
     for ([_][]const u8{ "/tmp/.X11-unix", "/tmp/.ICE-unix" }) |d| if (sys.exists(d)) a.addAll(&.{ "--tmpfs", a.zs.z(d) });
     scanSockets(a, "/tmp", 1);
@@ -147,10 +160,17 @@ fn scanSockets(a: *Args, dir: []const u8, depth: u8) void {
             var pb: [1024]u8 = undefined;
             const p = std.fmt.bufPrint(&pb, "{s}/{s}", .{ dir, name }) catch continue;
             if (e.type == linux.DT.SOCK) {
+                if (kept(p)) continue;
                 a.addAll(&.{ "--ro-bind", "/dev/null", a.zs.z(p) });
             } else if (e.type == linux.DT.DIR and depth > 0) scanSockets(a, p, depth - 1);
         }
     }
+}
+
+fn kept(p: []const u8) bool {
+    var it = std.mem.splitScalar(u8, keep_sockets, ':');
+    while (it.next()) |k| if (std.mem.eql(u8, k, p)) return true;
+    return false;
 }
 
 /// Start the session sandbox unless it is running. null: ready; else why it failed.
@@ -262,9 +282,9 @@ pub fn stop() void {
 /// The child stays outside as the waiter, so the caller's process group and timeouts work;
 /// the command runs as its grandchild. With `pid_fd`, the command leads its own process
 /// group and writes its pid as seen inside the sandbox there (for `kill -- -PID`).
-pub fn execIn(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const u8, cwd: [*:0]const u8, pid_fd: i32) noreturn {
+pub fn execIn(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const u8, cwd: [*:0]const u8, pid_fd: i32, own_group: bool) noreturn {
     _ = linux.prctl(@intFromEnum(linux.PR.SET_DUMPABLE), 0, 0, 0, 0); // nothing in the sandbox may ptrace us while we hold its capabilities
-    const e = linux.errno(linux.setns(pidfd, all_ns));
+    const e = linux.errno(linux.setns(pidfd, joinNs()));
     if (e != .SUCCESS) {
         var eb: [96]u8 = undefined;
         sys.writeAll(2, std.fmt.bufPrint(&eb, "awl: could not enter the sandbox ({s})\n", .{@tagName(e)}) catch "awl: could not enter the sandbox\n") catch {};
@@ -273,8 +293,8 @@ pub fn execIn(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const
     const pid_rc = linux.fork();
     if (linux.errno(pid_rc) != .SUCCESS) linux.exit_group(126);
     if (pid_rc == 0) {
+        if (own_group) _ = linux.setpgid(0, 0); // a job the model stops with kill -- -pid from inside the sandbox
         if (pid_fd >= 0) {
-            _ = linux.setpgid(0, 0);
             var nb: [16]u8 = undefined;
             sys.writeAll(pid_fd, std.fmt.bufPrint(&nb, "{d}", .{linux.getpid()}) catch "") catch {};
             sys.close(pid_fd);
