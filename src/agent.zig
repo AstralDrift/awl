@@ -69,6 +69,9 @@ pub fn init(cwd: []const u8) void {
     var pb: [16384]u8 = undefined;
     const base = if (sys.getenv("AWL_SYSTEM")) |p| (sys.readFile(p, &pb) catch base_prompt) else base_prompt;
     bufm.escape(&head, base);
+    // AWL_BATCH=1: one more line asking for independent tool calls in one reply (arena A/B, off by default).
+    if (std.mem.eql(u8, sys.getenv("AWL_BATCH") orelse "", "1"))
+        bufm.escape(&head, "\n- When several tool calls do not depend on each other's results (reading several files, independent searches), make them all in one reply.");
     const es = std.time.epoch.EpochSeconds{ .secs = @intCast(sys.wallSec()) };
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();

@@ -7,7 +7,7 @@ W=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$W"' EXIT
 export XDG_STATE_HOME=$W/state
 # The caller's awl settings must not leak in (e.g. running inside an awl session).
-unset AWL_URL AWL_MODEL AWL_KEY AWL_SYSTEM AWL_MAX_STEPS AWL_RSS AWL_AGENTS AWL_CTX_MODE
+unset AWL_URL AWL_MODEL AWL_KEY AWL_SYSTEM AWL_MAX_STEPS AWL_RSS AWL_AGENTS AWL_CTX_MODE AWL_BATCH
 export XDG_CONFIG_HOME=/nonexistent
 pass=0
 fail=0
@@ -122,6 +122,20 @@ if os.path.exists("/etc/os-release"):
         assert f"System: {want}, in a container" in sysmsg, sysmsg[:400]
 else:
     assert "\nSystem:" not in sysmsg, sysmsg[:300]
+EOF2
+stop
+# 2a'. AWL_BATCH=1 adds one line asking for independent tool calls in one reply; off by default (arena A/B)
+batch_line="- When several tool calls do not depend on each other's results (reading several files, independent searches), make them all in one reply."
+serve "$W/hi.json"
+(cd "$W" && "$AWL" -p hi >/dev/null 2>&1)
+(cd "$W" && AWL_BATCH=1 "$AWL" -p hi >/dev/null 2>&1)
+python3 - "$LOG" "$batch_line" <<'EOF2' && ok "AWL_BATCH=1 adds the batching line, default does not" || bad "AWL_BATCH prompt line" "see above"
+import json, sys
+off, on = [json.loads(l)["messages"][0]["content"] for l in open(sys.argv[1])]
+line = sys.argv[2]
+assert line not in off, off[:600]
+assert "\n" + line + "\n" in on, on[:900]
+assert on.replace("\n" + line, "", 1) == off, (on[:900], off[:900])
 EOF2
 stop
 # 2b. a model command still running at its timeout is not killed: it goes on as a background job

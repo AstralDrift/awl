@@ -71,6 +71,7 @@ else
     python3 -c 'import sys,json; m=json.load(sys.stdin)["data"][0]; print(m["id"], m.get("max_model_len", 0))')
   UPARGS=(--upstream "http://$GW:12434")
 fi
+[ "${AWL_BATCH:-}" = 1 ] && RUN=$RUN-batch # the batch-tool-calls A/B: its own jobs and proxy log
 if ! docker ps --format '{{.Names}}' | grep -qx "$PROXY"; then
   docker run -d --rm --name "$PROXY" --network "$NET" -p 127.0.0.1:$PORT:$PORT --user "$(id -u):$(id -g)" \
     -v "$HERE/proxy.py:/proxy.py:ro" -v "$KEYF:/key:ro" -v "$TB/proxy:/out" python:3.13-alpine \
