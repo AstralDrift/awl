@@ -208,6 +208,7 @@ fn sum(r: *Result, name: []const u8, comptime f: []const u8, a: anytype) void {
 /// Run tool `name` with JSON `args`. Output text goes to `out` (bounded).
 pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
     defer argFree();
+    summary.ran = .not_run;
     reapJobs(out);
     const a = argAlloc();
     var r = Result{ .ok = false };
@@ -368,6 +369,7 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
 
 /// Say what is wrong so the model can fix the call in one step: not JSON (cut off?), or which fields are missing.
 const sandbox = @import("sandbox.zig");
+const summary = @import("summary.zig");
 
 fn workdir() []const u8 {
     const S = struct {
@@ -1090,6 +1092,7 @@ fn startJob(cmd: [*:0]const u8, out: *Buf) bool {
     const c = std.mem.span(cmd);
     slot.* = .{ .pid = pid, .id = job_seq, .log = slot.log, .log_n = path.len, .cmd_n = @min(c.len, 60) };
     @memcpy(slot.cmd[0..slot.cmd_n], c[0..slot.cmd_n]);
+    summary.ran = .{ .background = job_seq };
     out.print("started background job {d} (pid {d}); output goes to {s}. Read it with read or tail; stop it with: kill -- -{d}", .{ job_seq, shown, path, shown });
     return true;
 }
@@ -1305,6 +1308,7 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
             shown = std.fmt.parseInt(linux.pid_t, nb[0..n], 10) catch pid;
         }
         out.print("\n[still running after {d} s: it continues as background job {d} (pid {d}); its output goes on in {s}. Read or tail that file when you need the rest; stop it with: kill {s}{d}]", .{ timeout_ms / 1000, job_seq, shown, log_path, if (sandbox.on) "" else "-- -", shown });
+        if (kind == .bash) summary.ran = .{ .background = job_seq };
         return true;
     }
     if (log_fd >= 0 and dropped == 0) {
@@ -1312,14 +1316,17 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
         _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&zb, log_path), 0);
     }
     if (cancelled) {
+        if (kind == .bash) summary.ran = .interrupted;
         out.add("\n[interrupted by user]");
         return error.Cancel;
     }
     if (timed_out) {
+        if (kind == .bash) summary.ran = .timed_out;
         out.print("\n[timed out after {d} s; process group killed]", .{timeout_ms / 1000});
         return false;
     }
     const code: u32 = if (status & 0x7f == 0) (status >> 8) & 0xff else 128 + (status & 0x7f);
+    if (kind == .bash) summary.ran = .{ .exited = code };
     if (kind == .grep and code == 1 and out.len == base) {
         out.add("no matches");
         return true;

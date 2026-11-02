@@ -52,6 +52,7 @@ awl reads only its environment; it has no config file. An embedder sets:
 | `AWL_MODE` | `auto` (no approvals), `ask`, or `plan` (files read-only). Under `-p` nobody can approve, so `ask` behaves like `auto` except for the refusals below. |
 | `AWL_MAX_STEPS` | Model replies per run (default 200). |
 | `AWL_NETWORK` | `off`: a command that asks for the network (`network: true`) is refused at once, with `not run: AWL_NETWORK=off: …` as its result, and `AWL_SANDBOX_NET=on` is ignored. The model is told in its system prompt. Any other value, or unset: the default (no network for commands; under `-p` a `network: true` command is refused because nobody can approve it). |
+| `AWL_SUMMARY` | A file path. When the `-p` run ends, awl writes one JSON object there saying how it went (see [Run summary](#run-summary)). |
 | `HOME` | Where awl looks for the user's files (below). |
 | `XDG_STATE_HOME` | Session files go to `$XDG_STATE_HOME/awl/sessions/`, else `$HOME/.local/state/awl/sessions/`. |
 | `XDG_CONFIG_HOME` | User config, else `$HOME/.config`. |
@@ -92,6 +93,33 @@ Your scratch `HOME` is part of the contract. awl reads, if present:
 - `$HOME/.local/state/omarchy/current/theme/colors.toml`: TUI colors only.
 
 It writes only session files, and in the TUI a status file next to them. `-p` writes no status file.
+
+## Run summary
+
+With `AWL_SUMMARY=/path/file.json`, a `-p` run writes one JSON object there as it ends, whatever
+the exit status (also on a bad setting, exit 2). It is written to a temporary file next to it and
+renamed into place, so a reader never sees half of it. A path that cannot be written is ignored:
+the run's own exit status stands. Without the variable nothing is written. Fields:
+
+| Field | Meaning |
+|---|---|
+| `version` | The format version, `1`. New fields may be added in a version; a changed or removed field bumps it. |
+| `awl` | The build, as `--version` prints it without the leading `awl `: `0.1.0 (8d7c9ae)`. |
+| `status` | `done` (exit 0), `step_limit` (exit 1), `error` (exit 1 or 2), `cancelled` (exit 130). |
+| `exit` | The exit status, as in the table above. |
+| `steps` | Model replies received. |
+| `tool_calls` | An object: tool name (as the model wrote it, unknown names included) to how many times it was called. |
+| `commands` | One object per `bash` call, in order: `command` (the command string, or `null` when the arguments were not valid) and exactly one outcome: `exit` (code), `timed_out: true`, `interrupted: true`, `background` (the job number: started as a job, or moved to one at its timeout), or `not_run` (the first line of the refusal the model got, at most 300 bytes; see [Tool results](#tool-results)). |
+| `files_written` | Paths `write` and `edit` changed, relative to the working directory, each once, in first-change order. Files commands changed are not known. |
+| `session` | The session file's path. |
+| `error` | Only with `status: error`: the last error message awl printed. |
+
+```json
+{"version":1,"awl":"0.1.0 (8d7c9ae)","status":"done","exit":0,"steps":3,
+ "tool_calls":{"bash":2,"edit":1},
+ "commands":[{"command":"pytest -q","exit":1},{"command":"pytest -q","exit":0}],
+ "files_written":["src/app.py"],"session":"/home/u/.local/state/awl/sessions/20261101-120000-4242.jsonl"}
+```
 
 ## The session file
 

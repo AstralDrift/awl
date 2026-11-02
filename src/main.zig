@@ -10,6 +10,7 @@ const session = @import("session.zig");
 const tui = @import("tui.zig");
 const bufm = @import("buf.zig");
 const agents = @import("agents.zig");
+const summary = @import("summary.zig");
 
 const build_options = @import("build_options");
 pub const version = build_options.version;
@@ -42,11 +43,13 @@ const usage =
     \\     AWL_SANDBOX (off) AWL_SANDBOX_NET (off: no network for commands) AWL_SANDBOX_WRITE=dir:dir
     \\     AWL_NETWORK (off: refuse commands that ask for the network, without asking anyone)
     \\     AWL_SANDBOX_SOCKETS=path:path (sockets under /tmp that commands may still reach)
+    \\     AWL_SUMMARY=FILE (with -p: write a JSON summary of the run there; docs/embedding.md)
     \\     AWL_THINK_BUDGET=N (SGLang --enable-strict-thinking: cap reasoning per reply)
     \\     AWL_THINK_MAX=N (any server: stop a reply that thinks past N tokens, then act)
     \\     AWL_THINKING (off: ask the chat template for no thinking on every request)
     \\     AWL_KEEP_REASONING (N: send only the newest N turns' reasoning back; 0: none)
     \\     AWL_THINK_ROWS (reasoning rows shown live, default 6; 0: timer only)
+    \\     AWL_CTX_MODE (compact: summarize when the window fills; fresh: fresh context + session view)
     \\     AWL_DEBUG_KEYS=FILE (log raw input, escaped: for keyboard / paste problems)
     \\     AWL_TITLE (off: leave the terminal title alone)
     \\
@@ -54,6 +57,7 @@ const usage =
 
 fn die(comptime f: []const u8, a: anytype) noreturn {
     ui.err(f, a);
+    summary.write(.error_, 2, session.path, &tools.files_changed, version_line);
     sys.exit(2);
 }
 
@@ -98,6 +102,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         sys.writeAll(sys.stderr, usage) catch {};
         return 2;
     }
+    if (prompt != null and !bg) summary.path = sys.getenv("AWL_SUMMARY");
     sys.setupSignals();
     tools.detect();
     ui.oneshot = prompt != null;
@@ -180,11 +185,18 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (bg) return background(prompt.?);
     if (prompt) |p| {
         agent.user(p);
-        const rc: u8 = switch (agent.run()) {
+        const o = agent.run();
+        const rc: u8 = switch (o) {
             .done => 0,
             .cancelled => 130,
             else => 1,
         };
+        summary.write(switch (o) {
+            .done => .done,
+            .cancelled => .cancelled,
+            .failed => .error_,
+            .max_steps => .step_limit,
+        }, rc, session.path, &tools.files_changed, version_line);
         if (sys.getenv("AWL_RSS") != null) { // budget probe: peak RSS of this process
             var b: [48]u8 = undefined;
             sys.writeAll(sys.stderr, std.fmt.bufPrint(&b, "peak_rss_kb {d}\n", .{sys.peakRssKb()}) catch "") catch {};
@@ -254,4 +266,5 @@ test {
     _ = @import("prompts.zig");
     _ = @import("dns.zig");
     _ = @import("tls.zig");
+    _ = @import("summary.zig");
 }

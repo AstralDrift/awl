@@ -185,5 +185,62 @@ stop
 kill $TPID 2>/dev/null
 wait $TPID 2>/dev/null
 
+# 7. AWL_SUMMARY=<path>: one JSON object when a -p run ends (docs/embedding.md, "Run summary").
+sumpy() { python3 -c "import json, sys
+s = json.load(open(sys.argv[1]))
+assert s['version'] == 1, s
+assert set(s) - {'error'} == {'version', 'awl', 'status', 'exit', 'steps', 'tool_calls', 'commands', 'files_written', 'session'}, sorted(s)
+outcomes = {'exit', 'timed_out', 'interrupted', 'background', 'not_run'}
+for c in s['commands']:
+    assert len(set(c) & outcomes) == 1 and set(c) - outcomes == {'command'}, c
+    if 'not_run' in c:
+        r = c['not_run']
+        assert isinstance(r, str) and 0 < len(r) <= 300 and '\n' not in r, repr(r)
+$1" "$W/sum.json"; }
+serve "$W/one.json"
+rm -f "$W/sum.json"
+run AWL_SUMMARY="$W/sum.json" -- "do it"
+sumpy "
+assert s['status'] == 'done' and s['exit'] == 0 and s['steps'] == 3, s
+assert s['awl'] == '$("$AWL" --version | cut -c5-)', s['awl']
+assert s['tool_calls'] == {'bash': 5, 'write': 1, 'nope': 1}, s['tool_calls']
+cs = s['commands']
+assert cs[:3] == [{'command': 'printf hi', 'exit': 0}, {'command': 'echo out; exit 3', 'exit': 3}, {'command': 'true', 'exit': 0}], cs
+assert cs[3]['command'] is None and cs[3]['not_run'].startswith('invalid arguments for bash'), cs[3]
+assert cs[4]['command'] is None and 'not valid JSON' in cs[4]['not_run'], cs[4]
+assert s['files_written'] == ['new.txt'], s['files_written']
+assert s['session'] == '$SESSION', s['session']
+assert 'error' not in s, s
+" && ok "AWL_SUMMARY: done, steps, tool counts, each command's exit, files written, session path" || bad "AWL_SUMMARY done" "$(cat "$W/sum.json")"
+stop
+serve "$W/more.json"
+run AWL_SUMMARY="$W/sum.json" -- "more"
+sumpy "
+cs = s['commands']
+assert cs[0] == {'command': 'sleep 5', 'background': 1}, cs[0]  # still running at its timeout: moved to a job
+assert cs[1] == {'command': 'true', 'background': 2}, cs[1]
+assert cs[2]['command'] == 'curl https://example.com' and 'network' in cs[2]['not_run'], cs[2]
+assert cs[3] == {'command': 'sleep 0.5', 'exit': 0}, cs[3]
+assert any(c['command'] == 'sleep 9' and 'background jobs' in c.get('not_run', '') for c in cs), cs
+assert cs[-1] == {'command': 'sleep 5', 'timed_out': True}, cs[-1]  # the job table was full: killed
+" && ok "AWL_SUMMARY: moved to a job, started as a job, exit, not-run reasons, timed out" || bad "AWL_SUMMARY outcomes" "$(cat "$W/sum.json")"
+stop
+serve "$W/loop.json"
+run AWL_SUMMARY="$W/sum.json" AWL_MAX_STEPS=10 -- "loop"
+sumpy "assert s['status'] == 'step_limit' and s['exit'] == 1 and s['steps'] == 11 and len(s['commands']) == 10, (s['status'], s['steps'])" && ok "AWL_SUMMARY: step_limit, exit 1" || bad "AWL_SUMMARY step limit" "$(head -c 300 "$W/sum.json")"
+stop
+PORT=1
+run AWL_SUMMARY="$W/sum.json" -- "x"
+sumpy "assert s['status'] == 'error' and s['exit'] == 1 and 'cannot reach the model' in s['error'], s" && ok "AWL_SUMMARY: error with its message, exit 1" || bad "AWL_SUMMARY error" "$(cat "$W/sum.json")"
+run AWL_SUMMARY="$W/sum.json" AWL_MODE=yolo -- "x"
+sumpy "assert s['status'] == 'error' and s['exit'] == 2 and s['steps'] == 0 and 'AWL_MODE' in s['error'], s" && ok "AWL_SUMMARY: bad setting is an error, exit 2" || bad "AWL_SUMMARY exit 2" "$(cat "$W/sum.json")"
+serve "$W/hi.json"
+rm -f "$W/sum.json"
+run -- "hi"
+[ ! -e "$W/sum.json" ] && ok "no AWL_SUMMARY: no summary file" || bad "summary without AWL_SUMMARY" "file written"
+run AWL_SUMMARY=/nonexistent/dir/sum.json -- "hi"
+[ $RC -eq 0 ] && ok "AWL_SUMMARY in a missing directory: the run still exits 0" || bad "unwritable AWL_SUMMARY" "rc=$RC"
+stop
+
 echo "embed: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

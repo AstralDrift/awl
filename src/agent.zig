@@ -1048,6 +1048,7 @@ test "reasoning window strips the oldest turns' reasoning, escaped quotes and al
 }
 
 fn pushAssistant(step: usize) void {
+    @import("summary.zig").steps += 1;
     var m = Buf.init(turn.content.len * 6 + turn.reasoning.len * 6 + (1 << 20));
     defer m.free();
     m.add("{\"role\":\"assistant\",\"content\":");
@@ -1088,6 +1089,7 @@ fn jsonObject(s: []const u8) bool {
 }
 
 fn pushResult(c: *const llm.Call, step: usize, i: usize, text: []const u8) void {
+    @import("summary.zig").call(c.name.get(), c.args.items(), text);
     var m = Buf.init(text.len * 6 + 256);
     defer m.free();
     var ib: [64]u8 = undefined;

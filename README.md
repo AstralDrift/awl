@@ -231,6 +231,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_CTX_MODE` | compact | when the context fills: `compact` (summary) or `fresh` (fresh context + session view; arena A/B) |
 | `AWL_REASONING` | `medium` | `reasoning_effort` to send (`low`, `medium`, `xhigh`, ...; `off` sends none). Local AI's Qwen defaults to xhigh, about twice the tokens per turn; dropped automatically if a server rejects it |
 | `AWL_MAX_TOKENS` | `65536` | output cap per reply (`max_tokens`; `0` sends none). Generous so heavy thinkers are not cut off. A reply cut off before any tool call gets a note asking the model to continue; one cut off inside a tool call runs nothing and asks for the call again |
+| `AWL_SUMMARY` | unset | with `-p`: a file awl writes one JSON object to when the run ends (status, exit, steps, tool calls, each command's outcome, files written; [docs/embedding.md](docs/embedding.md#run-summary)) |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |
 | `AWL_AGENTS` | on | `off` loads no AGENTS.md files (clean evals and benchmarks) |
 | `AWL_MODE` | `auto` | `auto`, `ask` (approve commands and edits) or `plan` (read-only) |
@@ -238,6 +239,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_WELCOME` | on | `off` shrinks the startup screen to one line |
 | `AWL_MODELS` | unset | comma-separated models that Ctrl-P cycles through |
 | `AWL_THINK_BUDGET` | unset | `N`: send `custom_params: {thinking_budget: N}` (SGLang started with `--enable-strict-thinking` ends reasoning after N tokens) |
+| `AWL_THINK_MAX` | unset | `N`: a reply that has thought past N tokens is stopped, its reasoning so far stays in the history, and the next request asks the model to act without thinking (opt-in; cut one first think from ~16 min to ~3 min on a 33B model) |
 | `AWL_THINKING` | on | `off`: every request sends `chat_template_kwargs: {enable_thinking: false}` (Nanbeige4.3, Qwen3.x templates); faster, less deliberate |
 | `AWL_KEEP_REASONING` | on | send each turn's reasoning back as `reasoning_content`, so the model sees its own plan. Qwen3-style templates re-render every tool-call turn's reasoning into the prompt, so a long run carries all of it (two thirds of each request at medium effort). `N`: only the newest N turns' reasoning goes back (the older turns are rewritten, one short re-prefill per step); `0`: none |
 | `AWL_THINK_ROWS` | `6` | rows of the model's newest reasoning shown live (word-wrapped, above the timer); they fold into one `∴ thought Ns` line when it answers. `0`: timer only |

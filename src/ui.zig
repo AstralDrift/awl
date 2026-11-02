@@ -1208,6 +1208,7 @@ test "end-of-turn line: items drop from the end to fit" {
 }
 
 pub fn err(comptime f: []const u8, a: anytype) void {
+    @import("summary.zig").noteError(f, a);
     endMessage();
     put(sgr(&th.red));
     print(f, a);
