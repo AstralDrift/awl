@@ -148,7 +148,7 @@ const schema_core =
     \\{"type":"function","function":{"name":"read","description":"Read a text file. The first line shown and every 10th line start with their number and an arrow (10→); the markers are not part of the file. For large files, grep for what you need first, then read with offset/limit (1-based).","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}}},
     \\{"type":"function","function":{"name":"write","description":"Create or overwrite a file with the given content. Creates parent directories.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
     \\{"type":"function","function":{"name":"edit","description":"Replace exact text in a file. One change: old_string + new_string. Several changes in one file: edits, a list of {old_string, new_string}, each matched against the file as it was before this call; all apply or none do. Each old_string must occur exactly once; include enough context. Read the file first; leave out read's N→ line markers.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","description":"with old_string: replace every occurrence (renames)"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["old_string","new_string"]}}},"required":["path"]}}},
-    \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"},"background":{"type":"boolean","description":"start it and return at once (servers, watchers, long test runs); output goes to a log file"},"network":{"type":"boolean","description":"needs the internet (install, download, clone); the user approves each such command"}},"required":["command"]}}},
+    \\{"type":"function","function":{"name":"bash","description":"Run a bash command in the working directory. Returns stdout+stderr and exit code. Default timeout 120 s; a command still running then is not killed: it continues as a background job and you get its output so far and its log file.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer","description":"seconds"},"background":{"type":"boolean","description":"start it and return at once (servers, watchers, long test runs); output goes to a log file"},"network":{"type":"boolean","description":"needs the internet (install, download, clone); the user approves each such command"}},"required":["command"]}}},
     \\{"type":"function","function":{"name":"todo","description":"Checklist for long tasks with several distinct steps; skip it for quick fixes. Send the whole list every time. status: pending, doing, done or skip (put the reason in text). Keep exactly one item doing. The latest list always stays in context.","parameters":{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"status":{"type":"string","enum":["pending","doing","done","skip"]}},"required":["text","status"]}}},"required":["items"]}}}
 ;
 const schema_grep =
@@ -1065,7 +1065,7 @@ fn startJob(cmd: [*:0]const u8, out: *Buf) bool {
         var env: [1024]?[*:0]const u8 = undefined;
         const av = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
         const e = sandbox.envp(sys.envp, &env);
-        if (sandbox.on) sandbox.execIn(&av, e, @ptrCast(workdir().ptr), pp[1]);
+        if (sandbox.on) sandbox.execIn(&av, e, @ptrCast(workdir().ptr), pp[1], true);
         _ = linux.execve(av[0].?, &av, e);
         linux.exit_group(127);
     }
@@ -1083,6 +1083,36 @@ fn startJob(cmd: [*:0]const u8, out: *Buf) bool {
     slot.* = .{ .pid = pid, .id = job_seq, .log = slot.log, .log_n = path.len, .cmd_n = @min(c.len, 60) };
     @memcpy(slot.cmd[0..slot.cmd_n], c[0..slot.cmd_n]);
     out.print("started background job {d} (pid {d}); output goes to {s}. Read it with read or tail; stop it with: kill -- -{d}", .{ job_seq, shown, path, shown });
+    return true;
+}
+
+/// Take over a command that is still running at its timeout as a background job: a drainer process keeps copying
+/// its pipe into the log file (double-forked, so init reaps it), and the job table reports its exit like any job's.
+/// False (caller kills it) when the job table is full or there is no log file.
+fn adoptJob(pid: linux.pid_t, pipe_fd: i32, log_fd: i32, log_path: []const u8, argv: [*:null]const ?[*:0]const u8) bool {
+    if (log_fd < 0 or log_path.len == 0) return false;
+    const slot = for (&jobs) |*j| {
+        if (j.pid == 0) break j;
+    } else return false;
+    const d = linux.fork();
+    if (linux.errno(d) != .SUCCESS) return false;
+    if (d == 0) {
+        if (linux.fork() != 0) linux.exit_group(0);
+        var b: [16384]u8 = undefined;
+        while (true) {
+            const n = sys.read(pipe_fd, &b) catch 0;
+            if (n == 0) break;
+            sys.writeAll(log_fd, b[0..n]) catch {};
+        }
+        linux.exit_group(0);
+    }
+    var st: u32 = 0;
+    while (linux.errno(linux.wait4(@intCast(d), &st, 0, null)) == .INTR) {}
+    job_seq += 1;
+    const cmd: []const u8 = if (argv[0] != null and argv[1] != null and argv[2] != null) std.mem.span(argv[2].?) else "command";
+    slot.* = .{ .pid = pid, .id = job_seq, .log_n = @min(log_path.len, slot.log.len), .cmd_n = @min(cmd.len, slot.cmd.len) };
+    @memcpy(slot.log[0..slot.log_n], log_path[0..slot.log_n]);
+    @memcpy(slot.cmd[0..slot.cmd_n], cmd[0..slot.cmd_n]);
     return true;
 }
 
@@ -1137,6 +1167,10 @@ var log_seq: usize = 0;
 fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: Kind, model: bool) error{Cancel}!bool {
     var p: [2]i32 = undefined;
     if (linux.errno(linux.pipe2(&p, .{ .CLOEXEC = true })) != .SUCCESS) return errMsg(out, "spawn", "pipe", error.Sys);
+    // A model command may outlive its timeout as a background job; inside the sandbox the model needs the inner pid to stop it.
+    const adoptable = model and kind == .bash and !net_once;
+    var pp: [2]i32 = .{ -1, -1 };
+    if (adoptable and sandbox.on) _ = linux.pipe2(&pp, .{ .CLOEXEC = true, .NONBLOCK = true });
     const pid_rc = linux.fork();
     if (linux.errno(pid_rc) != .SUCCESS) {
         sys.close(p[0]);
@@ -1155,13 +1189,15 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
         if (model) {
             const e = sandbox.envp(sys.envp, &env);
             if (sandbox.on and net_once) sandbox.execOnline(argv, e, @ptrCast(workdir().ptr));
-            if (sandbox.on) sandbox.execIn(argv, e, @ptrCast(workdir().ptr), -1);
+            if (sandbox.on) sandbox.execIn(argv, e, @ptrCast(workdir().ptr), pp[1], false);
             _ = linux.execve(argv[0].?, argv, e);
         } else _ = linux.execve(argv[0].?, argv, sys.childEnvp(sys.envp, &env));
         linux.exit_group(127);
     }
     sys.close(p[1]);
     defer sys.close(p[0]);
+    if (pp[1] >= 0) sys.close(pp[1]);
+    defer if (pp[0] >= 0) sys.close(pp[0]);
 
     const head_cap: usize = if (kind == .bash) 8 * 1024 else out_cap / 2;
     const tail_cap: usize = if (kind == .bash) 12 * 1024 else tail_ring.len;
@@ -1235,9 +1271,12 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
             tn += 1;
         }
     }
-    if (timed_out or cancelled) _ = linux.kill(-pid, .KILL);
+    // Still running at the timeout: keep it as a background job (output so far now, the rest in the log) instead of
+    // killing it and losing the work; a full job table or a command run without a log file is killed as before.
+    const adopted = timed_out and adoptable and adoptJob(pid, p[0], log_fd, log_path, argv);
+    if ((timed_out and !adopted) or cancelled) _ = linux.kill(-pid, .KILL);
     var status: u32 = 0;
-    while (linux.errno(linux.wait4(pid, &status, 0, null)) == .INTR) {}
+    if (!adopted) while (linux.errno(linux.wait4(pid, &status, 0, null)) == .INTR) {};
     if (log_fd >= 0) sys.close(log_fd);
     if (tn > 0) {
         if (dropped > 0) {
@@ -1249,6 +1288,16 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
         const start = tn - len;
         var i: usize = 0;
         while (i < len) : (i += 1) out.byte(tail_ring[(start + i) % tail_cap]);
+    }
+    if (adopted) {
+        var shown: linux.pid_t = pid;
+        if (pp[0] >= 0) {
+            var nb: [16]u8 = undefined;
+            const n = sys.read(pp[0], &nb) catch 0;
+            shown = std.fmt.parseInt(linux.pid_t, nb[0..n], 10) catch pid;
+        }
+        out.print("\n[still running after {d} s: it continues as background job {d} (pid {d}); its output goes on in {s}. Read or tail that file when you need the rest; stop it with: kill {s}{d}]", .{ timeout_ms / 1000, job_seq, shown, log_path, if (sandbox.on) "" else "-- -", shown });
+        return true;
     }
     if (log_fd >= 0 and dropped == 0) {
         var zb: [96]u8 = undefined;
@@ -1700,8 +1749,12 @@ test "number arguments: plain, quoted and 1.0" {
     try t.expectEqualStrings("2→b\nc\n[lines 2-3 of 4; use offset=4 to continue]", out.items());
     out.reset();
     const b = try run("bash", "{\"command\":\"sleep 3\",\"timeout\":1.0}", &out);
-    try t.expect(!b.ok);
-    try t.expect(std.mem.endsWith(u8, out.items(), "[timed out after 1 s; process group killed]"));
+    try t.expect(b.ok); // past its timeout the command goes on as a background job
+    try t.expect(std.mem.indexOf(u8, out.items(), "[still running after 1 s: it continues as background job ") != null);
+    for (&jobs) |*j| if (j.pid != 0) {
+        _ = linux.kill(-j.pid, .KILL);
+        j.pid = 0;
+    };
     out.reset();
     _ = try run("read", try std.fmt.bufPrint(&ab, "{{\"path\":\"{s}\",\"offset\":1.5}}", .{f}), &out);
     try t.expect(std.mem.startsWith(u8, out.items(), "invalid arguments for read"));
