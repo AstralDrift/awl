@@ -31,7 +31,7 @@ const max_index = 16384;
 var offs: [max_index]usize = undefined;
 
 const base_prompt =
-    \\You are awl, a coding agent in a terminal on Omarchy Linux. You complete software tasks in the working directory by calling tools.
+    \\You are awl, a coding agent in a terminal. You complete software tasks in the working directory by calling tools.
     \\- Read a file before you edit it. Use edit for changes, write for new files.
     \\- Use grep and find to search; they are faster than bash.
     \\- Check your work: run the tests or the program. Say something works only when tool output shows it.
@@ -70,6 +70,9 @@ pub fn init(cwd: []const u8) void {
     const md = yd.calculateMonthDay();
     var tb: [600]u8 = undefined;
     bufm.escape(&head, std.fmt.bufPrint(&tb, "\nTools: {s}.\nWorking directory: {s}\nDate: {d}-{d:0>2}-{d:0>2}", .{ tools.names(), cwd, yd.year, md.month.numeric(), md.day_index + 1 }) catch "");
+    var ob: [4096]u8 = undefined;
+    var nb: [160]u8 = undefined;
+    if (osName(&ob, &nb)) |os| bufm.escape(&head, std.fmt.bufPrint(&tb, "\nSystem: {s}{s}", .{ os, if (sys.exists("/.dockerenv") or sys.exists("/run/.containerenv")) ", in a container" else "" }) catch "");
     var sb: [160]u8 = undefined;
     if (sandbox.on) bufm.escape(&head, std.fmt.bufPrint(&tb, "\nCommands run in a sandbox: {s}.", .{sandbox.describe(&sb)["sandbox: ".len..]}) catch "");
     addAgentsMd(cwd);
@@ -79,6 +82,30 @@ pub fn init(cwd: []const u8) void {
     const proj_dir = std.fmt.bufPrint(&rb, "{s}/.agents/skills", .{projectRoot(cwd)}) catch "";
     n_skills = skills.add(&head, if (std.mem.eql(u8, user_dir, proj_dir)) &.{user_dir} else &.{ proj_dir, user_dir });
     head.add("\"}");
+}
+
+/// The OS as /etc/os-release names it (PRETTY_NAME, else NAME), so the model reaches for the right package
+/// manager and paths wherever awl runs (a Debian task container is not Omarchy). Null when there is no such file.
+fn osName(fb: *[4096]u8, dst: *[160]u8) ?[]const u8 {
+    const t = sys.readFile("/etc/os-release", fb) catch return null;
+    var name: ?[]const u8 = null;
+    var it = std.mem.splitScalar(u8, t, '\n');
+    while (it.next()) |l| {
+        const v = if (std.mem.startsWith(u8, l, "PRETTY_NAME=")) l[12..] else if (name == null and std.mem.startsWith(u8, l, "NAME=")) l[5..] else continue;
+        name = std.mem.trim(u8, v, "\"' \r");
+        if (l[0] == 'P') break;
+    }
+    const n = name orelse return null;
+    if (n.len == 0 or n.len > dst.len) return null;
+    @memcpy(dst[0..n.len], n);
+    return dst[0..n.len];
+}
+
+test "os name from /etc/os-release" {
+    var fb: [4096]u8 = undefined;
+    var nb: [160]u8 = undefined;
+    const r = osName(&fb, &nb);
+    if (sys.exists("/etc/os-release")) try std.testing.expect(r != null and r.?.len > 0) else try std.testing.expect(r == null);
 }
 
 var model_b: [256]u8 = undefined;

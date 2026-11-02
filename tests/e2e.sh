@@ -74,6 +74,24 @@ assert names[:4] == ["read", "write", "edit", "bash"], names
 EOF
 stop
 
+# 2a. the system prompt names the real OS (from /etc/os-release), never a hard-coded distribution
+serve "$W/hi.json"
+(cd "$W" && "$AWL" -p hi >/dev/null 2>&1)
+python3 - "$LOG" <<'EOF2' && ok "system prompt names the OS from /etc/os-release" || bad "system prompt OS name" "see above"
+import json, os, re, sys
+sysmsg = json.loads(open(sys.argv[1]).readline())["messages"][0]["content"]
+assert "Omarchy Linux" not in sysmsg or "Omarchy" in open("/etc/os-release").read(), sysmsg[:300]
+if os.path.exists("/etc/os-release"):
+    kv = dict(re.findall(r'^(\w+)=(.*)$', open("/etc/os-release").read(), re.M))
+    want = (kv.get("PRETTY_NAME") or kv.get("NAME")).strip('"')
+    assert f"\nSystem: {want}" in sysmsg, sysmsg[:400]
+    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+        assert f"System: {want}, in a container" in sysmsg, sysmsg[:400]
+else:
+    assert "\nSystem:" not in sysmsg, sysmsg[:300]
+EOF2
+stop
+
 # 2b. child processes get awl's env minus AWL_*: a bash `env` must not leak the key
 cat >"$W/env.json" <<'EOF'
 [{"tool_calls":[{"name":"bash","arguments":{"command":"env"}}]},
