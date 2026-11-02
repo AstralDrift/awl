@@ -119,7 +119,8 @@ if os.path.exists("/etc/os-release"):
 else:
     assert "\nSystem:" not in sysmsg, sysmsg[:300]
 EOF2
-# 2a. a model command still running at its timeout is not killed: it goes on as a background job
+stop
+# 2b. a model command still running at its timeout is not killed: it goes on as a background job
 mkdir -p "$W/slowp"
 cat >"$W/slow.json" <<'EOF2'
 [{"tool_calls":[{"name":"bash","arguments":{"command":"echo begun; sleep 2; echo late > marker.txt; echo finished","timeout":1}}]},

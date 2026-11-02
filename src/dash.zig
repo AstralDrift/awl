@@ -745,11 +745,13 @@ fn hints(o: *Out, w: usize) void {
     const r = selected();
     const waiting = if (r) |x| x.has_live and x.live.alive and x.live.state == .waiting else false;
     const running = if (r) |x| x.has_live and x.live.alive and x.live.kind == .bg else false;
+    // zig fmt: off
     const all = [_][2][]const u8{
         .{ "y", "allow" },  .{ "d", "deny" },    .{ "⏎", "open" },    .{ "n", "new agent" }, .{ "m", "message" },
         .{ "x", "stop" },   .{ "r", "rename" },  .{ "f", "fork" },    .{ "⌫", "delete" },   .{ "/", "search" },
         .{ "⇥", if (all_folders) "this folder" else "all folders" }, .{ "space", "zoom" }, .{ "esc", "back" },
     };
+    // zig fmt: on
     if (mode != .list) {
         o.sgr(ui.muted());
         o.text(if (mode == .confirm_delete) " y deletes · any other key keeps it" else " ⏎ done · esc cancel · ctrl-u clears", w);
@@ -837,7 +839,7 @@ fn loadPreview(r: *Row) void {
         got += n;
     }
     var text = dst[0..got];
-    if (from > 0) text = text[(std.mem.indexOfScalar(u8, text, '\n') orelse text.len) -| 0 ..];
+    if (from > 0) text = text[(std.mem.indexOfScalar(u8, text, '\n') orelse text.len) -| 0..];
     var it = std.mem.splitScalar(u8, text, '\n');
     var cb: [8192]u8 = undefined;
     while (it.next()) |line| {

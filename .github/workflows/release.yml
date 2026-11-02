@@ -1,29 +1,106 @@
 name: Release
 
-# Push a tag like v0.2.0 to publish the static binary as a GitHub release.
+# Push a tag vX.Y.Z (matching build.zig.zon's version) on a main commit that passed CI to
+# publish awl-linux-x86_64, awl-linux-aarch64 and SHA256SUMS. Both runners build both
+# binaries with scripts/release.sh; the release goes out only if all four builds are
+# byte-identical. Run it by hand (workflow_dispatch) to check reproducibility without
+# publishing. Steps: docs/releasing.md.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  gate:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - name: Build and unit test
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Tag matches build.zig.zon
         run: |
-          zig build -Doptimize=ReleaseSmall
-          zig build test
-      - name: Publish
+          want=$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)
+          [ "$GITHUB_REF_NAME" = "v$want" ] || { echo "tag $GITHUB_REF_NAME, build.zig.zon says $want"; exit 1; }
+      - name: Tagged commit is on main
+        run: |
+          sha=$(git rev-parse "$GITHUB_SHA^{commit}") # the commit, even for an annotated tag
+          echo "SHA=$sha" >>"$GITHUB_ENV"
+          git merge-base --is-ancestor "$sha" origin/main ||
+            { echo "$sha is not on main: tag a commit that main contains"; exit 1; }
+      - name: CI passed on the tagged commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp zig-out/bin/awl awl-x86_64-linux
-          sha256sum awl-x86_64-linux > awl-x86_64-linux.sha256
-          gh release create "$GITHUB_REF_NAME" awl-x86_64-linux awl-x86_64-linux.sha256 \
-            --title "$GITHUB_REF_NAME" --generate-notes
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/check-runs?per_page=100" \
+            --jq '.check_runs[] | "\(.name)=\(.conclusion)"')
+          echo "$runs"
+          for job in "lint" "test (ubuntu-24.04)" "test (ubuntu-24.04-arm)"; do
+            echo "$runs" | grep -qxF "$job=success" ||
+              { echo "CI job '$job' has not passed on $SHA (still running? wait, then re-run this workflow)"; exit 1; }
+          done
+
+  build:
+    needs: gate
+    if: ${{ !failure() && !cancelled() }} # gate is skipped on workflow_dispatch
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: echo "XDG_CACHE_HOME=$RUNNER_TEMP/cache" >>"$GITHUB_ENV" # where release.sh keeps the pinned Zig
+      - name: Release build (pinned Zig, checked against ziglang.org's sha256)
+        run: scripts/release.sh
+      - name: Native binary runs and passes the unit tests
+        run: |
+          arch=$(uname -m)
+          "zig-out/release/awl-linux-$arch" --version
+          "$XDG_CACHE_HOME/awl-release/zig-$arch-linux-0.16.0/zig" build test
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.os }}
+          path: zig-out/release/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Both runners built the same bytes
+        run: |
+          cat release-*/SHA256SUMS
+          cmp release-ubuntu-24.04/SHA256SUMS release-ubuntu-24.04-arm/SHA256SUMS
+          cd release-ubuntu-24.04 && sha256sum -c SHA256SUMS
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd release-ubuntu-24.04
+          # shellcheck disable=SC2016 # the backticks are Markdown
+          {
+            echo 'Static Linux binaries (no libc). Check a download with `sha256sum -c SHA256SUMS --ignore-missing`.'
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+            echo
+            echo "Rebuild and compare: \`git checkout $GITHUB_REF_NAME && scripts/release.sh\` (Zig 0.16.0, \`zig build release\`: ReleaseSmall, -Dcpu=baseline)."
+            echo "Both binaries were built on x86_64 and on aarch64 runners and were identical."
+          } >notes.md
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "awl $GITHUB_REF_NAME" \
+            --verify-tag --notes-file notes.md --generate-notes awl-linux-x86_64 awl-linux-aarch64 SHA256SUMS

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Each task's check must fail on the untouched setup and pass after its solve.sh.
 # Usage: arena/verify_tasks.sh [task...]
-cd "$(dirname "$0")/tasks"
+cd "$(dirname "$0")/tasks" || exit
 T=$(pwd)
 rc=0
 # Sandboxes live outside the repo (like arena runs); zig comes from the repo's mise pin.

@@ -56,7 +56,7 @@ fn setTitle(mark: []const u8) void {
     var i: usize = 0;
     while (i < name.len and n + 4 < nb.len) { // the name goes inside an escape sequence: no controls, no bidi marks
         const len = std.unicode.utf8ByteSequenceLength(name[i]) catch 1;
-        const ch = name[i .. @min(i + len, name.len)];
+        const ch = name[i..@min(i + len, name.len)];
         const bad = ch[0] < 0x20 or ch[0] == 0x7f or (ch.len == 2 and ch[0] == 0xC2 and ch[1] < 0xA0) or
             (ch.len == 3 and ch[0] == 0xE2 and ch[1] == 0x80 and ch[2] >= 0xAA and ch[2] <= 0xAE) or
             (ch.len == 3 and ch[0] == 0xE2 and ch[1] == 0x81 and ch[2] >= 0xA6 and ch[2] <= 0xA9) or len == 1 and ch[0] >= 0x80;
@@ -960,9 +960,9 @@ fn command(text: []const u8) ?bool {
     } else if (eq(u8, text, "/model") or std.mem.startsWith(u8, text, "/model ")) {
         const arg = std.mem.trim(u8, text[6..], " ");
         if (arg.len == 0 and editor != null) {
-                modelPicker();
-                return false;
-            }
+            modelPicker();
+            return false;
+        }
         if (arg.len > 0) switchModel(arg, 0) else ui.note("model: {s}  (/model NAME to switch)", .{agent.cfg.model});
     } else if (eq(u8, text, "/compact")) {
         if (!agent.compactNow()) ui.note("nothing to compact yet", .{});
