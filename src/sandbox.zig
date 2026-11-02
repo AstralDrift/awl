@@ -67,6 +67,11 @@ var holder_out: i32 = -1; // its info/stderr pipe, kept open while it runs
 var pidfd: i32 = -1; // the sandbox's first process; setns on it joins its namespaces at once
 // (one namespace file at a time fails: the kernel refuses the mount namespace with EPERM)
 const all_ns = linux.CLONE.NEWUSER | linux.CLONE.NEWNS | linux.CLONE.NEWNET | linux.CLONE.NEWPID;
+// With AWL_SANDBOX_NET=on the sandbox keeps the host's network namespace, which only root may
+// setns into (EPERM otherwise); the command is already in it, so it is left out.
+fn joinNs() u32 {
+    return if (net) all_ns & ~@as(u32, linux.CLONE.NEWNET) else all_ns;
+}
 
 const Args = struct {
     v: [256:null]?[*:0]const u8 = undefined,
@@ -279,7 +284,7 @@ pub fn stop() void {
 /// group and writes its pid as seen inside the sandbox there (for `kill -- -PID`).
 pub fn execIn(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const u8, cwd: [*:0]const u8, pid_fd: i32) noreturn {
     _ = linux.prctl(@intFromEnum(linux.PR.SET_DUMPABLE), 0, 0, 0, 0); // nothing in the sandbox may ptrace us while we hold its capabilities
-    const e = linux.errno(linux.setns(pidfd, all_ns));
+    const e = linux.errno(linux.setns(pidfd, joinNs()));
     if (e != .SUCCESS) {
         var eb: [96]u8 = undefined;
         sys.writeAll(2, std.fmt.bufPrint(&eb, "awl: could not enter the sandbox ({s})\n", .{@tagName(e)}) catch "awl: could not enter the sandbox\n") catch {};
