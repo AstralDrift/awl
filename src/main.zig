@@ -38,7 +38,7 @@ const usage =
     \\     AWL_THINK_BUDGET=N (SGLang --enable-strict-thinking: cap reasoning per reply)
     \\     AWL_THINK_MAX=N (any server: stop a reply that thinks past N tokens, then act)
     \\     AWL_THINKING (off: ask the chat template for no thinking on every request)
-    \\     AWL_KEEP_REASONING (0: do not send reasoning back with each turn)
+    \\     AWL_KEEP_REASONING (N: send only the newest N turns' reasoning back; 0: none)
     \\     AWL_THINK_ROWS (reasoning rows shown live, default 6; 0: timer only)
     \\     AWL_DEBUG_KEYS=FILE (log raw input, escaped: for keyboard / paste problems)
     \\     AWL_TITLE (off: leave the terminal title alone)
@@ -114,7 +114,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (sys.getenv("AWL_RETRIES")) |s| agent.max_retries = std.fmt.parseInt(u32, s, 10) catch 5;
     tui.keylog_path = sys.getenv("AWL_DEBUG_KEYS");
     if (sys.getenv("AWL_THINKING")) |s| agent.thinking = !std.mem.eql(u8, s, "off");
-    if (sys.getenv("AWL_KEEP_REASONING")) |s| agent.keep_reasoning = !std.mem.eql(u8, s, "0");
+    if (sys.getenv("AWL_KEEP_REASONING")) |s| agent.keep_reasoning = if (std.mem.eql(u8, s, "off")) 0 else std.fmt.parseInt(usize, s, 10) catch std.math.maxInt(usize);
     if (sys.getenv("AWL_THINK_ROWS")) |s| ui.think_rows = @min(std.fmt.parseInt(usize, s, 10) catch 6, 64);
     if (sys.getenv("AWL_FULL")) |s| tui.start_full = tui.start_full or std.mem.eql(u8, s, "1");
     if (sys.getenv("AWL_MODE")) |s| tools.mode = std.meta.stringToEnum(tools.Mode, s) orelse die("AWL_MODE must be auto, ask or plan", .{});
@@ -129,8 +129,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
     var model_b: [256]u8 = undefined;
     const info: ?llm.ModelInfo = llm.firstModel(agent.cfg, &model_b) catch null;
-    agent.cfg.model = sys.getenv("AWL_MODEL") orelse if (info) |m| m.id else
-        die("no model at {s}. Start one with Omarchy Local AI, or set AWL_URL / AWL_MODEL.", .{agent.cfg.url.host});
+    agent.cfg.model = sys.getenv("AWL_MODEL") orelse if (info) |m| m.id else die("no model at {s}. Start one with Omarchy Local AI, or set AWL_URL / AWL_MODEL.", .{agent.cfg.url.host});
     if (info) |m| agent.ctx_limit = m.ctx;
     agent.init(cwd);
     defer tools.killJobs(); // background jobs never outlive awl
