@@ -7,8 +7,8 @@ the smallest possible footprint. One static Zig binary (no libc, no runtime, ~34
 to any OpenAI-compatible server: Omarchy Local AI on your GPU, or OpenRouter in the cloud.
 
 The model gets seven tools: read, write, edit (one change or an `edits` list, all or nothing),
-bash (with background jobs), todo (a checklist that survives context trimming), grep (ripgrep)
-and find (fd). Everything else is a lean loop that keeps the prompt small.
+bash (with background jobs; a command still running at its timeout becomes one instead of being
+killed), todo (a checklist that survives context trimming), grep (ripgrep) and find (fd). Everything else is a lean loop that keeps the prompt small.
 
 ## Results
 
@@ -58,6 +58,26 @@ noise. Method, per-task tables and every run are in [arena/LOG.md](arena/LOG.md)
     arena/awl-or.sh       # same, on an OpenRouter model (key in ~/.local/state/awl-arena/openrouter.key)
 
 Spec and history: [PLAN.md](PLAN.md). Sibling project for macOS: `nib`.
+Running awl from another program (`awl -p`, exit status, session file, tool results): [docs/embedding.md](docs/embedding.md).
+
+## Building a release
+
+Releases (tags `vX.Y.Z`) attach `awl-linux-x86_64`, `awl-linux-aarch64` and `SHA256SUMS`
+(`sha256sum` format). These names and that format stay as they are. The bytes depend only on the
+source and the Zig version, so you can rebuild a release and compare:
+
+    git checkout v0.1.0
+    scripts/release.sh    # fetches Zig 0.16.0 from ziglang.org, checks its sha256, runs `zig build release`
+    cat zig-out/release/SHA256SUMS
+
+`zig build release` builds both binaries with Zig 0.16.0, ReleaseSmall, `-Dcpu=baseline`, static with
+no libc. That gives the same bytes as `zig build -Dtarget=<arch>-linux -Dcpu=baseline` and as a cross
+build from any host. A plain `zig build` targets your own CPU, so its bytes differ. `awl --version` prints
+the version and commit (`awl 0.1.0 (8d7c9ae)`); without git the build has `(unknown)` in place of the
+commit, so build from a git checkout of the tag to match. To publish, push a tag matching
+`build.zig.zon`'s version on a `main` commit that passed CI. The Release workflow builds on x86_64 and
+arm64 runners and publishes only if all four builds are identical. Steps and checks:
+[docs/releasing.md](docs/releasing.md).
 
 ## The TUI
 
@@ -150,7 +170,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
   (git root or cwd), `/tmp`, build caches and `AWL_SANDBOX_WRITE` dirs. Hidden from them: `~/.ssh`,
   `~/.gnupg`, cloud/gh credentials, keyrings, the Local AI key, awl's session files (all but this run's
   view, read-only), `/run/user` (D-Bus, Hyprland, keyring
-  sockets), sockets under `/tmp`, the docker socket, other processes, and any environment variable not on
+  sockets), sockets under `/tmp` (two levels deep; `AWL_SANDBOX_SOCKETS=path:path` keeps named ones), the docker socket, other processes, and any environment variable not on
   a short allowlist (names with TOKEN, KEY, SECRET, PASS, AUTH, ... never pass). They cannot create user
   namespaces. The project's `.git/config`, `.git/hooks`, `AGENTS.md` and `.agents/` are read-only to them,
   since git runs hooks and fsmonitor outside the sandbox and the next session reads those instructions.
@@ -158,7 +178,8 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
   background is reachable from the next command) but nothing beyond it. When the model needs the
   internet it sets `network: true` on one bash call; awl shows the command and asks `allow? y/n` in every
   mode, for that call only. With no terminal (`awl -p`) the answer is no. `AWL_SANDBOX_NET=on` gives
-  every command the network without asking.
+  every command the network without asking. `AWL_NETWORK=off` refuses every such call without asking
+  and overrides `AWL_SANDBOX_NET=on` (for sandboxes and CI where nobody should be asked).
 - write/edit follow the same write rule after resolving symlinks, and ask before every change to `.git`,
   `AGENTS.md` or `.agents/`; read refuses the hidden paths. Without `/usr/bin/bwrap` the model's commands
   are refused (install bubblewrap); `AWL_SANDBOX=off` turns all of it off. Your own `!cmd` is never
@@ -201,7 +222,8 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AWL_URL` | `http://127.0.0.1:12434` | OpenAI-compatible server (plain HTTP) |
+| `AWL_URL` | `http://127.0.0.1:12434` | OpenAI-compatible server: `http://` or `https://`, an address or a host name (resolved through /etc/hosts and the resolv.conf nameservers), with an optional path prefix (`https://openrouter.ai/api`) |
+| `AWL_CA_FILE` | system bundle | PEM file of trusted CAs for `https://` (default: the first of /etc/ssl/certs/ca-certificates.crt, /etc/pki/tls/certs/ca-bundle.crt, /etc/ssl/ca-bundle.pem, /etc/ssl/cert.pem) |
 | `AWL_MODEL` | first model the server lists | model id |
 | `AWL_KEY` | Local AI gateway key | bearer token |
 | `AWL_MAX_STEPS` | 200 | model calls per prompt |
@@ -217,7 +239,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_MODELS` | unset | comma-separated models that Ctrl-P cycles through |
 | `AWL_THINK_BUDGET` | unset | `N`: send `custom_params: {thinking_budget: N}` (SGLang started with `--enable-strict-thinking` ends reasoning after N tokens) |
 | `AWL_THINKING` | on | `off`: every request sends `chat_template_kwargs: {enable_thinking: false}` (Nanbeige4.3, Qwen3.x templates); faster, less deliberate |
-| `AWL_KEEP_REASONING` | on | send each turn's reasoning back as `reasoning_content`; chat templates (Nanbeige4.3, Qwen3.x) re-render it, so the history matches what the model generated and the server's prefix cache keeps hitting. `0`: off |
+| `AWL_KEEP_REASONING` | on | send each turn's reasoning back as `reasoning_content`, so the model sees its own plan. Qwen3-style templates re-render every tool-call turn's reasoning into the prompt, so a long run carries all of it (two thirds of each request at medium effort). `N`: only the newest N turns' reasoning goes back (the older turns are rewritten, one short re-prefill per step); `0`: none |
 | `AWL_THINK_ROWS` | `6` | rows of the model's newest reasoning shown live (word-wrapped, above the timer); they fold into one `∴ thought Ns` line when it answers. `0`: timer only |
 | `AWL_DEBUG_KEYS` | unset | file to append every raw input chunk to, escaped (`\e` = Esc): shows exactly what the terminal sends on a keypress or paste |
 | `AWL_TITLE` | on | `off`: leave the terminal's title alone |
@@ -275,5 +297,4 @@ numbers; the proposer sees them next time. Tier t5 is never shown to the propose
 ## License
 
 MIT (see [LICENSE](LICENSE)). The skills adapted from pstack keep pstack's MIT notice next to them.
-Releases: push a tag like `v0.2.0` and the Release workflow attaches the static `awl-x86_64-linux`
-binary and its SHA-256 to a GitHub release.
+Releases: see [Building a release](#building-a-release).

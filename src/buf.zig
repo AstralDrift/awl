@@ -9,8 +9,11 @@ pub const Buf = struct {
     len: usize = 0,
     cap: usize,
 
+    /// Comptime-callable (buffers are container-level vars), so the cap is rounded to the
+    /// largest page size the target can have: 4 KB on x86_64, 64 KB on aarch64. Only
+    /// virtual space; pages still become resident one real page at a time.
     pub fn init(cap: usize) Buf {
-        return .{ .cap = std.mem.alignForward(usize, cap, std.heap.pageSize()) };
+        return .{ .cap = std.mem.alignForward(usize, cap, std.heap.page_size_max) };
     }
 
     fn reserve(self: *Buf) void {

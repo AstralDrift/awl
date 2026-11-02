@@ -1068,7 +1068,7 @@ def agents_view():
     check("--bg: a message in the inbox reaches the model as a user turn", '"content":"and also this"' in open(b1 + ".jsonl").read() and not os.path.exists(b1 + ".inbox"), open(b1 + ".jsonl").read()[-300:])
     check("--bg: max steps ends as failed, status kept", wait_state(b1, "failed", 8), live(b1))
     # an approval answered through the answer file
-    ask = bg("needs approval", slow_url, AWL_MODE="ask")
+    bg("needs approval", slow_url, AWL_MODE="ask")
     b2 = session_of("needs approval")
     check("--bg ask mode: waits with the question in its status", b2 is not None and wait_state(b2, "waiting") and "run a command: bash sleep 1" in live(b2).get("ask", ""), live(b2) if b2 else "")
     open(b2 + ".answer", "w").write("y")
@@ -1396,7 +1396,7 @@ def prefix_diff_title():
         out[0] = b""
         os.write(f, b"/diff\r")
         plain_ok = until("2 files changed")
-        check("/diff: tracked changes and new files, colored", plain_ok and (ui_green := b"+added line") in out[0] and b"+brand new" in out[0] and b"\x1b[1mdiff --git" in out[0], out[0][-600:])
+        check("/diff: tracked changes and new files, colored", plain_ok and b"+added line" in out[0] and b"+brand new" in out[0] and b"\x1b[1mdiff --git" in out[0], out[0][-600:])
     finally:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
