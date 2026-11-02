@@ -124,7 +124,8 @@ then:
 |---|---|
 | `\n[exit N]` | Exited with code N ≠ 0 (128 + signal number if killed by one). May be followed by hint lines `[PATH does not exist. …]`. |
 | `(no output)` | Exited 0 and printed nothing. Exit 0 with output has no marker. |
-| `\n[timed out after N s; process group killed]` | Stopped at its timeout. No exit status. |
+| `\n[still running after N s: it continues as background job J (pid P); its output goes on in LOG. …]` | Still running at its timeout: it was not stopped, and goes on as background job J (see below). No exit status yet. |
+| `\n[timed out after N s; process group killed]` | Still running at its timeout while 16 background jobs were running, so it was stopped. No exit status. |
 | `\n[interrupted by user]` | Stopped by SIGINT. No exit status. |
 | `\n[ran with network, approved by the user for this command only]` | Ran with the host network (TUI only). |
 

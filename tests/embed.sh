@@ -122,20 +122,23 @@ cat >"$W/more.json" <<'EOF'
 [{"tool_calls":[{"name":"bash","arguments":{"command":"sleep 5","timeout":1}},{"name":"bash","arguments":{"command":"true","background":true}},{"name":"bash","arguments":{"command":"curl https://example.com","network":true}}]},
  {"tool_calls":[{"name":"bash","arguments":{"command":"sleep 0.5"}}]},
  {"tool_calls":[{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 9","background":true}}]},
- {"tool_calls":[{"name":"bash","arguments":{"command":"sleep 9","background":true}}]},
+ {"tool_calls":[{"name":"bash","arguments":{"command":"sleep 9","background":true}},{"name":"bash","arguments":{"command":"sleep 5","timeout":1}}]},
  {"content":"ok"}]
 EOF
 serve "$W/more.json"
 run -- "more"
 py '
-assert results[0].endswith("\n[timed out after 1 s; process group killed]"), repr(results[0])
-assert results[1].startswith("started background job 1 (pid "), repr(results[1])
-assert results[2].startswith("not run: the network is off in the sandbox and only the user can approve"), repr(results[2])
 import re
+# still running at its timeout: it goes on as a background job
+assert re.search(r"\n\[still running after 1 s: it continues as background job 1 \(pid \d+\); its output goes on in /tmp/awl-\d+-\d+\.log\. ", results[0]), repr(results[0])
+assert results[1].startswith("started background job 2 (pid "), repr(results[1])
+assert results[2].startswith("not run: the network is off in the sandbox and only the user can approve"), repr(results[2])
 # reaped at the top of the next tool result after the job ends (timing decides which)
-assert any(re.match(r"\[background job 1 \(true\) exited with code 0; output in /tmp/awl-\d+-job1\.log\]\n", r) for r in results[3:]), results[3:5]
-assert results[-1] == "too many background jobs (16); stop one with kill first", repr(results[-1])
-' && ok "timed out, background job start and exit notes, job limit, network refused without a terminal" || bad "jobs and refusals" "see above"
+assert any(re.match(r"\[background job 2 \(true\) exited with code 0; output in /tmp/awl-\d+-job2\.log\]\n", r) for r in results[3:]), results[3:5]
+assert results[-2] == "too many background jobs (16); stop one with kill first", repr(results[-2])
+# with the job table full, a command still running at its timeout is killed
+assert results[-1].endswith("\n[timed out after 1 s; process group killed]"), repr(results[-1])
+' && ok "timeout continues as a job, background job start and exit notes, job limit, timeout kill when full, network refused without a terminal" || bad "jobs and refusals" "see above"
 stop
 echo '[{"tool_calls":[{"name":"write","arguments":{"path":"p.txt","content":"x"}}]},{"content":"ok"}]' >"$W/plan.json"
 serve "$W/plan.json"
