@@ -14,8 +14,9 @@ The first release: everything from the v1 build order (PLAN.md) plus the October
   background jobs; a command still running at its timeout becomes a job instead of being killed),
   grep (ripgrep), find (fd), todo.
 - Any OpenAI-compatible server, `http://` or `https://` (TLS and DNS in the binary), with a key.
-- Context handling: old tool output elided from 60% of the window, a summary at 80% (`compact`),
-  or a fresh context with a session view (`AWL_CTX_MODE=fresh`, measured in the arena).
+- Context handling: old tool output elided from 60% of the window; at 80% a fresh context with a
+  session view the model can search (`fresh`, the default after the arena A/B) or a model-written
+  summary (`AWL_CTX_MODE=compact`).
 - Reasoning sent back with its turn; `AWL_KEEP_REASONING=N` keeps a window; `AWL_THINK_MAX`,
   `AWL_THINK_BUDGET`, `AWL_THINKING=off` for engines that think too long.
 - Retries with backoff on transient model errors; `max_tokens` sized to the window.
@@ -42,6 +43,15 @@ The first release: everything from the v1 build order (PLAN.md) plus the October
   tool-result refusal.
 - `AWL_SUMMARY=FILE`: one JSON object per run (status, exit, steps, tool calls, each command's
   outcome, files written).
+
+**Audit before this release** (each with a test or sandbox probe)
+- Closed: write/edit/read through a project symlink plus `..` reached the home directory; `/tmp`
+  log files followed links a command could plant; `read` of a FIFO hung; a `/tmp` full of sockets
+  silently thinned the sandbox; commands run as uid 0 kept capabilities; model and tool text could
+  drive the terminal (OSC 52); a prompt command's file body ran as a `!` shell command.
+- Added: `AWL_TIMEOUT` (no data from the model for 600 s ends the request), a 15 s interruptible
+  connect, `AWL_CTX`, the context window from the named model, bearer tokens of any length,
+  `-h` on stdout, bad numeric settings refused at start (exit 2).
 
 **Dev loop**
 - `zig build lint | test | check | e2e | sandbox | release`; reproducible release builds checked
