@@ -148,7 +148,8 @@ sock_run() {
   AWL_URL=http://127.0.0.1:$(cat "$W/sport") "$@" "$AWL" -p sockets >/dev/null 2>&1
   kill $spid; wait $spid 2>/dev/null
   : >"$W/sport"
-  python3 -c 'import json,sys; print([json.loads(l) for l in open(sys.argv[1])][-1]["messages"][-1]["content"])' "$W/sock.jsonl"
+  # the probe's output without fresh mode's trailing "[time …, context …]" line
+  python3 -c 'import json,re,sys; print(re.sub(r"\n\[time [^]]*\]$", "", [json.loads(l) for l in open(sys.argv[1])][-1]["messages"][-1]["content"]))' "$W/sock.jsonl"
   rm -f "$W/sock.jsonl"
 }
 got=$(sock_run env)
