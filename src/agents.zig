@@ -115,7 +115,7 @@ fn write() void {
     var b = Buf.init(4096);
     defer b.free();
     b.print("{{\"pid\":{d},\"kind\":\"{s}\",\"state\":\"{s}\",\"step\":{d},\"since\":{d},\"secs\":{d},\"changed\":{d},\"doing\":", .{
-        linux.getpid(), @tagName(kind),                                                          @tagName(state), cur_step, since,
+        linux.getpid(),                                         @tagName(kind),        @tagName(state), cur_step, since,
         if (run_t0 > 0) @max(sys.wallSec() - run_t0, 0) else 0, tools.files_changed.n,
     });
     bufm.str(&b, now_doing);

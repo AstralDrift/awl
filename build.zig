@@ -2,7 +2,8 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Default ReleaseSmall") orelse .ReleaseSmall;
+    const optimize_arg = b.option(std.builtin.OptimizeMode, "optimize", "Default ReleaseSmall (Debug for `zig build test`)");
+    const optimize = optimize_arg orelse .ReleaseSmall;
     const release = optimize != .Debug;
 
     // `awl --version` prints the version from build.zig.zon and the commit it was built from:
@@ -50,8 +51,21 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run.addArgs(args);
     b.step("run", "Run awl").dependOn(&run.step);
 
-    const tests = b.addTest(.{ .root_module = mod });
-    b.step("test", "Unit tests").dependOn(&b.addRunArtifact(tests).step);
+    // Unit tests build in Debug unless -Doptimize says otherwise: ReleaseSmall turns off the
+    // overflow, bounds and `unreachable` checks, so a bug a test hits would pass silently.
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize_arg orelse .Debug,
+        .single_threaded = true,
+        .link_libc = false,
+    });
+    test_mod.addOptions("build_options", opts);
+    const tests = b.addTest(.{ .root_module = test_mod });
+    b.step("test", "Unit tests (Debug: runtime safety checks on)").dependOn(&b.addRunArtifact(tests).step);
+
+    const lint = b.addSystemCommand(&.{ "sh", "tests/lint.sh", b.graph.zig_exe });
+    b.step("lint", "zig fmt, project rules, LOG promises, commit figures, shellcheck, ruff, actionlint (tests/lint.sh)").dependOn(&lint.step);
 
     const check = b.addSystemCommand(&.{ "sh", "tests/check.sh" });
     check.addArtifactArg(exe);

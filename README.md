@@ -75,8 +75,9 @@ no libc. That gives the same bytes as `zig build -Dtarget=<arch>-linux -Dcpu=bas
 build from any host. A plain `zig build` targets your own CPU, so its bytes differ. `awl --version` prints
 the version and commit (`awl 0.1.0 (8d7c9ae)`); without git the build has `(unknown)` in place of the
 commit, so build from a git checkout of the tag to match. To publish, push a tag matching
-`build.zig.zon`'s version. The Release workflow builds on x86_64 and arm64 runners and publishes only if
-all four builds are identical.
+`build.zig.zon`'s version on a `main` commit that passed CI. The Release workflow builds on x86_64 and
+arm64 runners and publishes only if all four builds are identical. Steps and checks:
+[docs/releasing.md](docs/releasing.md).
 
 ## The TUI
 

@@ -248,7 +248,7 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                 self.wfile.flush()
             self.wfile.write(b"0\r\n\r\n")
-        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+        except (BrokenPipeError, ConnectionResetError, OSError):
             status = status or 599
             cut = True
         self.close_connection = True

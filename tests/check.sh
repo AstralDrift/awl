@@ -8,17 +8,7 @@ ok() { echo "ok  $*"; }
 size=$(stat -c %s "$B")
 echo "    size $size B (reported, not checked)"
 
-# `return f() == {}` reads as "return after f" but returns true; in tui.command true
-# means quit (it made /resume quit awl). Write the call, then `return false`.
-! grep -n '== {}' "$(dirname "$0")"/../src/*.zig || fail "'== {}' in src (see the comment above)"
-ok "no '== {}'"
-
-# A file's tests run only if main.zig's test block imports it (agent.zig's never ran).
-for f in "$(dirname "$0")"/../src/*.zig; do
-  n=$(basename "$f")
-  grep -q '^test "' "$f" && ! grep -q "_ = @import(\"$n\");" "$(dirname "$0")"/../src/main.zig && fail "$n has tests but main.zig's test block does not import it"
-done
-ok "every file with tests is in the test build"
+# Source rules ('== {}', test imports) moved to tests/lint.sh (zig build lint).
 
 file "$B" | grep -q 'statically linked' || fail "not static"
 ok "static"
