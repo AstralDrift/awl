@@ -251,6 +251,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_THINKING` | on | `off`: every request sends `chat_template_kwargs: {enable_thinking: false}` (Nanbeige4.3, Qwen3.x templates); faster, less deliberate |
 | `AWL_KEEP_REASONING` | on | send each turn's reasoning back as `reasoning_content`, so the model sees its own plan. Qwen3-style templates re-render every tool-call turn's reasoning into the prompt, so a long run carries all of it (two thirds of each request at medium effort). `N`: only the newest N turns' reasoning goes back (the older turns are rewritten, one short re-prefill per step); `0`: none |
 | `AWL_THINK_ROWS` | `6` | rows of the model's newest reasoning shown live (word-wrapped, above the timer); they fold into one `∴ thought Ns` line when it answers. `0`: timer only |
+| `AWL_ROOTCAUSE` | on | `0`: leave out the system prompt line asking the model to fix root causes and check for other places and causes with the same flaw (on by default since 2026-11-03: Qwen t3 x3 30/30 vs 28/30 without it) |
 | `AWL_DEBUG_KEYS` | unset | file to append every raw input chunk to, escaped (`\e` = Esc): shows exactly what the terminal sends on a keypress or paste |
 | `AWL_TITLE` | on | `off`: leave the terminal's title alone |
 | `AWL_FULL` | unset | `1` starts in full-screen mode (same as `--full`) |
