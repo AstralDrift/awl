@@ -72,8 +72,9 @@ pub fn init(cwd: []const u8) void {
     // AWL_BATCH=1: one more line asking for independent tool calls in one reply (arena A/B, off by default).
     if (std.mem.eql(u8, sys.getenv("AWL_BATCH") orelse "", "1"))
         bufm.escape(&head, "\n- When several tool calls do not depend on each other's results (reading several files, independent searches), make them all in one reply.");
-    // AWL_ROOTCAUSE=1: one more line asking for root-cause fixes that cover every instance (arena A/B, off by default).
-    if (std.mem.eql(u8, sys.getenv("AWL_ROOTCAUSE") orelse "", "1"))
+    // Root-cause line, on by default since 2026-11-03 (Qwen t3 x3: 30/30 vs 28/30 without it; arena/LOG.md).
+    // AWL_ROOTCAUSE=0 leaves it out (arena A/B against the old prompt).
+    if (!std.mem.eql(u8, sys.getenv("AWL_ROOTCAUSE") orelse "", "0"))
         bufm.escape(&head, "\n- Fix root causes, not symptoms: when you find a bug, check for other places and other causes with the same flaw, and fix them all.");
     const es = std.time.epoch.EpochSeconds{ .secs = @intCast(sys.wallSec()) };
     const yd = es.getEpochDay().calculateYearDay();

@@ -52,7 +52,7 @@ const usage =
     \\     AWL_KEEP_REASONING (N: send only the newest N turns' reasoning back; 0: none)
     \\     AWL_THINK_ROWS (reasoning rows shown live, default 6; 0: timer only)
     \\     AWL_BATCH (1: ask the model to make independent tool calls in one reply; arena A/B)
-    \\     AWL_ROOTCAUSE (1: one more system prompt line asking for root-cause fixes that cover every instance; arena A/B)
+    \\     AWL_ROOTCAUSE (0: leave out the system prompt line asking for root-cause fixes that cover every instance)
     \\     AWL_CTX_MODE (fresh: fresh context + session view when the window fills; compact: a summary)
     \\     AWL_DEBUG_KEYS=FILE (log raw input, escaped: for keyboard / paste problems)
     \\     AWL_TITLE (off: leave the terminal title alone) NO_COLOR (any value: no colors)
