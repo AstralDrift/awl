@@ -10,6 +10,7 @@ Each one `exec`s the harness so the runner can measure its process tree.
 | pi | `pi --print --no-session --thinking medium` | `PI_CODING_AGENT_DIR` with a generated models.json |
 | omp | `omp --print --auto-approve --approval-mode=yolo --no-session --thinking medium` | same models.json as pi |
 | grok | `grok -p --always-approve --disable-web-search --max-turns 200` | `GROK_HOME` with a generated config.toml. Turn cap matches awl's 200 (was 40, which failed zigport). |
+| hermes | `hermes chat --oneshot -Q --yolo --max-turns 200 --provider custom` | fresh `HERMES_HOME` per run (no memory/skills carried over), endpoint written with `hermes config set` first (a fresh home otherwise stops at first-run setup). Needs Python 3.14 (its deps are only declared for 3.14+). |
 
 Invocations are taken from `~/Work/local-ai-harness-bench/run-round4*.sh`.
 Versions are recorded per run by `run.py` into the results file.
