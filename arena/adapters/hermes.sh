@@ -9,5 +9,7 @@ hermes config set model.provider custom >/dev/null
 hermes config set model.base_url "$BASE/v1" >/dev/null
 hermes config set model.default "$MODEL" >/dev/null
 hermes config set model.api_key "$KEY" >/dev/null
+# the window the arena gives every harness; servers that do not report one (tqLLM) else read as 24K, below Hermes's 64K floor
+hermes config set model.context_length "$CTX" >/dev/null
 exec hermes chat --oneshot -Q --yolo --max-turns 200 \
   --provider custom --base-url "$BASE/v1" --api-key "$KEY" --model "$MODEL" -q "$PROMPT"
