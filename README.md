@@ -236,6 +236,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_MAX_TOKENS` | `65536` | output cap per reply (`max_tokens`; `0` sends none). Generous so heavy thinkers are not cut off. A reply cut off before any tool call gets a note asking the model to continue; one cut off inside a tool call runs nothing and asks for the call again |
 | `AWL_SUMMARY` | unset | with `-p`: a file awl writes one JSON object to when the run ends (status, exit, steps, tool calls, each command's outcome, files written; [docs/embedding.md](docs/embedding.md#run-summary)) |
 | `AWL_BATCH` | unset | `1`: one more system prompt line asking the model to make independent tool calls in one reply (being measured in the arena) |
+| `AWL_ROOTCAUSE` | unset | `1`: one more system prompt line asking the model to fix root causes and check for other places and causes with the same flaw (being measured in the arena) |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |
 | `AWL_AGENTS` | on | `off` loads no AGENTS.md files (clean evals and benchmarks) |
 | `AWL_SANDBOX` | on | `off`: the model's commands run unsandboxed (no bubblewrap: WSL, some containers). See Safety |
