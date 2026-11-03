@@ -257,6 +257,10 @@ def main():
     else:
         model = arg("--model", None) or first_model(upstream)
         budget = float(arg("--budget", "0"))
+    # --reasoning LEVEL: the proxy sets reasoning_effort=LEVEL on every chat request, so every harness runs at the
+    # same effort (and a value the server rejects, e.g. Hermes's "none" on tqLLM, never reaches it)
+    reasoning = arg("--reasoning", "")
+    pargs += ["--reasoning", reasoning] if reasoning else []
 
     ts = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
     outdir = os.path.join(ROOT, "results", ts)
@@ -268,6 +272,7 @@ def main():
     results = os.path.join(ROOT, "results", ts + ".jsonl")
     meta = {"meta": True, "tier": tier, "model": model, "ts": ts, "upstream": upstream, "provider": provider,
             "ctx": int(env0["ARENA_CTX"]), "budget": budget, "keep_reasoning": "--keep-reasoning" in sys.argv,
+            "reasoning": reasoning,
             "awl_reasoning": os.environ.get("AWL_REASONING", ""), "total": repeat * len(tasks) * len(harnesses), "versions": {h: version(h) for h in harnesses}}
     with open(results, "w") as f:
         f.write(json.dumps(meta) + "\n")
