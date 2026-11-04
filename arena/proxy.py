@@ -19,7 +19,9 @@ reasoning_effort/reasoning/include_reasoning so every harness gets the model's d
 before any byte reaches the harness, so rate limits never count against one harness.
 
 --reasoning LEVEL sets reasoning_effort=LEVEL on every chat request (after the drop
-above), so every harness runs the model at the same effort. --host ADDR binds there
+above), so every harness runs the model at the same effort. --set k=v,k=v sets those
+request fields (numbers where they parse) on every chat request the same way, e.g.
+--set temperature=1.0,top_p=0.95,top_k=20 for a server that decodes greedily by default. --host ADDR binds there
 instead of 127.0.0.1 (e.g. 0.0.0.0 inside a container on the gateway's network).
 --budget USD: once the reported cost of the requests so far reaches it, chat requests get
 HTTP 402 instead of going upstream, so a long run cannot overspend.
@@ -35,7 +37,7 @@ from urllib.parse import urlsplit
 
 opt = {"--upstream": "http://127.0.0.1:12434", "--out": "arena/results/proxy", "--port": "0",
        "--key-file": "", "--model": "", "--ctx": "0", "--provider": "",
-       "--reasoning": "", "--host": "127.0.0.1", "--budget": "0"}
+       "--reasoning": "", "--set": "", "--host": "127.0.0.1", "--budget": "0"}
 FLAGS = {"--keep-reasoning-params"}
 a = sys.argv[1:]
 i = 0
@@ -52,6 +54,18 @@ KEY = os.environ.get("OPENROUTER_API_KEY", "")
 if opt["--key-file"]:
     KEY = open(os.path.expanduser(opt["--key-file"])).read().strip()
 HOSTED = bool(KEY)
+
+
+def _num(v):
+    for t in (int, float):
+        try:
+            return t(v)
+        except ValueError:
+            pass
+    return v
+
+
+SET = {k: _num(v) for k, v in (kv.split("=", 1) for kv in opt["--set"].split(",") if "=" in kv)}
 RETRY = {429, 502, 503}
 OUT = opt["--out"]
 os.makedirs(OUT, exist_ok=True)
@@ -164,6 +178,7 @@ class H(BaseHTTPRequestHandler):
             for k in ("reasoning_effort", "reasoning", "include_reasoning"):
                 req.pop(k, None)
             req["reasoning_effort"] = opt["--reasoning"]
+        req.update(SET)  # --set: the same sampling on every request, whatever each harness sends
         return req
 
     def forward(self):

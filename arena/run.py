@@ -261,6 +261,8 @@ def main():
     # same effort (and a value the server rejects, e.g. Hermes's "none" on tqLLM, never reaches it)
     reasoning = arg("--reasoning", "")
     pargs += ["--reasoning", reasoning] if reasoning else []
+    sets = arg("--set", "")  # k=v,k=v: the same request fields (sampling) on every request, every harness
+    pargs += ["--set", sets] if sets else []
 
     ts = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
     outdir = os.path.join(ROOT, "results", ts)
@@ -272,7 +274,7 @@ def main():
     results = os.path.join(ROOT, "results", ts + ".jsonl")
     meta = {"meta": True, "tier": tier, "model": model, "ts": ts, "upstream": upstream, "provider": provider,
             "ctx": int(env0["ARENA_CTX"]), "budget": budget, "keep_reasoning": "--keep-reasoning" in sys.argv,
-            "reasoning": reasoning,
+            "reasoning": reasoning, "set": sets,
             "awl_reasoning": os.environ.get("AWL_REASONING", ""), "total": repeat * len(tasks) * len(harnesses), "versions": {h: version(h) for h in harnesses}}
     with open(results, "w") as f:
         f.write(json.dumps(meta) + "\n")
