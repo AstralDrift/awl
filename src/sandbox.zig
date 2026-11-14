@@ -44,6 +44,64 @@ pub const guarded = [_][]const u8{ "/.git/config", "/.git/hooks", "/AGENTS.md", 
 /// create one: sweepGuarded moves it aside after every tool call.
 var absent = [_]bool{false} ** guarded.len;
 
+/// WSL only: the places that lead out to Windows. Each is an empty tmpfs in the sandbox and
+/// refused by read: /run/WSL (the interop sockets: a command that points WSL_INTEROP at one
+/// runs cmd.exe, outside the sandbox and with the network), /mnt/wslg (WSLg's X11, Wayland and
+/// PulseAudio sockets, and a second view of the whole distro that the masks over $HOME do not
+/// reach) and every Windows drive (drvfs: C:\Users\<you>\.ssh, browser profiles). The project,
+/// the caches and AWL_SANDBOX_WRITE are bound after them, so one that lives on a drive stays.
+var wsl: [16][]const u8 = undefined;
+var wsl_n: usize = 0;
+var wsl_b: [1024]u8 = undefined;
+
+fn wslAdd(used: *usize, p: []const u8) void {
+    for (wsl[0..wsl_n]) |m| if (std.mem.eql(u8, m, p)) return; // bwrap fails on the same path twice
+    if (wsl_n == wsl.len or used.* + p.len > wsl_b.len) return;
+    @memcpy(wsl_b[used.*..][0..p.len], p);
+    wsl[wsl_n] = wsl_b[used.*..][0..p.len];
+    wsl_n += 1;
+    used.* += p.len;
+}
+
+fn findWsl() void {
+    wsl_n = 0;
+    var used: usize = 0;
+    var ob: [128]u8 = undefined;
+    const rel = sys.readFile("/proc/sys/kernel/osrelease", &ob) catch "";
+    if (!sys.exists("/run/WSL") and !sys.exists("/mnt/wslg") and std.mem.indexOf(u8, rel, "icrosoft") == null) return;
+    for ([_][]const u8{ "/run/WSL", "/mnt/wslg" }) |p| if (sys.exists(p)) wslAdd(&used, p);
+    const S = struct {
+        var mounts: [32768]u8 = undefined; // touched on WSL only
+    };
+    var lines = std.mem.splitScalar(u8, sys.readFile("/proc/mounts", &S.mounts) catch "", '\n');
+    while (lines.next()) |l| {
+        var f = std.mem.splitScalar(u8, l, ' ');
+        const dev = f.next() orelse continue;
+        const mp = f.next() orelse continue;
+        const fstype = f.next() orelse continue;
+        const opts = f.next() orelse continue;
+        // WSL1: type drvfs. WSL2: 9p (or virtiofs) with aname=drvfs; other 9p mounts are WSL's own
+        // (/usr/lib/wsl/drivers) and stay. A mount point with an escaped character is skipped.
+        const drive = std.mem.eql(u8, fstype, "drvfs") or std.mem.eql(u8, dev, "drvfs") or std.mem.indexOf(u8, opts, "aname=drvfs") != null;
+        if (drive and mp.len > 1 and std.mem.indexOfScalar(u8, mp, '\\') == null) wslAdd(&used, mp);
+    }
+}
+
+/// Bound again after the masks: the project, the build caches, AWL_SANDBOX_WRITE.
+fn rebound(p: []const u8) bool {
+    if (under(p, root)) return true;
+    var pb: [1024]u8 = undefined;
+    if (home.len > 0) for (caches) |c| if (under(p, inHome(&pb, c) orelse continue)) return true;
+    var it = std.mem.splitScalar(u8, extra, ':');
+    while (it.next()) |e| if (e.len > 0 and under(p, e)) return true;
+    return false;
+}
+
+fn wslMasked(p: []const u8) bool {
+    for (wsl[0..wsl_n]) |m| if (under(p, m)) return !rebound(p);
+    return false;
+}
+
 pub fn setup(project_root: []const u8) void {
     // $HOME is compared with resolved paths and handed to bwrap, so it is resolved too: a home
     // that is a symlink (/home -> /var/home) or ends in "/" would otherwise hide nothing from read.
@@ -72,6 +130,7 @@ pub fn setup(project_root: []const u8) void {
         const in_git = std.mem.startsWith(u8, g, "/.git/");
         a.* = on and (has_git or !in_git) and !sys.exists(std.fmt.bufPrint(&pb, "{s}{s}", .{ root, g }) catch continue);
     }
+    if (enforce) findWsl();
 }
 
 /// A path for a scratch file of awl's own (the Ctrl-G prompt, /diff output) where the model's
@@ -181,6 +240,7 @@ fn options(a: *Args, with_net: bool) void {
     var rb: [64]u8 = undefined;
     const run_user = std.fmt.bufPrint(&rb, "/run/user/{d}", .{linux.getuid()}) catch "/run/user";
     if (sys.exists(run_user)) a.addAll(&.{ "--tmpfs", a.zs.z(run_user) });
+    for (wsl[0..wsl_n]) |m| a.addAll(&.{ "--tmpfs", a.zs.z(m) }); // before the binds below
     a.bindIf("--bind", root);
     var pb: [1024]u8 = undefined;
     if (home.len > 0) for (caches) |c| a.bindIf("--bind", inHome(&pb, c) orelse continue);
@@ -306,6 +366,9 @@ pub fn ready() ?[]const u8 {
     }
     if (std.mem.indexOf(u8, b[0..n], "ready\n") == null) {
         stop();
+        var ob: [128]u8 = undefined;
+        const rel = std.mem.trim(u8, sys.readFile("/proc/sys/kernel/osrelease", &ob) catch "", " \n");
+        if (std.mem.endsWith(u8, rel, "-Microsoft")) return "the sandbox did not start: this is WSL1, which has no user namespaces. Convert the distro in Windows (wsl.exe --set-version <distro> 2), or set AWL_SANDBOX=off to run commands unsandboxed";
         const msg = std.mem.trim(u8, b[0..n], " \r\n");
         return std.fmt.bufPrint(&S.err, "the sandbox did not start: {s}", .{if (msg.len > 0) msg[0..@min(msg.len, 300)] else "bwrap exited"}) catch "the sandbox did not start";
     }
@@ -458,11 +521,33 @@ pub fn envp(src: []const [*:0]const u8, buf: []?[*:0]const u8) [*:null]const ?[*
         const s = std.mem.span(e);
         const eq = std.mem.indexOfScalar(u8, s, '=') orelse continue;
         if (!envOk(s[0..eq])) continue;
-        buf[n] = e;
+        buf[n] = if (wsl_n > 0 and eq == 4 and std.mem.startsWith(u8, s, "PATH=")) linuxPath(s[5..]) else e;
         n += 1;
     }
     buf[n] = null;
     return @ptrCast(buf.ptr);
+}
+
+/// WSL appends the Windows PATH (70 folders on a stock machine); in the sandbox they are empty.
+/// "PATH=" without the entries under a mask. An entry that does not fit is dropped.
+fn linuxPath(path: []const u8) [*:0]const u8 {
+    const S = struct {
+        var b: [8192]u8 = undefined;
+    };
+    @memcpy(S.b[0..5], "PATH=");
+    var n: usize = 5;
+    var it = std.mem.splitScalar(u8, path, ':');
+    while (it.next()) |e| {
+        if (wslMasked(e) or n + e.len + 2 > S.b.len) continue;
+        if (n > 5) {
+            S.b[n] = ':';
+            n += 1;
+        }
+        @memcpy(S.b[n..][0..e.len], e);
+        n += e.len;
+    }
+    S.b[n] = 0;
+    return @ptrCast(&S.b);
 }
 
 /// Small arena for NUL-terminated strings.
@@ -574,7 +659,7 @@ pub fn hidden(abs: []const u8) bool {
     if (!enforce) return false;
     var rb: [4096]u8 = undefined;
     const p = resolve(abs, &rb);
-    if (under(p, "/proc") or under(p, "/run/user")) return true;
+    if (under(p, "/proc") or under(p, "/run/user") or wslMasked(p)) return true;
     var vb: [4096]u8 = undefined;
     if (inSessions(p) and (session.view_path.len == 0 or !std.mem.eql(u8, p, resolve(session.view_path, &vb)))) return true;
     return secret(p);
@@ -688,6 +773,35 @@ test "sandbox: write rule and path normalization" {
     home = "/"; // root's home in some containers: "/.ssh", not "//.ssh"
     try t.expect(hidden("/.ssh/id_ed25519"));
     try t.expect(!writable("/.ssh/authorized_keys"));
+}
+
+test "sandbox: WSL masks hide Windows from read and from PATH" {
+    enforce = true;
+    defer enforce = false;
+    root = "/mnt/c/src/proj";
+    home = "/home/u";
+    extra = "/mnt/d/out";
+    defer extra = "";
+    wsl = undefined;
+    wsl[0] = "/run/WSL";
+    wsl[1] = "/mnt/wslg";
+    wsl[2] = "/mnt/c";
+    wsl[3] = "/mnt/d";
+    wsl_n = 4;
+    defer wsl_n = 0;
+    try t.expect(hidden("/mnt/c/Users/u/.ssh/id_ed25519"));
+    try t.expect(hidden("/mnt/wslg/distro/home/u/.ssh/id_ed25519"));
+    try t.expect(hidden("/run/WSL/1_interop"));
+    try t.expect(hidden("/mnt/d/secret"));
+    try t.expect(!hidden("/mnt/c/src/proj/a.zig")); // the project is bound over the mask
+    try t.expect(!hidden("/mnt/d/out/x"));
+    try t.expect(!hidden("/mnt/cache/x"));
+    try t.expect(!hidden("/usr/lib/wsl/lib/x"));
+    const src = [_][*:0]const u8{ "PATH=/usr/bin:/mnt/c/Windows/system32:/mnt/c/src/proj/bin:/mnt/c/Program Files/Git/cmd:/bin:/mnt/c/Windows/System32/OpenSSH/", "WSL_INTEROP=/run/WSL/8_interop" };
+    var buf: [8]?[*:0]const u8 = undefined;
+    const e = envp(&src, &buf);
+    try t.expectEqualStrings("PATH=/usr/bin:/mnt/c/src/proj/bin:/bin", std.mem.span(e[0].?));
+    try t.expect(e[1] == null);
 }
 
 test "sandbox: environment allowlist" {
