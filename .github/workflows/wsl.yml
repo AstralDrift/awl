@@ -103,8 +103,14 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -q
-          apt-get install -yq bubblewrap ripgrep fd-find python3 curl iproute2 git file openssl procps util-linux systemd
-          ln -sf "$(command -v fdfind)" /usr/bin/fd
+          if [ "${{ matrix.wsl }}" = 2 ]; then
+            apt-get install -yq bubblewrap ripgrep fd-find python3 curl iproute2 git file openssl procps util-linux
+            ln -sf "$(command -v fdfind)" /usr/bin/fd
+          else
+            # WSL1 runs only tests/wsl.sh. Nothing that touches systemd: its package scripts fail
+            # there ("Failed to take /etc/passwd lock") and leave dpkg broken.
+            apt-get install -yq --no-upgrade bubblewrap python3 git file
+          fi
           echo "127.0.0.1 awl-e2e.test" >>/etc/hosts
           id dev >/dev/null 2>&1 || useradd -m -s /bin/bash dev
           # From git objects, not the Windows checkout: no CRLF, real modes, fifos and symlinks work.

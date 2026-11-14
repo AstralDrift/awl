@@ -6,21 +6,19 @@ WSL2 runs the same sandbox as any Linux machine, plus masks for the ways out tha
 
 ## Status
 
-**Not yet run on a real WSL machine.** `tests/wsl.sh` and `.github/workflows/wsl.yml` exist and
-lint clean; the script's plumbing was run once on Linux against a faked WSL surface (a stand-in
-`cmd.exe`, a socket in `/run/WSL`, a bind of `/` at `/mnt/wslg/distro`), which proves the verdict
-logic and nothing about WSL. The table under "Results" is empty until the workflow's first run.
-Until then the README's advice for WSL (`AWL_SANDBOX=off`) stands.
+Run once on real WSL: GitHub-hosted `windows-2025`, WSL 3.0.3.0, Ubuntu-24.04, 2026-11-14
+(the first run of PR 28; awl `3142d34`, a release build of that PR merged into `main` at
+`75be427`, so `src/` is main's).
 
-Read from the code (`src/sandbox.zig`), not yet measured, these are expected to get through today:
-
-- `--ro-bind / /` is recursive, so `/mnt/c`, `/run/WSL` and `/mnt/wslg` are all inside the sandbox.
-- A Unix socket with a path is reachable from a private network namespace, so `/run/WSL/*_interop`
-  can still start `cmd.exe`: a Windows process, outside the sandbox, with the network.
-- `/mnt/wslg/distro` is a second view of the whole distro; the tmpfs over `~/.ssh` does not cover
-  `/mnt/wslg/distro/home/<you>/.ssh`.
-- `PATH` is on the environment allowlist and WSL appends the Windows `PATH` to it.
-- The read and grep tools hide secrets under `$HOME` only, not under `/mnt/c/Users/<you>`.
+- **WSL2 runs the real sandbox.** Kernel `6.18.54.1-microsoft-standard-WSL2`. bubblewrap 0.9.0
+  works with nothing enabled; `tests/e2e.sh` 68 passed, `tests/sandbox.sh` 38 passed,
+  `tests/check.sh` passed (peak RSS 1580 KB, idle 716 KB; startup not measured).
+- **The sandbox has WSL-only holes: 15 of 22 probes got through** (table under Results). The
+  worst: a sandboxed command that sets `WSL_INTEROP` to a socket in `/run/WSL` runs `cmd.exe`, a
+  Windows process outside the sandbox with the network. Until `src/sandbox.zig` masks these,
+  treat awl's sandbox on WSL2 as protecting the Linux side only.
+- **WSL1: not measured.** The WSL1 leg broke in its own setup step (installing packages upgraded
+  systemd, whose scripts fail on WSL1). Fixed in the workflow; awaiting the next run.
 
 ## Setup
 
@@ -32,8 +30,10 @@ wsl.exe --set-version <distro> 2    # if it is 1
 sudo apt install bubblewrap ripgrep fd-find   # in the distro
 ```
 
-Whether bubblewrap then works with nothing else enabled is the first thing the workflow records
-("bubblewrap out of the box"); this section gets the answer after the first run.
+Nothing else. On the tested Ubuntu-24.04 distro (`systemd=true` in `/etc/wsl.conf`, as shipped)
+bubblewrap worked as a non-root user out of the box: the WSL kernel has no AppArmor limit on
+user namespaces, so the `sysctl kernel.apparmor_restrict_unprivileged_userns=0` that Ubuntu 24.04
+needs on bare metal is not needed here.
 
 ## What is tested
 
@@ -78,8 +78,37 @@ Exit 0 nothing escaped, 1 an escape or a failed control, 2 not WSL, 3 a probe na
 
 ## Results
 
-None yet (see Status). After a run: the job summary of each matrix leg has the facts of that WSL
-(kernel, `wsl.conf`, mounts, `/run/WSL`, `/mnt/wslg`) and the result block of `tests/wsl.sh`.
+WSL2, 2026-11-14, hosted `windows-2025` (WSLg was present: 6 sockets under `/mnt/wslg`):
+
+| Probe | Verdict |
+|---|---|
+| `interop-cmd`, `interop-powershell` | blocked (see note) |
+| `interop-sock` | **ESCAPED** |
+| `init-interop` | **ESCAPED** |
+| `interop-connect` | **ESCAPED** (`/run/WSL/1_interop`, `2_interop`, `<pid>_interop`) |
+| `interop-runwsl` | **ESCAPED** |
+| `env-interop`, `env-wslg` | blocked |
+| `winpath`, `winpath-exec` | **ESCAPED** (73 Windows folders on `PATH`) |
+| `drvfs-read` | **ESCAPED** |
+| `drvfs-write` | blocked |
+| `drvfs-ssh`, `drvfs-aws`, `drvfs-appdata` | **ESCAPED** |
+| `wslg-distro` | **ESCAPED** |
+| `wslg-sock` | **ESCAPED** (`PulseServer`, `PulseAudioRDPSink`, `PulseAudioRDPSource`, `.X11-unix/X0` under `/mnt/wslg`) |
+| `wslg-x11` | blocked |
+| `tool-read-drvfs`, `tool-grep-drvfs` | **ESCAPED** |
+| `tool-write-drvfs` | blocked |
+| `wslg-tool-read` | **ESCAPED** |
+| controls (write in the project, project on `/mnt/c`, no write next to it) | ok |
+| `tests/tui.py` | ok, 152 checks |
+
+Note on `interop-cmd`: running `cmd.exe` by path fails in the sandbox only because the command
+has no `WSL_INTEROP` and `/init` cannot find its socket from inside the pid namespace. Setting
+the variable to any socket in `/run/WSL` (`interop-sock`) is enough, so this is not a defence.
+
+WSL1: no result yet.
+
+The job summary of each matrix leg has the facts of that WSL (kernel, `wsl.conf`, mounts,
+`/run/WSL`, `/mnt/wslg`) and the result block of `tests/wsl.sh`.
 
 ## Running it by hand
 
@@ -103,8 +132,8 @@ user names are replaced by `<user>`.
 - GitHub Actions is the only WSL the project can reach; nobody ran this on a Windows desktop.
   If hosted runners stop offering WSL2, the first step fails and says so: dispatch the workflow
   with a self-hosted runner label (the `runner` input) or run the script by hand.
-- A Windows Server runner has no desktop session, so WSLg is likely absent there: `wslg-*` and
-  `env-wslg` end `untested` on CI. Untested is not passed; a by-hand run on Windows 11 covers them.
+- WSLg was present on the hosted runner, so the `wslg-*` probes ran. No desktop app was open
+  there; what a connected X11 or Wayland client can do to a real desktop session was not tried.
 - `tests/tui.py` opens its own Linux pty. It checks the TUI on the WSL kernel, not through conpty
   or Windows Terminal (key encoding, CRLF paste, resize on the Windows side).
 - Startup time is not checked on WSL.
