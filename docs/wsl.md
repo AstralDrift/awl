@@ -17,8 +17,14 @@ Run once on real WSL: GitHub-hosted `windows-2025`, WSL 3.0.3.0, Ubuntu-24.04, 2
   worst: a sandboxed command that sets `WSL_INTEROP` to a socket in `/run/WSL` runs `cmd.exe`, a
   Windows process outside the sandbox with the network. Until `src/sandbox.zig` masks these,
   treat awl's sandbox on WSL2 as protecting the Linux side only.
-- **WSL1: not measured.** The WSL1 leg broke in its own setup step (installing packages upgraded
-  systemd, whose scripts fail on WSL1). Fixed in the workflow; awaiting the next run.
+- **WSL1 fails closed** (second run, kernel `4.4.0-26100-Microsoft`): the model's command is
+  refused with bubblewrap's own error ("Creating new namespace failed..."), which does not say
+  that WSL1 is the reason or what to do.
+- **Fix, not yet proven on WSL:** the masks proposed under Results are in `src/sandbox.zig` on
+  this branch (tmpfs over `/run/WSL`, `/mnt/wslg` and the drvfs drives; the read tool refuses
+  the same paths; Windows folders dropped from `PATH`; a WSL1 refusal that names WSL1). On Linux
+  with a faked WSL surface the `/run/WSL` and `/mnt/wslg` half holds; the drive mask can only be
+  judged by the next WSL run. This page is updated from that run.
 
 ## Setup
 
@@ -70,7 +76,8 @@ Exit 0 nothing escaped, 1 an escape or a failed control, 2 not WSL, 3 a probe na
 | `drvfs-read`, `drvfs-write` | a planted file on the Windows drive is read; a file there is written |
 | `drvfs-ssh`, `drvfs-aws`, `drvfs-appdata` | `.ssh`, `.aws`, `AppData\Local` of a Windows profile can be listed |
 | `wslg-distro` | `~/.ssh` is read through `/mnt/wslg/distro` |
-| `wslg-sock`, `wslg-x11` | a socket under `/mnt/wslg`, or in `/tmp/.X11-unix`, accepts a connection |
+| `wslg-sock`, `wslg-x11` | a socket under `/mnt/wslg` (also under `/mnt/wslg/run/user`), or in `/tmp/.X11-unix`, accepts a connection |
+| `wslg-runuser` | `/run/user/<uid>` can be listed through `/mnt/wslg/run/user` |
 | `tool-read-drvfs`, `tool-grep-drvfs`, `tool-write-drvfs` | awl's own read, grep and write tools reach the planted files on the Windows drive |
 | `wslg-tool-read` | the read tool returns `~/.ssh` through `/mnt/wslg/distro` |
 | controls | commands still write in the project; a project on the Windows drive still works and cannot write next to itself; `tests/tui.py` passes |
@@ -137,6 +144,8 @@ user names are replaced by `<user>`.
 - `tests/tui.py` opens its own Linux pty. It checks the TUI on the WSL kernel, not through conpty
   or Windows Terminal (key encoding, CRLF paste, resize on the Windows side).
 - Startup time is not checked on WSL.
+- Not probed: Hyper-V sockets (`AF_VSOCK`/hvsocket) from inside the sandbox, `/mnt/wsl` (the
+  tmpfs WSL shares between distros), and drives mounted outside `/mnt/<letter>`.
 - One distro (Ubuntu-24.04), default `wsl.conf` (interop on, Windows `PATH` appended, drives
   auto-mounted under `/mnt`). A custom `automount.root`, mirrored networking, or drives mounted
   elsewhere are not covered; the drive probes look under `/mnt/<letter>` only.

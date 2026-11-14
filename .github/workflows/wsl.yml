@@ -141,8 +141,10 @@ jobs:
             echo "/run/WSL: $(ls -la /run/WSL 2>&1 | tr '\n' ';')"
             echo "/mnt/wslg: $(ls -a /mnt/wslg 2>&1 | tr '\n' ' ')"
             echo "/tmp/.X11-unix: $(ls -la /tmp/.X11-unix 2>&1 | tr '\n' ';')"
+            echo "/mnt: $(ls -a /mnt 2>&1 | tr '\n' ' ')"
+            echo "/mnt/wsl: $(ls -a /mnt/wsl 2>&1 | tr '\n' ' ')"
             echo "mounts:"
-            grep -E ' (9p|drvfs|virtiofs|binfmt_misc) |wslg|/run' /proc/mounts || true
+            cat /proc/mounts
             echo '```'
           } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
