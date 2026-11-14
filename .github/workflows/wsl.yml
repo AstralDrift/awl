@@ -1,0 +1,200 @@
+name: WSL
+
+# awl's sandbox on Windows Subsystem for Linux: the Linux suite unchanged, then the WSL-only
+# escape probes (tests/wsl.sh). What it covers and what it cannot: docs/wsl.md.
+# A change to src/sandbox.zig does not start it (the path list is this workflow's own files):
+# once this file is on main, dispatch it by hand on that branch.
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Windows runner label (a self-hosted one if hosted runners stop offering WSL2)
+        default: windows-2025
+  pull_request:
+    paths:
+      - .github/workflows/wsl.yml
+      - tests/wsl.sh
+      - docs/wsl.md
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wsl-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The release bytes (zig build release, as ci.yml's binaries job builds them).
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
+        with:
+          install_args: zig
+      - run: |
+          zig build release
+          sha256sum zig-out/release/awl-linux-x86_64
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: awl-wsl-${{ github.sha }}
+          path: zig-out/release/awl-linux-x86_64
+          retention-days: 3
+          if-no-files-found: error
+
+  wsl:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        wsl: [2, 1] # 1: no user namespaces, so awl must refuse the model's commands and say why
+    name: WSL${{ matrix.wsl }}
+    runs-on: ${{ inputs.runner || 'windows-2025' }}
+    timeout-minutes: 60
+    env:
+      # the job summary's path for the WSL steps (/p turns a Windows path into /mnt/...); they
+      # write to /dev/null if it does not arrive, and everything is in the log too
+      WSLENV: GITHUB_STEP_SUMMARY/p
+    steps:
+      - name: Keep line endings as committed
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: awl-wsl-${{ github.sha }}
+          path: awl-bin
+      - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7.2.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: ${{ matrix.wsl }}
+
+      # Step 0 of the whole exercise: is this really the WSL version the job is named after?
+      - name: The distro runs as WSL${{ matrix.wsl }}
+        shell: pwsh
+        run: |
+          $env:WSL_UTF8 = '1'
+          wsl.exe --version
+          $out = ((wsl.exe -l -v) -join "`n") -replace "`0", ''
+          Write-Host $out
+          $row = ($out -split "`n") | Where-Object { $_ -match 'Ubuntu-24\.04' } | Select-Object -First 1
+          if (-not $row) { Write-Error 'Ubuntu-24.04 is not in `wsl.exe -l -v`'; exit 1 }
+          $version = ($row.Trim() -split '\s+')[-1]
+          "WSL version of Ubuntu-24.04 per wsl.exe: $version" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($version -ne '${{ matrix.wsl }}') {
+            Write-Error "wanted WSL${{ matrix.wsl }}, this runner gave WSL$version (docs/wsl.md: run on a self-hosted runner or by hand)"
+            exit 1
+          }
+      - name: The kernel says so too
+        shell: wsl-bash {0}
+        run: |
+          uname -a
+          cat /proc/version
+          grep -qi microsoft /proc/version
+          case "$(uname -r)" in
+            *-Microsoft) [ "${{ matrix.wsl }}" = 1 ] ;; # WSL1: 4.4.0-NNNNN-Microsoft
+            *) [ "${{ matrix.wsl }}" = 2 ] ;;
+          esac
+          [ -n "${GITHUB_STEP_SUMMARY:-}" ] || echo "::warning::WSLENV did not carry GITHUB_STEP_SUMMARY: read the log, the job summary is empty"
+
+      - name: Tools the tests use, a user that is not root, the tree on the distro's own disk
+        shell: wsl-bash {0}
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -q
+          apt-get install -yq bubblewrap ripgrep fd-find python3 curl iproute2 git file openssl procps util-linux systemd
+          ln -sf "$(command -v fdfind)" /usr/bin/fd
+          echo "127.0.0.1 awl-e2e.test" >>/etc/hosts
+          id dev >/dev/null 2>&1 || useradd -m -s /bin/bash dev
+          # From git objects, not the Windows checkout: no CRLF, real modes, fifos and symlinks work.
+          ws=$(wslpath -u '${{ github.workspace }}')
+          mkdir -p /home/dev/awl
+          git -c safe.directory='*' -C "$ws" archive HEAD | tar -x -C /home/dev/awl
+          cp "$ws/awl-bin/awl-linux-x86_64" /home/dev/awl/awl
+          chmod +x /home/dev/awl/awl
+          chown -R dev:dev /home/dev/awl
+          /home/dev/awl/awl --version
+
+      - name: What this WSL looks like
+        if: ${{ !cancelled() }}
+        shell: wsl-bash -u dev {0}
+        run: |
+          {
+            echo "### WSL${{ matrix.wsl }} facts"
+            echo '```'
+            echo "kernel: $(uname -r)"
+            echo "wsl.conf: $(tr '\n' ' ' </etc/wsl.conf 2>/dev/null || echo none)"
+            echo "systemd: $([ -d /run/systemd/system ] && echo yes || echo no)"
+            echo "apparmor userns limit: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo none)"
+            echo "unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo none)"
+            echo "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo none)"
+            echo "binfmt_misc: $(ls /proc/sys/fs/binfmt_misc 2>/dev/null | tr '\n' ' ')"
+            echo "env: $(env | grep -E '^(WSL|DISPLAY|WAYLAND|PULSE)' | tr '\n' ' ')"
+            echo "PATH: $PATH"
+            echo "/run/WSL: $(ls -la /run/WSL 2>&1 | tr '\n' ';')"
+            echo "/mnt/wslg: $(ls -a /mnt/wslg 2>&1 | tr '\n' ' ')"
+            echo "/tmp/.X11-unix: $(ls -la /tmp/.X11-unix 2>&1 | tr '\n' ';')"
+            echo "mounts:"
+            grep -E ' (9p|drvfs|virtiofs|binfmt_misc) |wslg|/run' /proc/mounts || true
+            echo '```'
+          } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      # Does bubblewrap work out of the box? awl's own base flags (src/sandbox.zig options()), as
+      # the non-root user, nothing enabled first. Only if that fails: the sysctl ci.yml sets on
+      # GitHub's Ubuntu runners, recorded as something a user would have to do.
+      - name: bubblewrap out of the box
+        if: ${{ !cancelled() && matrix.wsl == 2 }}
+        shell: wsl-bash {0}
+        run: |
+          smoke() { runuser -u dev -- /usr/bin/bwrap --unshare-user --unshare-pid --unshare-ipc --new-session --die-with-parent --unshare-net --ro-bind / / --dev /dev --proc /proc --bind /tmp /tmp -- /bin/sh -c 'echo ready'; }
+          if out=$(smoke 2>&1); then
+            echo "bubblewrap: works out of the box ($(bwrap --version))" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          else
+            echo "bubblewrap: FAILS out of the box: $out" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            out=$(smoke 2>&1) || { echo "bubblewrap: still fails with the apparmor sysctl at 0: $out" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; exit 1; }
+            echo "bubblewrap: works after sysctl kernel.apparmor_restrict_unprivileged_userns=0 (a user must set it)" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 1 # red: docs/wsl.md says no setup is needed
+          fi
+
+      # hyperfine is not installed, so check.sh skips the 3 ms startup ceiling (a nested VM's
+      # timing says nothing about awl); static, idle RSS and the 8 MB peak are checked.
+      - name: Budgets (tests/check.sh)
+        if: ${{ !cancelled() && matrix.wsl == 2 }}
+        shell: wsl-bash -u dev {0}
+        run: |
+          cd ~/awl
+          sh tests/check.sh ./awl 2>&1 | tee /tmp/check.txt
+          { echo '```'; grep -E '^(ok|skip|    )' /tmp/check.txt; echo '```'; } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+      - name: End-to-end and TUI tests (tests/e2e.sh)
+        if: ${{ !cancelled() && matrix.wsl == 2 }}
+        shell: wsl-bash -u dev {0}
+        run: |
+          cd ~/awl
+          rc=0
+          timeout 20m bash tests/e2e.sh ./awl 2>&1 | tee /tmp/e2e.txt || rc=$?
+          { echo '```'; grep -E '^FAIL|^skip|^e2e:' /tmp/e2e.txt; echo '```'; } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+          exit $rc
+      - name: Sandbox escape tests (tests/sandbox.sh)
+        if: ${{ !cancelled() && matrix.wsl == 2 }}
+        shell: wsl-bash -u dev {0}
+        run: |
+          cd ~/awl
+          [ -x /usr/bin/bwrap ] # sandbox.sh would skip and pass without it
+          rc=0
+          SANDBOX_DUMP=/tmp/sandbox-dump.txt timeout 20m bash tests/sandbox.sh ./awl 2>&1 | tee /tmp/sandbox.txt || rc=$?
+          { echo '```'; grep -E '^FAIL|^sandbox:' /tmp/sandbox.txt; echo '```'; } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+          [ $rc -eq 0 ] || { head -c 20000 /tmp/sandbox-dump.txt 2>/dev/null; exit $rc; }
+
+      # Both versions. On WSL2 the interop, drive and tool probes must be testable here (a probe
+      # that cannot fire unsandboxed either is "untested", exit 3); WSLg may be absent on a server.
+      - name: WSL-only escape probes (tests/wsl.sh)
+        if: ${{ !cancelled() }}
+        shell: wsl-bash -u dev {0}
+        run: |
+          cd ~/awl
+          rc=0
+          WSL_REQUIRE="interop drvfs tool winpath" WSL_PLANT_HOME=1 WSL_DUMP=/tmp/wsl-dump.txt bash tests/wsl.sh ./awl 2>&1 | tee /tmp/wsl.txt || rc=$?
+          { echo "### tests/wsl.sh on WSL${{ matrix.wsl }} (exit $rc)"; echo '```'; sed -n '/^----- awl wsl result/,$p' /tmp/wsl.txt; echo '```'; } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+          [ $rc -eq 0 ] || { head -c 20000 /tmp/wsl-dump.txt 2>/dev/null; exit $rc; }
