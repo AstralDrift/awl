@@ -86,7 +86,12 @@ fn gate(name: []const u8, changes_files: bool, out: *Buf) error{Cancel}!bool {
         out.add("Plan mode: files are read-only. Investigate with read, grep, find and bash, then describe the change you propose; the user will switch modes to let you make it.");
         return false;
     }
-    const f = ask orelse return true;
+    const f = ask orelse {
+        // nobody to ask (awl -p): ask mode refuses what it would have asked about
+        if (mode != .ask) return true;
+        out.print("not {s}: ask mode needs the user's yes for this {s} call and there is no terminal to ask in (awl -p). The user can run with AWL_MODE=auto to allow it.", .{ if (changes_files) "written" else "run", name });
+        return false;
+    };
     if (!changes_files and prefixAllowed(ask_command)) return true;
     ask_reason = if (changes_files) "change a file" else "run a command";
     switch (f()) {
@@ -125,11 +130,15 @@ pub fn listFiles(out: *Buf) bool {
 }
 
 pub fn undoLast(out: *Buf) usize {
+    guard_ok = true; // the user's own /undo may put a guarded file back
+    defer guard_ok = false;
     return undo.undo(&write, out);
 }
 
 /// Rewind: put back every file change from undo turn `from` on.
 pub fn undoFrom(from: u32, out: *Buf) usize {
+    guard_ok = true;
+    defer guard_ok = false;
     return undo.undoFrom(from, &write, out);
 }
 
@@ -208,6 +217,8 @@ fn sum(r: *Result, name: []const u8, comptime f: []const u8, a: anytype) void {
 /// Run tool `name` with JSON `args`. Output text goes to `out` (bounded).
 pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
     defer argFree();
+    defer sweepGuarded(out);
+    guard_ok = false;
     summary.ran = .not_run;
     reapJobs(out);
     const a = argAlloc();
@@ -301,6 +312,13 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
             if (!try gate(name, false, out)) return r;
         }
         if (!sandboxReady(out)) return r;
+        // Plan mode: files are read-only for commands too (a sandbox of its own, the project
+        // mounted read-only). Without the sandbox (AWL_SANDBOX=off) nothing can enforce that.
+        const ro = mode == .plan and sandbox.on;
+        if (ro and p.background) {
+            out.add("not run: in plan mode a command runs with the project read-only and cannot stay in the background; run it in the foreground");
+            return r;
+        }
         const cmd = a.dupeZ(u8, p.command.v) catch return badArgs(out, name, args, &r);
         if (p.background) {
             r.ok = startJob(cmd, out);
@@ -308,7 +326,9 @@ pub fn run(name: []const u8, args: []const u8, out: *Buf) error{Cancel}!Result {
         }
         const av = [_:null]?[*:0]const u8{ "/bin/bash", "-c", cmd };
         net_once = online;
+        ro_once = ro;
         defer net_once = false;
+        defer ro_once = false;
         r.ok = try spawn(&av, @as(u64, if (p.timeout) |x| x.v else 120) * 1000, out, .bash, true);
         if (online) out.add("\n[ran with network, approved by the user for this command only]");
     } else if (eq(u8, name, "grep") and have_rg) {
@@ -389,6 +409,21 @@ fn outside(path: []const u8, out: *Buf) bool {
     return true;
 }
 
+/// After every tool call: a guarded path a command created is moved aside (sandbox.sweepGuarded).
+pub fn sweepGuarded(out: ?*Buf) void {
+    var moved: [sandbox.guarded.len][]const u8 = undefined;
+    var stuck: [sandbox.guarded.len][]const u8 = undefined;
+    var n_stuck: usize = 0;
+    for (moved[0..sandbox.sweepGuarded(&moved, &stuck, &n_stuck)]) |g| {
+        ui.note("a command created {s}{s}; moved to {s}.awl-refused… (git hooks run outside the sandbox; AGENTS.md and skills instruct later sessions)", .{ sandbox.root, g, g[1..] });
+        if (out) |o| o.print("\n[awl moved {s} aside ({s}.awl-refused…): a command may not create it. write or edit it instead, in a terminal session, where the user approves it.]", .{ g[1..], g[1..] });
+    }
+    for (stuck[0..n_stuck]) |g| {
+        ui.note("WARNING: a command created {s}{s} and awl could not move it aside. Check it before you use git here or start another session.", .{ sandbox.root, g });
+        if (out) |o| o.print("\n[awl could not move {s} aside: a command may not create it. Tell the user to check and remove it.]", .{g[1..]});
+    }
+}
+
 /// Set while the user is asked about a guarded path or the network: y/n only, never "all".
 pub var asking_once = false;
 
@@ -408,7 +443,11 @@ fn guarded(name: []const u8, path: []const u8, out: *Buf) error{Cancel}!bool {
     asking_once = true;
     defer asking_once = false;
     switch (f()) {
-        .yes, .always => return false,
+        .yes, .always => {
+            sandbox.allowGuarded(abs);
+            guard_ok = true;
+            return false;
+        },
         .no => {
             out.print("The user declined this {s} call to {s}.", .{ name, abs });
             return true;
@@ -420,8 +459,13 @@ fn guarded(name: []const u8, path: []const u8, out: *Buf) error{Cancel}!bool {
     }
 }
 
+/// The user approved this call's write to a guarded path (write() checks again what it opens).
+var guard_ok = false;
+
 /// Set for one approved command: it runs in its own sandbox with the host network.
 var net_once = false;
+/// Set for one plan-mode command: it runs in its own sandbox with the project read-only.
+var ro_once = false;
 
 /// A command that wants the network: the user approves this one call, in every mode
 /// (the tool line above shows the exact command). With nobody to ask, no.
@@ -747,6 +791,12 @@ fn write(path: []const u8, parts: []const []const u8, out: *Buf) bool {
     const dreal = sandbox.fdPath(dfd, &db) orelse return errMsg(out, "write", path, error.Access);
     const freal = std.fmt.bufPrint(&fb, "{s}/{s}", .{ if (dreal.len == 1) "" else dreal, leaf }) catch return errMsg(out, "write", path, error.Sys);
     if (!sandbox.writable(freal)) return errMsg(out, "write", path, error.Access);
+    // the path was checked before the directory was opened: a link swapped in since then
+    // must not turn an ordinary write into one to a guarded file
+    if (sandbox.guardedPath(freal) and !guard_ok) {
+        out.print("not written: {s} is guarded and this call was not approved for it", .{freal});
+        return false;
+    }
     var rnd: [4]u8 = undefined;
     _ = linux.getrandom(&rnd, rnd.len, 0);
     var tb: [300]u8 = undefined;
@@ -1193,6 +1243,7 @@ fn reapJobs(out: *Buf) void {
 
 /// Stop every background job still running (on exit): SIGTERM, then SIGKILL after ~0.5 s.
 pub fn killJobs() void {
+    defer sweepGuarded(null);
     var any = false;
     for (jobs) |j| if (j.pid != 0) {
         _ = linux.kill(-j.pid, .TERM);
@@ -1230,7 +1281,7 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
     var p: [2]i32 = undefined;
     if (linux.errno(linux.pipe2(&p, .{ .CLOEXEC = true })) != .SUCCESS) return errMsg(out, "spawn", "pipe", error.Sys);
     // A model command may outlive its timeout as a background job; inside the sandbox the model needs the inner pid to stop it.
-    const adoptable = model and kind == .bash and !net_once;
+    const adoptable = model and kind == .bash and !net_once and !ro_once;
     var pp: [2]i32 = .{ -1, -1 };
     if (adoptable and sandbox.on) _ = linux.pipe2(&pp, .{ .CLOEXEC = true, .NONBLOCK = true });
     const pid_rc = linux.fork();
@@ -1250,7 +1301,7 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
         var env: [1024]?[*:0]const u8 = undefined; // this desktop already has ~220 vars
         if (model) {
             const e = sandbox.envp(sys.envp, &env);
-            if (sandbox.on and net_once) sandbox.execOnline(argv, e, @ptrCast(workdir().ptr));
+            if (sandbox.on and (net_once or ro_once)) sandbox.execOnce(argv, e, @ptrCast(workdir().ptr), net_once or sandbox.net, ro_once);
             if (sandbox.on) sandbox.execIn(argv, e, @ptrCast(workdir().ptr), pp[1], false);
             _ = linux.execve(argv[0].?, argv, e);
         } else _ = linux.execve(argv[0].?, argv, sys.childEnvp(sys.envp, &env));

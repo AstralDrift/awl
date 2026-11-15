@@ -10,7 +10,8 @@ A release is a `vX.Y.Z` tag on a `main` commit that passed CI. The Release workf
 | `zig build lint` | `zig fmt`, the `== {}` and test-import rules, the Zig version matches in its four places, no arena/LOG.md promise older than two weeks, every src commit over main names a size/RSS/startup figure, shellcheck, ruff (pyflakes), actionlint | CI `lint` job; locally, `mise install` gives the pinned tools |
 | `zig build test` | unit tests in Debug (overflow, bounds and `unreachable` checks on) | CI on x86_64 and aarch64 |
 | `zig build check` | static binary, startup under 3 ms, peak RSS under 8 MB; reports size and idle RSS | CI, numbers in each run's summary |
-| `zig build e2e`, `zig build sandbox` | end-to-end, TUI, embedder contract, sandbox escapes, against `tests/fake_sse.py` | CI (needs Linux and bubblewrap) |
+| `zig build e2e`, `zig build sandbox` | end-to-end, TUI, embedder contract, sandbox escapes, sandbox off or unable to start, against `tests/fake_sse.py`. A check that cannot run fails under `CI=true` instead of skipping. | CI on Ubuntu 24.04 (x86_64, aarch64) and 22.04, for the host build and for the release binary (needs Linux and bubblewrap) |
+| CI `platforms` job | the sandbox suite as root, on Fedora and on Debian; commands refused on a stock Ubuntu 24.04, in an unprivileged container, and without bubblewrap | CI; `arch` (Arch Linux) reports without failing the run until it has passed once |
 
 Every push to `main` also uploads `awl-<commit>` (both binaries and `SHA256SUMS`) as a
 workflow artifact, kept 14 days. A weekly scheduled run catches runner image changes.
@@ -28,8 +29,9 @@ workflow artifact, kept 14 days. A weekly scheduled run catches runner image cha
 
 4. The Release workflow checks the tag against `build.zig.zon`, checks the commit is on
    `main` and that `lint` and both `test` jobs passed on it, builds both binaries on two
-   runners, runs the embedder contract (`tests/embed.sh`) and the unit tests against the
-   native release binary on each, and publishes only if all four builds are byte-identical.
+   runners, runs the unit tests (a Debug build of the same source) and, against the native
+   release binary on each, the end-to-end, embedder-contract and sandbox suites
+   (`tests/e2e.sh`, `embed.sh`, `sandbox.sh`, `nosandbox.sh`), and publishes only if all four builds are byte-identical.
    Release notes are the tag's section of `CHANGELOG.md` (write it in the version PR), the
    checksums, and GitHub's generated list of merged PRs.
 

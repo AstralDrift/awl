@@ -128,11 +128,14 @@ pub fn write(status: Status, exit: u8, session: []const u8, files: anytype, awl:
 
     var tb: [4200]u8 = undefined;
     const tmp = std.fmt.bufPrint(&tb, "{s}.tmp{d}", .{ p, linux.getpid() }) catch return;
-    const fd = sys.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600) catch return;
-    sys.writeAll(fd, o.items()) catch {};
-    sys.close(fd);
     var z1: [4200]u8 = undefined;
     var z2: [4200]u8 = undefined;
+    // Created fresh, never through a link: the summary may sit in a folder the model's commands
+    // can write, where "<path>.tmp<pid>" could be planted as a link to another file.
+    _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&z1, tmp), 0);
+    const fd = sys.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600) catch return;
+    sys.writeAll(fd, o.items()) catch {};
+    sys.close(fd);
     if (linux.errno(linux.renameat(linux.AT.FDCWD, sys.z(&z1, tmp), linux.AT.FDCWD, sys.z(&z2, p))) != .SUCCESS)
         _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&z1, tmp), 0);
 }

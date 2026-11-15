@@ -54,20 +54,30 @@ jobs:
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: echo "XDG_CACHE_HOME=$RUNNER_TEMP/cache" >>"$GITHUB_ENV" # where release.sh keeps the pinned Zig
       - name: Release build (pinned Zig, checked against ziglang.org's sha256)
         run: scripts/release.sh
-      - name: Native binary runs, the unit tests pass, the embedder contract holds on the release bytes
+      - name: The unit tests pass (a Debug build of the same source), and the release bytes pass every suite
+        env:
+          CI: "true" # no check may skip
         run: |
           arch=$(uname -m)
-          "zig-out/release/awl-linux-$arch" --version
+          rel="$PWD/zig-out/release/awl-linux-$arch"
+          "$rel" --version
           "$XDG_CACHE_HOME/awl-release/zig-$arch-linux-0.16.0/zig" build test
-          sudo apt-get install -yq bubblewrap >/dev/null
+          sudo apt-get update -q >/dev/null
+          sudo apt-get install -yq bubblewrap ripgrep fd-find >/dev/null
+          sudo ln -sf "$(command -v fdfind)" /usr/bin/fd
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null
-          bash tests/embed.sh "zig-out/release/awl-linux-$arch"
+          echo "127.0.0.1 awl-e2e.test" | sudo tee -a /etc/hosts >/dev/null
+          sudo mkdir -p "/run/user/$(id -u)" && sudo chown "$(id -u)" "/run/user/$(id -u)"
+          bash tests/e2e.sh "$rel"
+          bash tests/embed.sh "$rel"
+          bash tests/sandbox.sh "$rel"
+          bash tests/nosandbox.sh "$rel"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ matrix.os }}

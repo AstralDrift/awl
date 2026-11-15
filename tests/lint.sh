@@ -43,6 +43,31 @@ for got in \
 done
 [ $v = 1 ] || ok "Zig $want everywhere"
 
+# tests/claims.txt: every sandbox promise in the docs names the check that proves it.
+if python3 - <<'PY'
+import sys
+gone = []
+n = 0
+for i, line in enumerate(open("tests/claims.txt"), 1):
+    if not line.strip() or line.startswith("#"):
+        continue
+    parts = [p.strip() for p in line.split(" | ")]
+    if len(parts) != 3 or not all(parts):
+        gone.append("  line %d: want 'file | check text | promise'" % i)
+        continue
+    n += 1
+    try:
+        found = parts[1] in open(parts[0], encoding="utf-8").read()
+    except OSError:
+        found = False
+    if not found:
+        gone.append("  line %d: no '%s' in %s (promise: %s)" % (i, parts[1], parts[0], parts[2]))
+if gone or n == 0:
+    print("tests/claims.txt: a sandbox promise has lost its check:\n" + "\n".join(gone))
+sys.exit(1 if gone or n == 0 else 0)
+PY
+then ok "every sandbox promise in tests/claims.txt has its check"; else fail "sandbox promise without a check (tests/claims.txt)"; fi
+
 # arena/LOG.md: a decision that says "next: X" is a promise (the row is a Keep on condition that X
 # gets measured). Four October promises were never followed up. After 14 days the row fails lint:
 # edit its decision cell to say what happened (done: the row that measured it; dropped: why).

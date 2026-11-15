@@ -177,6 +177,11 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
   a short allowlist (names with TOKEN, KEY, SECRET, PASS, AUTH, ... never pass). They cannot create user
   namespaces. The project's `.git/config`, `.git/hooks`, `AGENTS.md` and `.agents/` are read-only to them,
   since git runs hooks and fsmonitor outside the sandbox and the next session reads those instructions.
+  One of these that does not exist yet cannot be made read-only, so if a command creates it awl moves it
+  to `<name>.awl-refused` after that tool call and says so. Limits: an `AGENTS.md` in a subfolder is guarded
+  for write/edit only (a command can still create or change one); a guarded file you approve mid-session is
+  not read-only to commands until the next session; and in a folder with no `.git`, a repository the model
+  creates with `git init` is its own, hooks and config included: look at them before you use git there.
 - **No network unless you say yes.** Commands share a private localhost (a dev server started in the
   background is reachable from the next command) but nothing beyond it. When the model needs the
   internet it sets `network: true` on one bash call; awl shows the command and asks `allow? y/n` in every
@@ -193,7 +198,34 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 - `/mode auto` (default) runs everything; `/mode ask` shows each edit's diff and each command
   and waits for y/n (p = always allow this command's prefix, e.g. `zig build`, for the session;
   a command that chains, substitutes or redirects still asks; a = allow the rest: switches to auto); `/mode plan` keeps files read-only and asks before
-  commands, so the model investigates and proposes. `AWL_MODE` sets the starting mode.
+  commands, so the model investigates and proposes; its commands run with the project mounted read-only.
+  `AWL_MODE` sets the starting mode. With no terminal (`awl -p`) nobody can approve, so `ask` refuses
+  every command and file change.
+
+### Where the sandbox is tested
+
+Each row is a CI job or step (`.github/workflows/ci.yml`) that runs on every change, with no check
+allowed to skip.
+
+| Where | What is checked |
+|---|---|
+| Ubuntu 24.04, x86_64 and aarch64 | every suite, for the host build and for the release binary |
+| Ubuntu 22.04 (bubblewrap 0.6) | every suite |
+| Fedora, Debian 12 | the sandbox suite |
+| root in a container | the sandbox suite: no capability survives into a command |
+| Stock Ubuntu 24.04 | commands are refused with the reason; see below |
+| A container without privileges, a host without bubblewrap | commands are refused with the reason; read/write keep their rules |
+| `AWL_SANDBOX=off` | commands run; the environment allowlist still applies |
+
+Ubuntu 24.04 and later block unprivileged user namespaces through AppArmor, which stops bubblewrap.
+awl then refuses the model's commands rather than run them unsandboxed. To let bubblewrap work:
+
+    echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-awl-userns.conf
+    sudo sysctl --system
+
+That setting applies to every program on the machine, not only awl. Not tested yet: WSL2 (work in
+progress), Arch Linux (reports in CI, not yet required), macOS (awl is Linux only; run it in a
+Linux container or VM).
 
 ## What it loads
 
