@@ -195,6 +195,15 @@ jobs:
           { echo '```'; grep -E '^FAIL|^sandbox:' /tmp/sandbox.txt; echo '```'; } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
           [ $rc -eq 0 ] || { head -c 20000 /tmp/sandbox-dump.txt 2>/dev/null; exit $rc; }
 
+      # The part of the Linux suite that fits WSL1: no sandbox can start, so nothing may run.
+      - name: Fail-closed checks (tests/nosandbox.sh, when the tree has it)
+        if: ${{ !cancelled() && matrix.wsl == 1 }}
+        shell: wsl-bash -u dev {0}
+        run: |
+          cd ~/awl
+          [ -f tests/nosandbox.sh ] || { echo "no tests/nosandbox.sh in this tree"; exit 0; }
+          bash tests/nosandbox.sh ./awl off blocked
+
       # Both versions. On WSL2 the interop, drive and tool probes must be testable here (a probe
       # that cannot fire unsandboxed either is "untested", exit 3); WSLg may be absent on a server.
       - name: WSL-only escape probes (tests/wsl.sh)

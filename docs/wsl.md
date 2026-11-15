@@ -6,8 +6,9 @@ WSL2 runs the same sandbox as any Linux machine, plus masks for the ways out tha
 
 ## Status
 
-Measured on GitHub-hosted `windows-2025` (WSL 3.0.3.0, Ubuntu-24.04), 2026-11-14, three runs of
-PR 28.
+Measured on GitHub-hosted `windows-2025` (WSL 3.0.3.0, Ubuntu-24.04), 2026-11-14, four runs of
+PR 28. The last one (awl `b44b0d3`, the PR at `5d1f448` merged into main) is green on WSL2 and
+WSL1: nothing escaped, nothing untested.
 
 - **WSL2 runs the real sandbox.** Kernel `6.18.54.1-microsoft-standard-WSL2`. bubblewrap 0.9.0
   works with nothing enabled; `tests/e2e.sh` 68 passed, `tests/sandbox.sh` 38 passed,
@@ -15,11 +16,13 @@ PR 28.
 - **Before the masks, 15 of 22 WSL-only probes got through** (run 1, main's `src/`). The worst:
   a sandboxed command that set `WSL_INTEROP` to a socket in `/run/WSL` ran `cmd.exe`, a Windows
   process outside the sandbox with the network.
-- **With the masks, all 23 probes are blocked** (run 3). `src/sandbox.zig` now covers `/run/WSL`,
-  `/mnt/wslg` and every drvfs drive with an empty tmpfs, the read tool refuses the same paths,
-  and `PATH` loses its Windows folders. One control failed in that run: a project on `/mnt/c`
-  could write `../x` into the tmpfs that stands in for the drive (not onto the drive). The masks
-  are read-only since; that last change is awaiting its run.
+- **With the masks, all 23 probes are blocked** (runs 3 and 4). `src/sandbox.zig` now covers
+  `/run/WSL`, `/mnt/wslg` and every drvfs drive with an empty read-only tmpfs, the read tool
+  refuses the same paths, and `PATH` loses its Windows folders. In run 3 one control failed: a
+  project on `/mnt/c` could write `../x` into the tmpfs that stands in for the drive (not onto
+  the drive). The masks are read-only since, and run 4 passed that control too.
+- **The masks are on PR 28's branch, not on `main`**, and the README still tells WSL users to
+  set `AWL_SANDBOX=off`. Both change when the PR's sandbox commits land.
 - **WSL1 fails closed and says why** (run 3, kernel `4.4.0-26100-Microsoft`): "this is WSL1,
   which has no user namespaces. Convert the distro in Windows (wsl.exe --set-version <distro>
   2)...". Before the change the refusal was bubblewrap's own error.
@@ -85,7 +88,7 @@ Exit 0 nothing escaped, 1 an escape or a failed control, 2 not WSL, 3 a probe na
 
 WSL2, hosted `windows-2025`, 2026-11-14. WSLg was present (6 sockets under `/mnt/wslg`).
 
-| Probe | Run 1: main's sandbox | Run 3: with the masks |
+| Probe | Run 1: main's sandbox | Runs 3 and 4: with the masks |
 |---|---|---|
 | `interop-cmd`, `interop-powershell` | blocked (see note) | blocked |
 | `interop-sock` | **ESCAPED** | blocked |
@@ -105,7 +108,7 @@ WSL2, hosted `windows-2025`, 2026-11-14. WSLg was present (6 sockets under `/mnt
 | `tool-write-drvfs` | blocked | blocked |
 | `wslg-tool-read` | **ESCAPED** | blocked |
 | write in the project; project on `/mnt/c` writes | ok | ok |
-| project on `/mnt/c` cannot write next to itself | ok | **FAIL** (into the mask's tmpfs; masks read-only since, awaiting a run) |
+| project on `/mnt/c` cannot write next to itself | ok | **FAIL** in run 3 (into the mask's tmpfs); ok in run 4, masks read-only |
 | `tests/tui.py` | ok, 152 checks | ok, 152 checks |
 | WSL1: fails closed | ok (run 2) | ok |
 | WSL1: the refusal names WSL1 | FAIL (run 2) | ok |
