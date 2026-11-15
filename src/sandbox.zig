@@ -273,6 +273,10 @@ fn options(a: *Args, with_net: bool) void {
         a.addAll(&.{ "--ro-bind", "/dev/null", real.ptr });
     };
     for (guarded) |g| a.bindIf("--ro-bind", std.fmt.bufPrint(&pb, "{s}{s}", .{ root, g }) catch continue);
+    // The WSL masks read-only, now that the binds have made their folders in them: a project on
+    // /mnt/c could otherwise write "../x" into the tmpfs and believe it reached the drive. Not
+    // one that is itself the project (the remount would hit the bind on top of it).
+    for (wsl[0..wsl_n]) |m| if (!rebound(m)) a.addAll(&.{ "--remount-ro", a.zs.z(m) });
     if (ro_root) a.addAll(&.{ "--remount-ro", root_z() });
 }
 
