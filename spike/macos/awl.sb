@@ -1,0 +1,141 @@
+; awl.sb: Seatbelt profile for the commands awl's model runs on macOS (spike, not shipped).
+; The macOS counterpart of src/sandbox.zig options(): one rule set, the same for every command.
+; Later rules win over earlier ones, so each section is "allow the area, then deny the exceptions".
+;
+; Parameters (sandbox-exec -D NAME=value; awl would compile the same text with sandbox_init):
+;   ROOT      the project (git root or cwd), as the kernel names it (/private/tmp, never /tmp)
+;   HOME      the user's home
+;   TMP       the per-user temp dir   (getconf DARWIN_USER_TEMP_DIR, real path, no trailing /)
+;   CACHE     the per-user cache dir  (getconf DARWIN_USER_CACHE_DIR, real path, no trailing /)
+;   SESSIONS  awl's session files; VIEW is this run's view, the one file commands may read there
+;   NET       "on": the host network (AWL_SANDBOX_NET=on, or one approved `network: true` call)
+;   LOCAL     "off" (default): no IP sockets at all
+;             "port": bind and connect on 127.0.0.1:PORT only (a block awl reserves per session)
+;             "host": all of the host's localhost
+;   PORT      the port for LOCAL=port
+(version 1)
+(deny default)
+
+; ---- processes: its own only ----
+; No pid namespace on macOS: other processes exist, but a command may not signal or inspect
+; anything outside its own sandbox.
+(allow process-fork)
+(allow process-exec)
+(allow signal (target same-sandbox))
+; Other processes: two rules, and both are needed (measured with spike/macos/procargs.zig).
+; sysctl(KERN_PROCARGS2) hands out the arguments and environment of any process of this user.
+; It gets through when sysctl-read is allowed without a name filter, and it gets through when
+; process-info is not mentioned (under (version 1), (deny default) leaves it open). So:
+; process-info is denied by name and given back for the sandbox's own processes, and sysctl-read
+; is a list of names. The list leaves out kern.proc.*, which is the process table.
+(deny process-info*)
+(allow process-info* (target same-sandbox))
+(allow sysctl-read
+  (sysctl-name-prefix "hw.")
+  (sysctl-name-prefix "machdep.cpu.")
+  (sysctl-name-prefix "kern.os")
+  (sysctl-name-prefix "sysctl.")            ; name -> number lookups (sysctlbyname)
+  (sysctl-name "kern.argmax") (sysctl-name "kern.hostname") (sysctl-name "kern.version")
+  (sysctl-name "kern.maxfiles") (sysctl-name "kern.maxfilesperproc") (sysctl-name "kern.maxproc")
+  (sysctl-name "kern.ngroups") (sysctl-name "kern.usrstack64") (sysctl-name "kern.secure_kernel")
+  (sysctl-name "kern.boottime") (sysctl-name "kern.clockrate") (sysctl-name "vm.loadavg")
+  (sysctl-name "security.mac.lockdown_mode_state") (sysctl-name "machdep.ptrauth_enabled"))
+(allow pseudo-tty)
+(allow ipc-posix-sem)
+(allow ipc-posix-shm)
+(allow file-ioctl (literal "/dev/tty") (literal "/dev/ptmx") (regex #"^/dev/ttys[0-9]+$"))
+
+; ---- Mach services: user lookups and logging, nothing else ----
+; Not reachable, because nothing here names them: the Keychain (com.apple.SecurityServer,
+; com.apple.securityd.xpc), LaunchServices and Apple Events (`open`, `osascript`), the pasteboard,
+; launchd job control, TCC, the window server.
+(allow mach-lookup
+  (global-name "com.apple.system.opendirectoryd.libinfo")   ; getpwuid: git, ssh, id, ls -l
+  (global-name "com.apple.system.opendirectoryd.membership")
+  (global-name "com.apple.system.notification_center")      ; notify(3): time zone changes
+  (global-name "com.apple.system.logger")
+  (global-name "com.apple.logd"))
+
+; ---- reads: everything but secrets ----
+(allow file-read*)
+(deny file-read*
+  (subpath (string-append (param "HOME") "/.ssh"))
+  (subpath (string-append (param "HOME") "/.gnupg"))
+  (subpath (string-append (param "HOME") "/.aws"))
+  (subpath (string-append (param "HOME") "/.config/gh"))
+  (subpath (string-append (param "HOME") "/.password-store"))
+  (subpath (string-append (param "HOME") "/.local/share/keyrings"))
+  (subpath (string-append (param "HOME") "/.local/state/omarchy"))
+  (subpath (string-append (param "HOME") "/.docker"))
+  (subpath (string-append (param "HOME") "/.kube"))
+  (subpath (string-append (param "HOME") "/.orbstack"))
+  (subpath (string-append (param "HOME") "/.colima"))
+  ; ~/Library holds the Keychain files, browser profiles and cookies, app tokens, Mail, Messages.
+  ; Hidden as a whole; the developer-tool parts are given back below.
+  (subpath (string-append (param "HOME") "/Library"))
+  (subpath (param "SESSIONS")))
+(allow file-read*
+  (subpath (string-append (param "HOME") "/Library/Caches"))
+  (subpath (string-append (param "HOME") "/Library/Developer"))
+  (subpath (string-append (param "HOME") "/Library/Python"))
+  (subpath (string-append (param "HOME") "/Library/pnpm"))
+  (subpath (string-append (param "HOME") "/Library/Java"))
+  (literal (string-append (param "HOME") "/Library"))
+  (literal (param "VIEW")))
+
+; ---- writes: the project, temp dirs, build caches ----
+(allow file-write*
+  (subpath (param "ROOT"))
+  (subpath "/private/tmp")
+  (subpath (param "TMP"))
+  (subpath (param "CACHE"))
+  (subpath (string-append (param "HOME") "/.cache"))
+  (subpath (string-append (param "HOME") "/.npm"))
+  (subpath (string-append (param "HOME") "/.cargo/registry"))
+  (subpath (string-append (param "HOME") "/go/pkg"))
+  (subpath (string-append (param "HOME") "/Library/Caches"))
+  (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/ptmx")
+  (literal "/dev/dtracehelper")
+  (regex #"^/dev/ttys[0-9]+$") (regex #"^/dev/fd/[0-9]+$"))
+; Guarded project paths: git runs hooks and fsmonitor outside the sandbox, and the next session
+; reads AGENTS.md and .agents. APFS is case-insensitive by default, so the names are matched in
+; any case (a new `agents.md` is AGENTS.md to the next session). Rules follow paths, not mounts,
+; so the folders above a guarded path may not be renamed either (`mv .git g; edit g/config; mv g
+; .git` would otherwise walk around the rule).
+(deny file-write*
+  (regex (string-append "^" (regex-quote (param "ROOT")) "/\\.[Gg][Ii][Tt]/[Cc][Oo][Nn][Ff][Ii][Gg]$"))
+  (regex (string-append "^" (regex-quote (param "ROOT")) "/\\.[Gg][Ii][Tt]/[Hh][Oo][Oo][Kk][Ss](/|$)"))
+  (regex (string-append "^" (regex-quote (param "ROOT")) "/\\.[Aa][Gg][Ee][Nn][Tt][Ss](/|$)"))
+  ; the project's own AGENTS.md only, as on Linux: a rule for nested ones ("/(.*/)?" before the
+  ; name) also works, but then cloning or unpacking any tree that contains an AGENTS.md fails
+  (regex (string-append "^" (regex-quote (param "ROOT")) "/[Aa][Gg][Ee][Nn][Tt][Ss]\\.[Mm][Dd]$")))
+(deny file-write-unlink
+  (literal (param "ROOT"))
+  (regex (string-append "^" (regex-quote (param "ROOT")) "/\\.[Gg][Ii][Tt]$")))
+; Session files sit under a state dir that may be inside a writable place.
+(deny file-write* (subpath (param "SESSIONS")))
+
+; ---- network ----
+; (deny default) covers IP sockets and every Unix socket (ssh-agent under
+; /private/tmp/com.apple.launchd.*, Docker/OrbStack/colima, editors' IPC sockets in $TMPDIR, X11),
+; at any depth. Commands may use Unix sockets they create inside the project.
+(allow network-bind network-outbound network-inbound (subpath (param "ROOT")))
+(allow system-socket)
+(if (string=? (param "LOCAL") "port")
+  (begin
+    (allow network-bind network-inbound (local ip (string-append "localhost:" (param "PORT"))))
+    (allow network-outbound (remote ip (string-append "localhost:" (param "PORT"))))))
+(if (string=? (param "LOCAL") "host")
+  (begin
+    (allow network-bind network-inbound (local ip "localhost:*"))
+    (allow network-outbound (remote ip "localhost:*"))))
+(if (string=? (param "NET") "on")
+  (begin
+    (allow network-bind network-inbound (local ip))
+    (allow network-outbound (remote ip))
+    (allow network-outbound (literal "/private/var/run/mDNSResponder"))   ; host names
+    (allow mach-lookup
+      (global-name "com.apple.dnssd.service")
+      (global-name "com.apple.TrustEvaluationAgent")   ; TLS chain checks: without it the system curl,
+                                                       ; git and python3 fail every https:// (measured)
+      (global-name "com.apple.SystemConfiguration.configd"))))
