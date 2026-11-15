@@ -6,25 +6,23 @@ WSL2 runs the same sandbox as any Linux machine, plus masks for the ways out tha
 
 ## Status
 
-Run once on real WSL: GitHub-hosted `windows-2025`, WSL 3.0.3.0, Ubuntu-24.04, 2026-11-14
-(the first run of PR 28; awl `3142d34`, a release build of that PR merged into `main` at
-`75be427`, so `src/` is main's).
+Measured on GitHub-hosted `windows-2025` (WSL 3.0.3.0, Ubuntu-24.04), 2026-11-14, three runs of
+PR 28.
 
 - **WSL2 runs the real sandbox.** Kernel `6.18.54.1-microsoft-standard-WSL2`. bubblewrap 0.9.0
   works with nothing enabled; `tests/e2e.sh` 68 passed, `tests/sandbox.sh` 38 passed,
-  `tests/check.sh` passed (peak RSS 1580 KB, idle 716 KB; startup not measured).
-- **The sandbox has WSL-only holes: 15 of 22 probes got through** (table under Results). The
-  worst: a sandboxed command that sets `WSL_INTEROP` to a socket in `/run/WSL` runs `cmd.exe`, a
-  Windows process outside the sandbox with the network. Until `src/sandbox.zig` masks these,
-  treat awl's sandbox on WSL2 as protecting the Linux side only.
-- **WSL1 fails closed** (second run, kernel `4.4.0-26100-Microsoft`): the model's command is
-  refused with bubblewrap's own error ("Creating new namespace failed..."), which does not say
-  that WSL1 is the reason or what to do.
-- **Fix, not yet proven on WSL:** the masks proposed under Results are in `src/sandbox.zig` on
-  this branch (tmpfs over `/run/WSL`, `/mnt/wslg` and the drvfs drives; the read tool refuses
-  the same paths; Windows folders dropped from `PATH`; a WSL1 refusal that names WSL1). On Linux
-  with a faked WSL surface the `/run/WSL` and `/mnt/wslg` half holds; the drive mask can only be
-  judged by the next WSL run. This page is updated from that run.
+  `tests/check.sh` passed (peak RSS 1604 KB; startup not measured).
+- **Before the masks, 15 of 22 WSL-only probes got through** (run 1, main's `src/`). The worst:
+  a sandboxed command that set `WSL_INTEROP` to a socket in `/run/WSL` ran `cmd.exe`, a Windows
+  process outside the sandbox with the network.
+- **With the masks, all 23 probes are blocked** (run 3). `src/sandbox.zig` now covers `/run/WSL`,
+  `/mnt/wslg` and every drvfs drive with an empty tmpfs, the read tool refuses the same paths,
+  and `PATH` loses its Windows folders. One control failed in that run: a project on `/mnt/c`
+  could write `../x` into the tmpfs that stands in for the drive (not onto the drive). The masks
+  are read-only since; that last change is awaiting its run.
+- **WSL1 fails closed and says why** (run 3, kernel `4.4.0-26100-Microsoft`): "this is WSL1,
+  which has no user namespaces. Convert the distro in Windows (wsl.exe --set-version <distro>
+  2)...". Before the change the refusal was bubblewrap's own error.
 
 ## Setup
 
@@ -85,34 +83,41 @@ Exit 0 nothing escaped, 1 an escape or a failed control, 2 not WSL, 3 a probe na
 
 ## Results
 
-WSL2, 2026-11-14, hosted `windows-2025` (WSLg was present: 6 sockets under `/mnt/wslg`):
+WSL2, hosted `windows-2025`, 2026-11-14. WSLg was present (6 sockets under `/mnt/wslg`).
 
-| Probe | Verdict |
-|---|---|
-| `interop-cmd`, `interop-powershell` | blocked (see note) |
-| `interop-sock` | **ESCAPED** |
-| `init-interop` | **ESCAPED** |
-| `interop-connect` | **ESCAPED** (`/run/WSL/1_interop`, `2_interop`, `<pid>_interop`) |
-| `interop-runwsl` | **ESCAPED** |
-| `env-interop`, `env-wslg` | blocked |
-| `winpath`, `winpath-exec` | **ESCAPED** (73 Windows folders on `PATH`) |
-| `drvfs-read` | **ESCAPED** |
-| `drvfs-write` | blocked |
-| `drvfs-ssh`, `drvfs-aws`, `drvfs-appdata` | **ESCAPED** |
-| `wslg-distro` | **ESCAPED** |
-| `wslg-sock` | **ESCAPED** (`PulseServer`, `PulseAudioRDPSink`, `PulseAudioRDPSource`, `.X11-unix/X0` under `/mnt/wslg`) |
-| `wslg-x11` | blocked |
-| `tool-read-drvfs`, `tool-grep-drvfs` | **ESCAPED** |
-| `tool-write-drvfs` | blocked |
-| `wslg-tool-read` | **ESCAPED** |
-| controls (write in the project, project on `/mnt/c`, no write next to it) | ok |
-| `tests/tui.py` | ok, 152 checks |
+| Probe | Run 1: main's sandbox | Run 3: with the masks |
+|---|---|---|
+| `interop-cmd`, `interop-powershell` | blocked (see note) | blocked |
+| `interop-sock` | **ESCAPED** | blocked |
+| `init-interop` | **ESCAPED** | blocked |
+| `interop-connect` | **ESCAPED** (`/run/WSL/1_interop`, `2_interop`, `<pid>_interop`) | blocked |
+| `interop-runwsl` | **ESCAPED** | blocked |
+| `env-interop`, `env-wslg` | blocked | blocked |
+| `winpath`, `winpath-exec` | **ESCAPED** (73 Windows folders on `PATH`) | blocked |
+| `drvfs-read` | **ESCAPED** | blocked |
+| `drvfs-write` | blocked | blocked |
+| `drvfs-ssh`, `drvfs-aws`, `drvfs-appdata` | **ESCAPED** | blocked |
+| `wslg-distro` | **ESCAPED** | blocked |
+| `wslg-runuser` | not probed yet | blocked |
+| `wslg-sock` | **ESCAPED** (`PulseServer`, `PulseAudioRDPSink`, `PulseAudioRDPSource`, `.X11-unix/X0` under `/mnt/wslg`) | blocked |
+| `wslg-x11` | blocked | blocked |
+| `tool-read-drvfs`, `tool-grep-drvfs` | **ESCAPED** | blocked |
+| `tool-write-drvfs` | blocked | blocked |
+| `wslg-tool-read` | **ESCAPED** | blocked |
+| write in the project; project on `/mnt/c` writes | ok | ok |
+| project on `/mnt/c` cannot write next to itself | ok | **FAIL** (into the mask's tmpfs; masks read-only since, awaiting a run) |
+| `tests/tui.py` | ok, 152 checks | ok, 152 checks |
+| WSL1: fails closed | ok (run 2) | ok |
+| WSL1: the refusal names WSL1 | FAIL (run 2) | ok |
 
-Note on `interop-cmd`: running `cmd.exe` by path fails in the sandbox only because the command
-has no `WSL_INTEROP` and `/init` cannot find its socket from inside the pid namespace. Setting
-the variable to any socket in `/run/WSL` (`interop-sock`) is enough, so this is not a defence.
+Note on `interop-cmd` in run 1: running `cmd.exe` by path failed in the sandbox only because the
+command had no `WSL_INTEROP` and `/init` could not find its socket from inside the pid
+namespace. Setting the variable (`interop-sock`) was enough, so that was not a defence; the
+mask over `/run/WSL` is.
 
-WSL1: no result yet.
+What the masks cost a user: commands the model runs cannot see `/mnt/c` or start Windows
+programs (`explorer.exe`, `clip.exe`, `code`) unless the project itself is on that drive or the
+folder is named in `AWL_SANDBOX_WRITE`. Your own `!cmd` is not sandboxed.
 
 The job summary of each matrix leg has the facts of that WSL (kernel, `wsl.conf`, mounts,
 `/run/WSL`, `/mnt/wslg`) and the result block of `tests/wsl.sh`.
