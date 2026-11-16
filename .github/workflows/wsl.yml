@@ -112,7 +112,10 @@ jobs:
           else
             # WSL1 runs only tests/wsl.sh. Nothing that touches systemd: its package scripts fail
             # there ("Failed to take /etc/passwd lock") and leave dpkg broken.
-            apt-get install -yq --no-upgrade bubblewrap python3 git file
+            # ripgrep and fd: awl offers its grep and find tools only when they exist, and
+            # tests/nosandbox.sh counts their refusals.
+            apt-get install -yq --no-upgrade bubblewrap python3 git file ripgrep fd-find
+            ln -sf "$(command -v fdfind)" /usr/bin/fd
           fi
           echo "127.0.0.1 awl-e2e.test" >>/etc/hosts
           id dev >/dev/null 2>&1 || useradd -m -s /bin/bash dev
