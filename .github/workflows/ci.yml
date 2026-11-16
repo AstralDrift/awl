@@ -144,7 +144,7 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           mkdir -p .zig-cache
-          docker run --rm --privileged -e CI=true -v "$PWD":/work -w /work archlinux:latest bash -ec 'pacman -Sy --noconfirm bubblewrap python git ripgrep fd util-linux curl iproute2 procps-ng >/dev/null; useradd -m tester; u=$(id -u tester); mkdir -p /run/user/$u; chown tester /run/user/$u; chmod -R a+rwX .zig-cache; su tester -c "bash tests/sandbox.sh zig-out/bin/awl && bash tests/nosandbox.sh zig-out/bin/awl"'
+          docker run --rm --privileged -e CI=true -v "$PWD":/work -w /work archlinux:latest bash -ec 'pacman -Sy --noconfirm bubblewrap python git ripgrep fd util-linux curl iproute2 procps-ng diffutils >/dev/null; useradd -m tester; u=$(id -u tester); mkdir -p /run/user/$u; chown tester /run/user/$u; chmod -R a+rwX .zig-cache; su tester -c "bash tests/sandbox.sh zig-out/bin/awl && bash tests/nosandbox.sh zig-out/bin/awl"'
 
   # Every commit on main gets downloadable release binaries (zig build release; same
   # flags as a release, but the Zig comes from mise, not release.sh's checked download).
