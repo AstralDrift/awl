@@ -69,6 +69,10 @@ pub fn init(cwd: []const u8) void {
     var pb: [16384]u8 = undefined;
     const base = if (sys.getenv("AWL_SYSTEM")) |p| (sys.readFile(p, &pb) catch base_prompt) else base_prompt;
     bufm.escape(&head, base);
+    // Root-cause line, on by default since 2026-11-03 (Qwen t3 x3: 30/30 vs 28/30 without it; arena/LOG.md).
+    // AWL_ROOTCAUSE=0 leaves it out (arena A/B against the old prompt).
+    if (!std.mem.eql(u8, sys.getenv("AWL_ROOTCAUSE") orelse "", "0"))
+        bufm.escape(&head, "\n- Fix root causes, not symptoms: when you find a bug, check for other places and other causes with the same flaw, and fix them all.");
     const es = std.time.epoch.EpochSeconds{ .secs = @intCast(sys.wallSec()) };
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();

@@ -51,6 +51,7 @@ const usage =
     \\     AWL_THINKING (off: ask the chat template for no thinking on every request)
     \\     AWL_KEEP_REASONING (N: send only the newest N turns' reasoning back; 0: none)
     \\     AWL_THINK_ROWS (reasoning rows shown live, default 6; 0: timer only)
+    \\     AWL_ROOTCAUSE (0: leave out the system prompt line asking for root-cause fixes that cover every instance)
     \\     AWL_CTX_MODE (fresh: fresh context + session view when the window fills; compact: a summary)
     \\     AWL_DEBUG_KEYS=FILE (log raw input, escaped: for keyboard / paste problems)
     \\     AWL_TITLE (off: leave the terminal title alone) NO_COLOR (any value: no colors)
