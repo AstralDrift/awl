@@ -21,8 +21,8 @@ WSL1: nothing escaped, nothing untested.
   refuses the same paths, and `PATH` loses its Windows folders. In run 3 one control failed: a
   project on `/mnt/c` could write `../x` into the tmpfs that stands in for the drive (not onto
   the drive). The masks are read-only since, and run 4 passed that control too.
-- **The masks are on PR 28's branch, not on `main`**, and the README still tells WSL users to
-  set `AWL_SANDBOX=off`. Both change when the PR's sandbox commits land.
+- **The masks are on `main`** (since `5af0213`, merged with the other sandbox work of that
+  week). The run on that combined tree is recorded below when it has happened.
 - **WSL1 fails closed and says why** (run 3, kernel `4.4.0-26100-Microsoft`): "this is WSL1,
   which has no user namespaces. Convert the distro in Windows (wsl.exe --set-version <distro>
   2)...". Before the change the refusal was bubblewrap's own error.

@@ -85,7 +85,11 @@ pub fn build(b: *std.Build) void {
 
     const sbx = b.addSystemCommand(&.{ "timeout", "20m", "bash", "tests/sandbox.sh" });
     sbx.addArtifactArg(exe);
-    b.step("sandbox", "Sandbox escape checks against tests/fake_sse.py").dependOn(&sbx.step);
+    // and what awl does without a working sandbox (AWL_SANDBOX=off; bubblewrap unable to start)
+    const nosbx = b.addSystemCommand(&.{ "timeout", "5m", "bash", "tests/nosandbox.sh" });
+    nosbx.addArtifactArg(exe);
+    nosbx.step.dependOn(&sbx.step);
+    b.step("sandbox", "Sandbox escape checks against tests/fake_sse.py").dependOn(&nosbx.step);
 }
 
 fn gitCommit(b: *std.Build) []const u8 {

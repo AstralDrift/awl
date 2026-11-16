@@ -50,7 +50,7 @@ awl reads only its environment; it has no config file. An embedder sets:
 | `AWL_URL` | OpenAI-compatible base URL, e.g. `http://127.0.0.1:8080`. awl sends `/v1/models` and `/v1/chat/completions` under it. |
 | `AWL_KEY` | Sent as `Authorization: Bearer <key>`. **When it is set, even to the empty string, awl uses it as is and never reads a key file.** Unset, awl reads `$HOME/.local/state/omarchy/local-ai/gateway.key`. An embedder should always set it. |
 | `AWL_MODEL` | Model name. Unset, awl uses the first model `/v1/models` lists. |
-| `AWL_MODE` | `auto` (no approvals), `ask`, or `plan` (files read-only). Under `-p` nobody can approve, so `ask` behaves like `auto` except for the refusals below. |
+| `AWL_MODE` | `auto` (no approvals), `ask`, or `plan` (files read-only). Under `-p` nobody can approve: `ask` refuses every command and file change (`not run: ask mode needs…`, `not written: ask mode needs…`), and `plan` runs bash in a sandbox of its own with the project mounted read-only (no background jobs). Use `auto` for unattended runs. |
 | `AWL_MAX_STEPS` | Model replies per run (default 200). |
 | `AWL_NETWORK` | `off`: a command that asks for the network (`network: true`) is refused at once, with `not run: AWL_NETWORK=off: …` as its result, and `AWL_SANDBOX_NET=on` is ignored. The model is told in its system prompt. Any other value, or unset: the default (no network for commands; under `-p` a `network: true` command is refused because nobody can approve it). |
 | `AWL_SUMMARY` | A file path. When the `-p` run ends, awl writes one JSON object there saying how it went (see [Run summary](#run-summary)). |
@@ -58,8 +58,11 @@ awl reads only its environment; it has no config file. An embedder sets:
 | `XDG_STATE_HOME` | Session files go to `$XDG_STATE_HOME/awl/sessions/`, else `$HOME/.local/state/awl/sessions/`. |
 | `XDG_CONFIG_HOME` | User config, else `$HOME/.config`. |
 
-The model's commands get awl's environment minus every variable that starts with `AWL_`, so
-`AWL_KEY` never reaches them. Any other variable you set does reach them.
+The model's commands get only the variables on a short allowlist (`envOk` in `src/sandbox.zig`:
+`PATH`, `HOME`, `LANG`, `TERM` and the like, `LC_*`, and the `MISE_*`/`ASDF_*` tool settings), and
+never one whose name contains TOKEN, KEY, SECRET, PASS, AUTH, CRED, COOKIE or SESSION. So `AWL_KEY`
+never reaches them, and neither does a variable of your own: pass what a command needs in a file,
+or through `AGENTS.md`. This holds with `AWL_SANDBOX=off` too (tested in `tests/nosandbox.sh`).
 
 `awl -h` lists the other settings. Leave `AWL_SANDBOX` unset: awl then runs every command in its own
 bubblewrap sandbox with no network, and refuses commands when `/usr/bin/bwrap` is missing or cannot
@@ -182,7 +185,7 @@ A call that did not run has one of these results instead. Each opening is stable
 | `[skipped: ` | An earlier call in the same reply was interrupted. |
 | `not written: ` | `write`/`edit` outside the sandbox's writable paths, or to a guarded file (`.git/config`, `.git/hooks`, `AGENTS.md`, `.agents`) with nobody to approve. |
 | `invalid arguments for ` | Arguments were not JSON, or a field was missing or of the wrong type. |
-| `Plan mode: ` | `AWL_MODE=plan` and the call would change a file. |
+| `Plan mode: ` | `AWL_MODE=plan` and the call would change a file. A plan-mode bash command that writes to the project gets the shell's own `Read-only file system` error instead. |
 | `too many background jobs` | 16 already run. |
 | `The user declined` | A person said no (TUI and background agents only, never `-p`). |
 | `unknown tool: ` | The model named a tool awl does not have. |

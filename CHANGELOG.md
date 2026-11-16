@@ -4,6 +4,31 @@ Releases are tags `vX.Y.Z` on `main`; each attaches `awl-linux-x86_64`, `awl-lin
 `SHA256SUMS` (docs/releasing.md). Before 1.0 a minor bump may break the embedding contract
 (docs/embedding.md); a patch release never does.
 
+## Unreleased
+
+**Breaks the embedding contract** (docs/embedding.md): under `awl -p`, `AWL_MODE=ask` now refuses
+commands and file changes (it behaved like `auto`), and `AWL_MODE=plan` runs bash with the project
+read-only. Unattended runs that relied on either need `AWL_MODE=auto`.
+
+**Sandbox**
+- write/edit refuse `~/.ssh` and the other secret folders, and awl's session files, also when the
+  project is the home folder or `AWL_SANDBOX_WRITE` contains them.
+- `$HOME` is resolved once: a home that is a symlink or ends in `/` hides its secrets from read,
+  and the sandbox starts there.
+- A command that creates a missing `AGENTS.md`, `.agents` or `.git/hooks` has it moved to
+  `<name>.awl-refused` after the tool call.
+- Plan mode: commands run with the project mounted read-only.
+- A command with `network: true` and a plan-mode command no longer need bubblewrap 0.8: they work
+  on Ubuntu 22.04 (bubblewrap 0.6).
+- awl's own temp files: the `AWL_SUMMARY` temp file is no longer written through a planted link;
+  the Ctrl-G prompt and `/diff` output moved out of `/tmp`; `write` to a FIFO no longer hangs.
+
+**Tests**
+- No check can pass by skipping: missing bubblewrap fails the sandbox suite, and any skip fails
+  under `CI=true`. `tests/nosandbox.sh` covers `AWL_SANDBOX=off` and a sandbox that cannot start.
+- CI runs Ubuntu 22.04, Fedora, Debian, root, stock Ubuntu 24.04 and unprivileged containers, and
+  every suite against the release binary. `tests/claims.txt` ties each sandbox promise to its check.
+
 ## v0.1.0 (2026-11-02)
 
 The first release: everything from the v1 build order (PLAN.md) plus the October arena work.

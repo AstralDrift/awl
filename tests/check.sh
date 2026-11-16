@@ -24,6 +24,7 @@ if command -v hyperfine >/dev/null; then
   python3 -c "import sys; sys.exit(0 if $ms <= 3 else 1)" || fail "startup ${ms} ms > 3 ms"
   ok "startup ${ms} ms"
 else
+  [ "${CI:-}" = true ] && fail "no hyperfine: the startup budget cannot be checked"
   echo "skip startup (no hyperfine)"
 fi
 

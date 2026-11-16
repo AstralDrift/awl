@@ -177,6 +177,11 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
   a short allowlist (names with TOKEN, KEY, SECRET, PASS, AUTH, ... never pass). They cannot create user
   namespaces. The project's `.git/config`, `.git/hooks`, `AGENTS.md` and `.agents/` are read-only to them,
   since git runs hooks and fsmonitor outside the sandbox and the next session reads those instructions.
+  One of these that does not exist yet cannot be made read-only, so if a command creates it awl moves it
+  to `<name>.awl-refused` after that tool call and says so. Limits: an `AGENTS.md` in a subfolder is guarded
+  for write/edit only (a command can still create or change one); a guarded file you approve mid-session is
+  not read-only to commands until the next session; and in a folder with no `.git`, a repository the model
+  creates with `git init` is its own, hooks and config included: look at them before you use git there.
 - **No network unless you say yes.** Commands share a private localhost (a dev server started in the
   background is reachable from the next command) but nothing beyond it. When the model needs the
   internet it sets `network: true` on one bash call; awl shows the command and asks `allow? y/n` in every
@@ -193,7 +198,38 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 - `/mode auto` (default) runs everything; `/mode ask` shows each edit's diff and each command
   and waits for y/n (p = always allow this command's prefix, e.g. `zig build`, for the session;
   a command that chains, substitutes or redirects still asks; a = allow the rest: switches to auto); `/mode plan` keeps files read-only and asks before
-  commands, so the model investigates and proposes. `AWL_MODE` sets the starting mode.
+  commands, so the model investigates and proposes; its commands run with the project mounted read-only.
+  `AWL_MODE` sets the starting mode. With no terminal (`awl -p`) nobody can approve, so `ask` refuses
+  every command and file change.
+
+### Where the sandbox is tested
+
+Each row is a CI job or step (`.github/workflows/ci.yml`) that runs on every change, with no check
+allowed to skip.
+
+| Where | What is checked |
+|---|---|
+| Ubuntu 24.04, x86_64 and aarch64 | every suite, for the host build and for the release binary |
+| Ubuntu 22.04 (bubblewrap 0.6) | every suite |
+| Fedora, Debian 12, Arch Linux | the sandbox suite |
+| root in a container | the sandbox suite: no capability survives into a command |
+| Stock Ubuntu 24.04 | commands are refused with the reason; see below |
+| A container without privileges, a host without bubblewrap | commands are refused with the reason; read/write keep their rules |
+| `AWL_SANDBOX=off` | commands run; the environment allowlist still applies |
+| WSL2 (Ubuntu 24.04 on a Windows runner; `wsl.yml`, on sandbox changes) | every suite on the release binary, and the WSL-only ways out: Windows programs through `/run/WSL`, the Windows drives, WSLg ([docs/wsl.md](docs/wsl.md)) |
+| WSL1 (`wsl.yml`) | commands are refused, and the reason names WSL1 and how to convert the distro |
+
+Ubuntu 24.04 and later block unprivileged user namespaces through AppArmor, which stops bubblewrap.
+awl then refuses the model's commands rather than run them unsandboxed. To let bubblewrap work:
+
+    echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-awl-userns.conf
+    sudo sysctl --system
+
+That setting applies to every program on the machine, not only awl. WSL2 needs none of this:
+bubblewrap works there as installed. Inside the sandbox on WSL the Windows drives (`/mnt/c`),
+`/run/WSL` and `/mnt/wslg` are empty and Windows folders are gone from `PATH`, so the model's
+commands cannot read Windows files or start Windows programs; a project on a Windows drive still
+works. Not tested yet: macOS (awl is Linux only; run it in a Linux container or VM).
 
 ## What it loads
 
@@ -237,7 +273,7 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
 | `AWL_SUMMARY` | unset | with `-p`: a file awl writes one JSON object to when the run ends (status, exit, steps, tool calls, each command's outcome, files written; [docs/embedding.md](docs/embedding.md#run-summary)) |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |
 | `AWL_AGENTS` | on | `off` loads no AGENTS.md files (clean evals and benchmarks) |
-| `AWL_SANDBOX` | on | `off`: the model's commands run unsandboxed (no bubblewrap: WSL, some containers). See Safety |
+| `AWL_SANDBOX` | on | `off`: the model's commands run unsandboxed (no bubblewrap: WSL1, some containers; WSL2 runs the sandbox). See Safety |
 | `AWL_SANDBOX_NET` | off | `on`: every command gets the host network without asking |
 | `AWL_NETWORK` | unset | `off`: a command that asks for the network is refused without asking anyone, and `AWL_SANDBOX_NET=on` is ignored (CI, sandboxes) |
 | `AWL_SANDBOX_WRITE` | unset | `dir:dir`: more places commands may write (the project, `/tmp` and build caches always are) |

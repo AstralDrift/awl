@@ -28,7 +28,7 @@ jobs:
         with:
           fetch-depth: 0 # lint checks the commit messages this branch adds over main
       # Zig and the lint tools, pinned in mise.toml
-      - uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
       - name: zig fmt, project rules, Zig pins, shellcheck, ruff, actionlint
         run: zig build lint
 
@@ -36,12 +36,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm] # x86_64 and aarch64
+        # x86_64 and aarch64; 22.04 for its older bubblewrap (0.6) and kernel
+        os: [ubuntu-24.04, ubuntu-24.04-arm, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45 # the suites run twice: the host build, then the release binary
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
           install_args: zig hyperfine # the lint tools are the lint job's
       - name: Tools the tests use
@@ -49,8 +50,15 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -yq bubblewrap ripgrep fd-find
           sudo ln -sf "$(command -v fdfind)" /usr/bin/fd
-          # Ubuntu 24.04 blocks unprivileged user namespaces; awl's sandbox (bubblewrap) needs them
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Ubuntu 24.04 blocks unprivileged user namespaces; awl's sandbox (bubblewrap) needs them.
+          # (The "stock" job below runs without this, as a fresh install does.)
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          # No check may skip under CI: e2e resolves this name through /etc/hosts, and the
+          # sandbox test puts a stand-in user bus in /run/user/<uid> to prove it is hidden.
+          echo "127.0.0.1 awl-e2e.test" | sudo tee -a /etc/hosts
+          sudo mkdir -p "/run/user/$(id -u)" && sudo chown "$(id -u)" "/run/user/$(id -u)"
       - name: Build
         run: zig build -Doptimize=ReleaseSmall
       - name: Unit tests (Debug, runtime safety checks on)
@@ -66,21 +74,86 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
       - name: End-to-end and TUI tests
         run: zig build e2e
-      - name: Sandbox escape tests
+      - name: Sandbox escape tests; sandbox off and sandbox unable to start
         run: zig build sandbox
+      # The bytes a release ships (baseline CPU, zig build release), not only the host-CPU build
+      # above: same suites.
+      - name: The release binary passes the same suites
+        run: |
+          zig build release
+          rel="$PWD/zig-out/release/awl-linux-$(uname -m)"
+          sh tests/check.sh "$rel"
+          bash tests/e2e.sh "$rel"
+          bash tests/embed.sh "$rel"
+          bash tests/sandbox.sh "$rel"
+          bash tests/nosandbox.sh "$rel"
       - name: Offline arena proxy test
         run: python3 arena/test_proxy.py "$PWD/zig-out/bin/awl"
+
+  # The sandbox where it cannot be the developer's machine: other distributions, root, and
+  # hosts where bubblewrap cannot start or is not installed. The binary is static, so one
+  # build runs in every container.
+  platforms:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          install_args: zig
+      - name: Build
+        run: zig build -Doptimize=ReleaseSmall
+      - name: Stock Ubuntu 24.04 (AppArmor blocks bubblewrap) refuses commands, never runs them unsandboxed
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq bubblewrap ripgrep fd-find
+          sudo ln -sf "$(command -v fdfind)" /usr/bin/fd
+          [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1 ]
+          bash tests/nosandbox.sh zig-out/bin/awl off blocked
+      - name: A container without privileges (bubblewrap cannot start) and one without bubblewrap
+        run: |
+          deb='export DEBIAN_FRONTEND=noninteractive; apt-get update -q >/dev/null; apt-get install -yq python3 git ripgrep fd-find util-linux'
+          docker run --rm -e CI=true -v "$PWD":/work -w /work ubuntu:24.04 bash -ec "$deb bubblewrap >/dev/null; ln -sf /usr/bin/fdfind /usr/bin/fd; bash tests/nosandbox.sh zig-out/bin/awl off blocked"
+          docker run --rm -e CI=true -v "$PWD":/work -w /work debian:12 bash -ec "$deb >/dev/null; ln -sf /usr/bin/fdfind /usr/bin/fd; bash tests/nosandbox.sh zig-out/bin/awl off missing"
+      - name: The full sandbox suite as root, on Fedora and on Debian
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          deb='export DEBIAN_FRONTEND=noninteractive; apt-get update -q >/dev/null; apt-get install -yq bubblewrap python3 git ripgrep fd-find util-linux curl iproute2 systemd procps >/dev/null; ln -sf /usr/bin/fdfind /usr/bin/fd'
+          rpm='dnf install -yq bubblewrap python3 git ripgrep fd-find util-linux curl iproute systemd procps-ng findutils >/dev/null'
+          # shellcheck disable=SC2016
+          user='useradd -m tester; u=$(id -u tester); mkdir -p /run/user/$u; chown tester /run/user/$u; chmod -R a+rwX .zig-cache; su tester -c "bash tests/sandbox.sh zig-out/bin/awl && bash tests/nosandbox.sh zig-out/bin/awl"'
+          mkdir -p .zig-cache
+          # uid 0 keeps its capabilities across exec: the bounding set must be empty in the sandbox
+          docker run --rm --privileged -e CI=true -v "$PWD":/work -w /work ubuntu:24.04 bash -ec "$deb; mkdir -p /run/user/0; bash tests/sandbox.sh zig-out/bin/awl"
+          docker run --rm --privileged -e CI=true -v "$PWD":/work -w /work fedora:latest bash -ec "$rpm; $user"
+          docker run --rm --privileged -e CI=true -v "$PWD":/work -w /work debian:12 bash -ec "$deb; $user"
+
+  # Arch (the developer's desktop is Arch-based). x86_64 only: there is no arm64 image.
+  arch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          install_args: zig
+      - run: zig build -Doptimize=ReleaseSmall
+      - name: The full sandbox suite on Arch Linux
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          mkdir -p .zig-cache
+          docker run --rm --privileged -e CI=true -v "$PWD":/work -w /work archlinux:latest bash -ec 'pacman -Sy --noconfirm bubblewrap python git ripgrep fd util-linux curl iproute2 procps-ng diffutils >/dev/null; useradd -m tester; u=$(id -u tester); mkdir -p /run/user/$u; chown tester /run/user/$u; chmod -R a+rwX .zig-cache; su tester -c "bash tests/sandbox.sh zig-out/bin/awl && bash tests/nosandbox.sh zig-out/bin/awl"'
 
   # Every commit on main gets downloadable release binaries (zig build release; same
   # flags as a release, but the Zig comes from mise, not release.sh's checked download).
   binaries:
     if: github.event_name == 'push'
-    needs: [lint, test]
+    needs: [lint, test, platforms, arch]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
           install_args: zig
       - run: |

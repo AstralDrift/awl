@@ -10,6 +10,7 @@ const session = @import("session.zig");
 const http = @import("http.zig");
 const Buf = @import("buf.zig").Buf;
 const tools = @import("tools.zig");
+const sandbox = @import("sandbox.zig");
 const llm = @import("llm.zig");
 const screen = @import("screen.zig");
 const agents = @import("agents.zig");
@@ -731,16 +732,21 @@ fn queueDraft() void {
 
 /// /diff: every change git sees, new files included, colored.
 fn showDiff() void {
-    var pb: [64]u8 = undefined;
-    const path = std.fmt.bufPrint(&pb, "/tmp/awl-diff-{d}.txt", .{linux.getpid()}) catch return;
-    var cb: [400]u8 = undefined;
-    const cmd = std.fmt.bufPrintZ(&cb, "{{ git --no-pager diff HEAD 2>/dev/null || git --no-pager diff; git ls-files --others --exclude-standard -z | xargs -0 -r -n1 git --no-pager diff --no-index -- /dev/null; }} >{s} 2>&1", .{path}) catch return;
+    // The output file is where commands cannot reach it, and noclobber (set -C) creates it
+    // O_EXCL: a link planted at its name is not written through.
+    var pb: [600]u8 = undefined;
+    var path: []const u8 = sandbox.scratch(&pb, "diff.txt") orelse return;
+    if (std.mem.indexOfScalar(u8, path, '\'') != null) path = std.fmt.bufPrintZ(&pb, "/tmp/.awl-diff-{d}", .{linux.getpid()}) catch return;
+    var zb: [600]u8 = undefined;
+    _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&zb, path), 0);
+    var cb: [1200]u8 = undefined;
+    const cmd = std.fmt.bufPrintZ(&cb, "set -C; {{ git --no-pager diff HEAD 2>/dev/null || git --no-pager diff; git ls-files --others --exclude-standard -z | xargs -0 -r -n1 git --no-pager diff --no-index -- /dev/null; }} >'{s}' 2>&1", .{path}) catch return;
     var o = Buf.init(64 << 10);
     defer o.free();
     _ = tools.userShell(cmd, &o) catch {};
     var d = Buf.init(64 << 20);
     defer d.free();
-    const f = sys.open(path, .{ .CLOEXEC = true }, 0) catch return;
+    const f = sys.open(path, .{ .CLOEXEC = true, .NOFOLLOW = true }, 0) catch return;
     while (true) {
         const dst = d.extend(1 << 16);
         const got = sys.read(f, dst) catch 0;
@@ -748,7 +754,6 @@ fn showDiff() void {
         if (got == 0) break;
     }
     sys.close(f);
-    var zb: [64]u8 = undefined;
     _ = linux.unlinkat(linux.AT.FDCWD, sys.z(&zb, path), 0);
     const text = std.mem.trimEnd(u8, d.items(), "\n");
     if (text.len == 0) return ui.note("no changes", .{});
@@ -1799,9 +1804,12 @@ const Editor = struct {
 
     /// Ctrl-G: write the prompt in $VISUAL / $EDITOR (vi if neither is set).
     fn externalEditor(self: *Editor) void {
-        var pb: [64]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&pb, "/tmp/awl-prompt-{d}.md", .{linux.getpid()}) catch return;
-        const f = sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600) catch return ui.note("cannot write {s}", .{path});
+        // Where commands cannot reach it (a background job could swap a file in /tmp for a
+        // link while the editor is open), created fresh and never through a link.
+        var pb: [600]u8 = undefined;
+        const path = sandbox.scratch(&pb, "prompt.md") orelse return;
+        _ = linux.unlinkat(linux.AT.FDCWD, path, 0);
+        const f = sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600) catch return ui.note("cannot write {s}", .{path});
         sys.writeAll(f, self.text[0..self.len]) catch {};
         sys.close(f);
         defer _ = linux.unlinkat(linux.AT.FDCWD, path, 0);

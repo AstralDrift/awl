@@ -1,0 +1,63 @@
+# Every promise the docs make about the sandbox, and the check that proves it.
+# file | text that must appear in that file (the check) | the promise (README "Safety", docs/embedding.md)
+# tests/lint.sh fails when a check named here is gone. Add a line with every new promise.
+tests/sandbox.sh | ESCAPED-net | commands have no network
+tests/sandbox.sh | ESCAPED-hostlocal | commands cannot reach the host's localhost
+tests/sandbox.sh | ESCAPED-metadata | commands have no route to the cloud metadata address
+tests/sandbox.sh | INSIDE-shared | commands share a private localhost: a background server is reachable from the next command
+tests/sandbox.sh | network: true refused without a terminal | network: true needs the user's yes; with no terminal the answer is no
+tests/tui.py | def lockdown | network: true asks y/n in every mode; a guarded write asks every time
+tests/embed.sh | AWL_NETWORK=off: network commands refused | AWL_NETWORK=off refuses and overrides AWL_SANDBOX_NET=on
+tests/embed.sh | AWL_SANDBOX_NET=on alone shares the host network | AWL_SANDBOX_NET=on gives every command the network
+tests/sandbox.sh | ESCAPED-userns | commands cannot create user namespaces
+tests/sandbox.sh | INSIDE-noprivs | commands hold no capability and cannot gain one (no_new_privs), as root too (CI platforms job)
+tests/sandbox.sh | ESCAPED-env | only allowlisted environment variables reach commands
+src/sandbox.zig | test "sandbox: environment allowlist" | names with TOKEN, KEY, SECRET, PASS, AUTH never pass
+tests/sandbox.sh | ESCAPED-procenv | commands cannot see other processes or their environment
+tests/sandbox.sh | ESCAPED-sshbash | commands cannot read ~/.ssh
+tests/sandbox.sh | ESCAPED-secrets | commands cannot read ~/.gnupg, ~/.aws, gh, keyrings, ~/.docker, ~/.kube and the other hidden folders
+tests/sandbox.sh | grep hides every secret folder | grep finds nothing in the hidden folders
+tests/sandbox.sh | read/grep hide ~/.ssh | read and grep refuse ~/.ssh, directly and through links
+tests/sandbox.sh | read and bash hide ~/.ssh, the sandbox starts | secrets stay hidden when $HOME is a symlink or ends in a slash
+tests/sandbox.sh | project is the home folder: write refuses | write/edit never reach secrets or session files, even inside a writable place
+tests/sandbox.sh | ESCAPED-sessions | commands cannot read other sessions
+tests/sandbox.sh | ESCAPED-viewwrite | this run's session view is read-only to commands
+tests/sandbox.sh | read/grep hide other sessions | read and grep refuse other sessions
+tests/sandbox.sh | ESCAPED-runuser | /run/user (the user's bus and sockets) is hidden
+tests/sandbox.sh | ESCAPED-dbus | the user's D-Bus session is unreachable
+tests/sandbox.sh | sockets in /tmp hidden two levels deep | sockets under /tmp are hidden two levels deep
+tests/sandbox.sh | AWL_SANDBOX_SOCKETS leaves exactly | AWL_SANDBOX_SOCKETS keeps the named sockets reachable
+tests/sandbox.sh | INSIDE-made | commands can write in the project
+tests/sandbox.sh | INSIDE-tmp | commands can write in /tmp
+tests/sandbox.sh | symlink out of project refused | write/edit resolve symlinks and ".." before the write rule; planted log links are not followed
+tests/sandbox.sh | ESCAPED-gitconfig | .git/config is read-only to commands
+tests/sandbox.sh | ESCAPED-githooks | .git/hooks is read-only to commands
+tests/sandbox.sh | ESCAPED-agentsmd | AGENTS.md is read-only to commands
+tests/sandbox.sh | ESCAPED-skills | .agents/ is read-only to commands
+tests/sandbox.sh | a command cannot leave a new AGENTS.md | a guarded path a command creates is moved to <name>.awl-refused
+tests/sandbox.sh | .git/config unchanged | write/edit to .git need the user's yes; with no terminal, no
+tests/sandbox.sh | AGENTS.md unchanged | write/edit to AGENTS.md need the user's yes; with no terminal, no
+tests/sandbox.sh | read of a FIFO is refused | read refuses what is not a regular file
+tests/sandbox.sh | write over a FIFO replaces it | write does not hang on a FIFO
+tests/sandbox.sh | AWL_SUMMARY: a link planted | awl's own temp files are not written through planted links
+tests/sandbox.sh | plan mode without a terminal | plan mode: commands run with the project read-only
+tests/sandbox.sh | ask mode without a terminal | ask mode with nobody to ask refuses commands and file changes
+tests/nosandbox.sh | refused "no bubblewrap" | without /usr/bin/bwrap the model's commands are refused
+tests/nosandbox.sh | refused "sandbox cannot start" | when bubblewrap cannot start, commands are refused; awl never runs them unsandboxed on its own
+tests/nosandbox.sh | read/write still follow the path rules | without a working sandbox read/write keep their rules
+tests/nosandbox.sh | AWL_SANDBOX=off: the environment allowlist still applies | AWL_SANDBOX=off turns the sandbox off but not the environment allowlist
+tests/sandbox.sh | job pid is the group the model can kill | the model can stop its own background job
+tests/sandbox.sh | taking the refused names first | a command cannot keep a new guarded file by occupying the names awl moves it to
+tests/sandbox.sh | no repository at the start: git init | in a folder with no repository the model can create one
+tests/sandbox.sh | plan mode with AWL_SANDBOX_NET=on | AWL_SANDBOX_NET=on gives every command the network, in plan mode too
+tests/wsl.sh | interop-sock | WSL: commands cannot start Windows programs through the interop sockets in /run/WSL
+tests/wsl.sh | interop-connect | WSL: /run/WSL is empty in the sandbox
+tests/wsl.sh | drvfs-ssh | WSL: commands cannot read the Windows drives (.ssh, .aws, AppData of the Windows profile)
+tests/wsl.sh | tool-read-drvfs | WSL: read and grep refuse the Windows drives
+tests/wsl.sh | wslg-distro | WSL: ~/.ssh cannot be read through /mnt/wslg/distro; /mnt/wslg is empty
+tests/wsl.sh | wslg-sock | WSL: commands cannot reach WSLg's X11, Wayland and PulseAudio sockets
+tests/wsl.sh | winpath-exec | WSL: Windows folders are gone from PATH
+tests/wsl.sh | a project on the Windows drive: commands write in it | WSL: a project on a Windows drive still works
+tests/wsl.sh | a project on the Windows drive: no write outside it | WSL: a project on a Windows drive cannot write next to itself
+tests/wsl.sh | WSL1: the refusal names WSL1 | WSL1: commands are refused and the reason names WSL1
+src/sandbox.zig | test "sandbox: WSL masks hide Windows from read and from PATH" | WSL: the project, caches and AWL_SANDBOX_WRITE stay visible under a mask
