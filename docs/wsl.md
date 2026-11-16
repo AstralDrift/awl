@@ -157,6 +157,6 @@ user names are replaced by `<user>`.
 - One distro (Ubuntu-24.04), default `wsl.conf` (interop on, Windows `PATH` appended, drives
   auto-mounted under `/mnt`). A custom `automount.root`, mirrored networking, or drives mounted
   elsewhere are not covered; the drive probes look under `/mnt/<letter>` only.
-- The workflow starts on changes to its own three files. A sandbox change does not start it:
-  dispatch it by hand on that branch (possible once `wsl.yml` is on `main`; before that, the
-  branch has to contain these files and touch one of them).
+- The workflow starts on changes to its own three files and to `src/sandbox.zig`,
+  `src/tools.zig` and `tests/sandbox.sh`. Any other change that could matter on WSL needs a
+  manual dispatch (possible once `wsl.yml` is on `main`).

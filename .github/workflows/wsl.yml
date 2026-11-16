@@ -2,8 +2,8 @@ name: WSL
 
 # awl's sandbox on Windows Subsystem for Linux: the Linux suite unchanged, then the WSL-only
 # escape probes (tests/wsl.sh). What it covers and what it cannot: docs/wsl.md.
-# A change to src/sandbox.zig does not start it (the path list is this workflow's own files):
-# once this file is on main, dispatch it by hand on that branch.
+# It starts on changes to its own files and to the sandbox (src/sandbox.zig, src/tools.zig,
+# tests/sandbox.sh), so the Windows minutes are only spent when WSL could be affected.
 on:
   workflow_dispatch:
     inputs:
@@ -15,6 +15,9 @@ on:
       - .github/workflows/wsl.yml
       - tests/wsl.sh
       - docs/wsl.md
+      - src/sandbox.zig
+      - src/tools.zig
+      - tests/sandbox.sh
 
 permissions:
   contents: read
@@ -167,7 +170,8 @@ jobs:
           fi
 
       # hyperfine is not installed, so check.sh skips the 3 ms startup ceiling (a nested VM's
-      # timing says nothing about awl); static, idle RSS and the 8 MB peak are checked.
+      # timing says nothing about awl); static, idle RSS and the 8 MB peak are checked. For the
+      # same reason this is the one test step without CI=true, under which a skip is a failure.
       - name: Budgets (tests/check.sh)
         if: ${{ !cancelled() && matrix.wsl == 2 }}
         shell: wsl-bash -u dev {0}
@@ -181,7 +185,7 @@ jobs:
         run: |
           cd ~/awl
           rc=0
-          timeout 20m bash tests/e2e.sh ./awl 2>&1 | tee /tmp/e2e.txt || rc=$?
+          CI=true timeout 20m bash tests/e2e.sh ./awl 2>&1 | tee /tmp/e2e.txt || rc=$?
           { echo '```'; grep -E '^FAIL|^skip|^e2e:' /tmp/e2e.txt; echo '```'; } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
           exit $rc
       - name: Sandbox escape tests (tests/sandbox.sh)
@@ -191,7 +195,7 @@ jobs:
           cd ~/awl
           [ -x /usr/bin/bwrap ] # sandbox.sh would skip and pass without it
           rc=0
-          SANDBOX_DUMP=/tmp/sandbox-dump.txt timeout 20m bash tests/sandbox.sh ./awl 2>&1 | tee /tmp/sandbox.txt || rc=$?
+          CI=true SANDBOX_DUMP=/tmp/sandbox-dump.txt timeout 20m bash tests/sandbox.sh ./awl 2>&1 | tee /tmp/sandbox.txt || rc=$?
           { echo '```'; grep -E '^FAIL|^sandbox:' /tmp/sandbox.txt; echo '```'; } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
           [ $rc -eq 0 ] || { head -c 20000 /tmp/sandbox-dump.txt 2>/dev/null; exit $rc; }
 
@@ -202,7 +206,7 @@ jobs:
         run: |
           cd ~/awl
           [ -f tests/nosandbox.sh ] || { echo "no tests/nosandbox.sh in this tree"; exit 0; }
-          bash tests/nosandbox.sh ./awl off blocked
+          CI=true bash tests/nosandbox.sh ./awl off blocked
 
       # Both versions. On WSL2 the interop, drive and tool probes must be testable here (a probe
       # that cannot fire unsandboxed either is "untested", exit 3); WSLg may be absent on a server.
