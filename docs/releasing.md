@@ -11,7 +11,7 @@ A release is a `vX.Y.Z` tag on a `main` commit that passed CI. The Release workf
 | `zig build test` | unit tests in Debug (overflow, bounds and `unreachable` checks on) | CI on x86_64 and aarch64 |
 | `zig build check` | static binary, startup under 3 ms, peak RSS under 8 MB; reports size and idle RSS | CI, numbers in each run's summary |
 | `zig build e2e`, `zig build sandbox` | end-to-end, TUI, embedder contract, sandbox escapes, sandbox off or unable to start, against `tests/fake_sse.py`. A check that cannot run fails under `CI=true` instead of skipping. | CI on Ubuntu 24.04 (x86_64, aarch64) and 22.04, for the host build and for the release binary (needs Linux and bubblewrap) |
-| CI `platforms` job | the sandbox suite as root, on Fedora and on Debian; commands refused on a stock Ubuntu 24.04, in an unprivileged container, and without bubblewrap | CI; `arch` (Arch Linux) reports without failing the run until it has passed once |
+| CI `platforms` job | the sandbox suite as root, on Fedora and on Debian; commands refused on a stock Ubuntu 24.04, in an unprivileged container, and without bubblewrap | CI; `arch` runs the sandbox suite on Arch Linux |
 
 Every push to `main` also uploads `awl-<commit>` (both binaries and `SHA256SUMS`) as a
 workflow artifact, kept 14 days. A weekly scheduled run catches runner image changes.

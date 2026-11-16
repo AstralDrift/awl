@@ -211,7 +211,7 @@ allowed to skip.
 |---|---|
 | Ubuntu 24.04, x86_64 and aarch64 | every suite, for the host build and for the release binary |
 | Ubuntu 22.04 (bubblewrap 0.6) | every suite |
-| Fedora, Debian 12 | the sandbox suite |
+| Fedora, Debian 12, Arch Linux | the sandbox suite |
 | root in a container | the sandbox suite: no capability survives into a command |
 | Stock Ubuntu 24.04 | commands are refused with the reason; see below |
 | A container without privileges, a host without bubblewrap | commands are refused with the reason; read/write keep their rules |
@@ -224,7 +224,7 @@ awl then refuses the model's commands rather than run them unsandboxed. To let b
     sudo sysctl --system
 
 That setting applies to every program on the machine, not only awl. Not tested yet: WSL2 (work in
-progress), Arch Linux (reports in CI, not yet required), macOS (awl is Linux only; run it in a
+progress), macOS (awl is Linux only; run it in a
 Linux container or VM).
 
 ## What it loads
