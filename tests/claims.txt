@@ -50,3 +50,15 @@ tests/sandbox.sh | job pid is the group the model can kill | the model can stop 
 tests/sandbox.sh | taking the refused names first | a command cannot keep a new guarded file by occupying the names awl moves it to
 tests/sandbox.sh | no repository at the start: git init | in a folder with no repository the model can create one
 tests/sandbox.sh | plan mode with AWL_SANDBOX_NET=on | AWL_SANDBOX_NET=on gives every command the network, in plan mode too
+tests/wsl.sh | interop-sock | WSL: commands cannot start Windows programs through the interop sockets in /run/WSL
+tests/wsl.sh | interop-connect | WSL: /run/WSL is empty in the sandbox
+tests/wsl.sh | drvfs-ssh | WSL: commands cannot read the Windows drives (.ssh, .aws, AppData of the Windows profile)
+tests/wsl.sh | tool-read-drvfs | WSL: read and grep refuse the Windows drives
+tests/wsl.sh | wslg-distro | WSL: ~/.ssh cannot be read through /mnt/wslg/distro; /mnt/wslg is empty
+tests/wsl.sh | wslg-sock | WSL: commands cannot reach WSLg's X11, Wayland and PulseAudio sockets
+tests/wsl.sh | winpath-exec | WSL: Windows folders are gone from PATH
+tests/wsl.sh | a project on the Windows drive: commands write in it | WSL: a project on a Windows drive still works
+tests/wsl.sh | a project on the Windows drive: no write outside it | WSL: a project on a Windows drive cannot write next to itself
+tests/wsl.sh | WSL1: the refusal names WSL1 | WSL1 is not supported: commands are refused and the reason names WSL1
+tests/wsl.sh | WSL1: not supported even with AWL_SANDBOX=off | WSL1 is not supported: the read tool does not work there, so AWL_SANDBOX=off is no way around it
+src/sandbox.zig | test "sandbox: WSL masks hide Windows from read and from PATH" | WSL: the project, caches and AWL_SANDBOX_WRITE stay visible under a mask

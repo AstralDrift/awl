@@ -216,6 +216,8 @@ allowed to skip.
 | Stock Ubuntu 24.04 | commands are refused with the reason; see below |
 | A container without privileges, a host without bubblewrap | commands are refused with the reason; read/write keep their rules |
 | `AWL_SANDBOX=off` | commands run; the environment allowlist still applies |
+| WSL2 (Ubuntu 24.04 on a Windows runner; `wsl.yml`, on sandbox changes) | every suite on the release binary, and the WSL-only ways out: Windows programs through `/run/WSL`, the Windows drives, WSLg ([docs/wsl.md](docs/wsl.md)) |
+| WSL1 (`wsl.yml`) | not supported: commands are refused, and the reason names WSL1 and how to convert the distro to WSL2 |
 
 Ubuntu 24.04 and later block unprivileged user namespaces through AppArmor, which stops bubblewrap.
 awl then refuses the model's commands rather than run them unsandboxed. To let bubblewrap work:
@@ -223,9 +225,12 @@ awl then refuses the model's commands rather than run them unsandboxed. To let b
     echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-awl-userns.conf
     sudo sysctl --system
 
-That setting applies to every program on the machine, not only awl. Not tested yet: WSL2 (work in
-progress), macOS (awl is Linux only; run it in a
-Linux container or VM).
+That setting applies to every program on the machine, not only awl. WSL2 needs none of this:
+bubblewrap works there as installed. Inside the sandbox on WSL the Windows drives (`/mnt/c`),
+`/run/WSL` and `/mnt/wslg` are empty and Windows folders are gone from `PATH`, so the model's
+commands cannot read Windows files or start Windows programs; a project on a Windows drive still
+works. WSL1 is not supported (convert the distro: `wsl.exe --set-version <distro> 2`). Not tested
+yet: macOS (awl is Linux only; run it in a Linux container or VM).
 
 ## What it loads
 
@@ -269,7 +274,7 @@ Linux container or VM).
 | `AWL_SUMMARY` | unset | with `-p`: a file awl writes one JSON object to when the run ends (status, exit, steps, tool calls, each command's outcome, files written; [docs/embedding.md](docs/embedding.md#run-summary)) |
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |
 | `AWL_AGENTS` | on | `off` loads no AGENTS.md files (clean evals and benchmarks) |
-| `AWL_SANDBOX` | on | `off`: the model's commands run unsandboxed (no bubblewrap: WSL, some containers). See Safety |
+| `AWL_SANDBOX` | on | `off`: the model's commands run unsandboxed (no bubblewrap: some containers). WSL2 runs the sandbox; WSL1 is not supported. See Safety |
 | `AWL_SANDBOX_NET` | off | `on`: every command gets the host network without asking |
 | `AWL_NETWORK` | unset | `off`: a command that asks for the network is refused without asking anyone, and `AWL_SANDBOX_NET=on` is ignored (CI, sandboxes) |
 | `AWL_SANDBOX_WRITE` | unset | `dir:dir`: more places commands may write (the project, `/tmp` and build caches always are) |
