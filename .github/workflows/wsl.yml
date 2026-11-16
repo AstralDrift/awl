@@ -51,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        wsl: [2, 1] # 1: no user namespaces, so awl must refuse the model's commands and say why
+        wsl: [2, 1] # 1: not supported; awl must refuse the model's commands and say why
     name: WSL${{ matrix.wsl }}
     runs-on: ${{ inputs.runner || 'windows-2025' }}
     timeout-minutes: 60
@@ -112,10 +112,7 @@ jobs:
           else
             # WSL1 runs only tests/wsl.sh. Nothing that touches systemd: its package scripts fail
             # there ("Failed to take /etc/passwd lock") and leave dpkg broken.
-            # ripgrep and fd: awl offers its grep and find tools only when they exist, and
-            # tests/nosandbox.sh counts their refusals.
-            apt-get install -yq --no-upgrade bubblewrap python3 git file ripgrep fd-find
-            ln -sf "$(command -v fdfind)" /usr/bin/fd
+            apt-get install -yq --no-upgrade bubblewrap python3 git file
           fi
           echo "127.0.0.1 awl-e2e.test" >>/etc/hosts
           id dev >/dev/null 2>&1 || useradd -m -s /bin/bash dev
@@ -201,15 +198,6 @@ jobs:
           CI=true SANDBOX_DUMP=/tmp/sandbox-dump.txt timeout 20m bash tests/sandbox.sh ./awl 2>&1 | tee /tmp/sandbox.txt || rc=$?
           { echo '```'; grep -E '^FAIL|^sandbox:' /tmp/sandbox.txt; echo '```'; } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
           [ $rc -eq 0 ] || { head -c 20000 /tmp/sandbox-dump.txt 2>/dev/null; exit $rc; }
-
-      # The part of the Linux suite that fits WSL1: no sandbox can start, so nothing may run.
-      - name: Fail-closed checks (tests/nosandbox.sh, when the tree has it)
-        if: ${{ !cancelled() && matrix.wsl == 1 }}
-        shell: wsl-bash -u dev {0}
-        run: |
-          cd ~/awl
-          [ -f tests/nosandbox.sh ] || { echo "no tests/nosandbox.sh in this tree"; exit 0; }
-          CI=true bash tests/nosandbox.sh ./awl off blocked
 
       # Both versions. On WSL2 the interop, drive and tool probes must be testable here (a probe
       # that cannot fire unsandboxed either is "untested", exit 3); WSLg may be absent on a server.

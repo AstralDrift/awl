@@ -109,7 +109,8 @@ finish() {
   exit $rc
 }
 
-# ---- WSL1: no user namespaces, so no sandbox. awl must refuse the model's commands and say why.
+# ---- WSL1 is not supported: no user namespaces, so no sandbox, and its kernel lacks system
+# calls awl needs. awl must refuse the model's commands and say why.
 if [ $kind = 1 ]; then
   echo '[{"tool_calls":[{"name":"bash","arguments":{"command":"I=INSIDE; echo $I-ran"}}]},{"content":"Done."}]' >"$W/wsl1.json"
   run wsl1 "$W/proj"
@@ -125,6 +126,19 @@ if [ $kind = 1 ]; then
     ok "WSL1: the refusal names WSL1"
   else
     bad "WSL1: the refusal names WSL1" "it should say WSL1 cannot run the sandbox and how to convert the distro (wsl --set-version <distro> 2)"
+  fi
+  # Why "not supported" and not "set AWL_SANDBOX=off": the read tool needs statx (Linux 4.11),
+  # which WSL1 does not have. This check documents the limit; if it fails because read works,
+  # someone added a fallback: then README, docs/wsl.md and the WSL1 refusal need another look.
+  echo probe-content >"$W/proj/file.txt"
+  echo '[{"tool_calls":[{"name":"read","arguments":{"path":"file.txt"}}]},{"content":"Done."}]' >"$W/wsl1off.json"
+  run wsl1off "$W/proj" AWL_SANDBOX=off
+  if grep -q 'NOSYS' "$W/wsl1off.results"; then
+    ok "WSL1: not supported even with AWL_SANDBOX=off (the read tool fails: NOSYS)"
+  elif grep -q 'probe-content' "$W/wsl1off.results"; then
+    bad "WSL1: not supported even with AWL_SANDBOX=off" "the read tool works on WSL1 now: update README, docs/wsl.md and the WSL1 refusal"
+  else
+    bad "WSL1: not supported even with AWL_SANDBOX=off" "neither NOSYS nor the file: $(head -3 "$W/wsl1off.results" "$W/wsl1off.out" | cut -c1-300)"
   fi
   finish
 fi

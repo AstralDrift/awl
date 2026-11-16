@@ -6,9 +6,9 @@ WSL2 runs the same sandbox as any Linux machine, plus masks for the ways out tha
 
 ## Status
 
-Measured on GitHub-hosted `windows-2025` (WSL 3.0.3.0, Ubuntu-24.04), 2026-11-14, four runs of
-PR 28. The last one (awl `b44b0d3`, the PR at `5d1f448` merged into main) is green on WSL2 and
-WSL1: nothing escaped, nothing untested.
+Measured on GitHub-hosted `windows-2025` (WSL 3.0.3.0, Ubuntu-24.04), 2026-11-14 to 2026-11-16,
+five runs of PR 28. On WSL2 nothing escapes and nothing is untested, also against main's
+combined sandbox (run 5). WSL1 is not supported.
 
 - **WSL2 runs the real sandbox.** Kernel `6.18.54.1-microsoft-standard-WSL2`. bubblewrap 0.9.0
   works with nothing enabled; `tests/e2e.sh` 68 passed, `tests/sandbox.sh` 38 passed,
@@ -23,13 +23,19 @@ WSL1: nothing escaped, nothing untested.
   the drive). The masks are read-only since, and run 4 passed that control too.
 - **The masks are on `main`** (since `5af0213`, merged with the other sandbox work of that
   week). The run on that combined tree is recorded below when it has happened.
-- **WSL1 fails closed and says why** (run 3, kernel `4.4.0-26100-Microsoft`): "this is WSL1,
-  which has no user namespaces. Convert the distro in Windows (wsl.exe --set-version <distro>
-  2)...". Before the change the refusal was bubblewrap's own error.
+- **WSL1 is not supported.** awl refuses the model's commands there (kernel
+  `4.4.0-26100-Microsoft`) and the refusal names WSL1 and `wsl.exe --set-version <distro> 2`;
+  before the change it was bubblewrap's own error. `AWL_SANDBOX=off` is no way around it: the
+  run on main's combined sandbox showed the read tool failing with `NOSYS` on WSL1 (awl uses
+  `statx`, Linux 4.11, which WSL1 does not have), so awl does not work there with or without
+  the sandbox.
+- **Run 5, main's combined sandbox** (awl `2cffd10`, nothing allowed to skip): WSL2 all 23
+  probes blocked, `tests/sandbox.sh` 56 passed, `tests/e2e.sh` 68 passed, peak RSS 1592 KB.
 
 ## Setup
 
-WSL2 (WSL1 cannot run the sandbox: it has no user namespaces):
+WSL2. WSL1 is not supported (no user namespaces, so no sandbox, and the file tools do not work
+there either); convert the distro:
 
 ```sh
 wsl.exe -l -v                       # in Windows: VERSION must be 2
@@ -55,7 +61,7 @@ the tree on the distro's own disk:
 | `tests/check.sh` (static, idle RSS, 8 MB peak; no hyperfine, so the 3 ms startup ceiling is skipped) | yes | no |
 | `tests/e2e.sh` (includes `tests/tui.py`) | yes | no |
 | `tests/sandbox.sh`, unchanged | yes | no |
-| `tests/wsl.sh` | escape probes | fail-closed check |
+| `tests/wsl.sh` | escape probes | fail-closed checks |
 
 `tests/wsl.sh` runs every probe twice through awl's real tools: once with `AWL_SANDBOX=off` (can
 this machine show the escape at all?) and once sandboxed. A probe is `blocked` only if it fired
@@ -82,7 +88,7 @@ Exit 0 nothing escaped, 1 an escape or a failed control, 2 not WSL, 3 a probe na
 | `tool-read-drvfs`, `tool-grep-drvfs`, `tool-write-drvfs` | awl's own read, grep and write tools reach the planted files on the Windows drive |
 | `wslg-tool-read` | the read tool returns `~/.ssh` through `/mnt/wslg/distro` |
 | controls | commands still write in the project; a project on the Windows drive still works and cannot write next to itself; `tests/tui.py` passes |
-| WSL1 | the model's command does not run; the refusal names WSL1 |
+| WSL1 | the model's command does not run; the refusal names WSL1; with `AWL_SANDBOX=off` the read tool fails (`NOSYS`), which is why WSL1 is unsupported and not "sandbox off" |
 
 ## Results
 

@@ -59,5 +59,6 @@ tests/wsl.sh | wslg-sock | WSL: commands cannot reach WSLg's X11, Wayland and Pu
 tests/wsl.sh | winpath-exec | WSL: Windows folders are gone from PATH
 tests/wsl.sh | a project on the Windows drive: commands write in it | WSL: a project on a Windows drive still works
 tests/wsl.sh | a project on the Windows drive: no write outside it | WSL: a project on a Windows drive cannot write next to itself
-tests/wsl.sh | WSL1: the refusal names WSL1 | WSL1: commands are refused and the reason names WSL1
+tests/wsl.sh | WSL1: the refusal names WSL1 | WSL1 is not supported: commands are refused and the reason names WSL1
+tests/wsl.sh | WSL1: not supported even with AWL_SANDBOX=off | WSL1 is not supported: the read tool does not work there, so AWL_SANDBOX=off is no way around it
 src/sandbox.zig | test "sandbox: WSL masks hide Windows from read and from PATH" | WSL: the project, caches and AWL_SANDBOX_WRITE stay visible under a mask
