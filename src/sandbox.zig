@@ -372,7 +372,7 @@ pub fn ready() ?[]const u8 {
         stop();
         var ob: [128]u8 = undefined;
         const rel = std.mem.trim(u8, sys.readFile("/proc/sys/kernel/osrelease", &ob) catch "", " \n");
-        if (std.mem.endsWith(u8, rel, "-Microsoft")) return "the sandbox did not start: this is WSL1, which has no user namespaces. Convert the distro in Windows (wsl.exe --set-version <distro> 2), or set AWL_SANDBOX=off to run commands unsandboxed";
+        if (std.mem.endsWith(u8, rel, "-Microsoft")) return "the sandbox did not start: this is WSL1, which awl does not support (no user namespaces, and its kernel lacks system calls awl needs). Convert the distro in Windows: wsl.exe --set-version <distro> 2";
         const msg = std.mem.trim(u8, b[0..n], " \r\n");
         return std.fmt.bufPrint(&S.err, "the sandbox did not start: {s}", .{if (msg.len > 0) msg[0..@min(msg.len, 300)] else "bwrap exited"}) catch "the sandbox did not start";
     }
