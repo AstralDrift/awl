@@ -18,10 +18,12 @@ pub var on = false; // commands run in the sandbox
 pub var missing = false; // wanted but no bwrap: the model's commands are refused
 pub var enforce = false; // path rules apply (everything but AWL_SANDBOX=off)
 pub var net = false; // AWL_SANDBOX_NET=on: the session sandbox keeps the host network
+var ro_root = false; // a one-command sandbox with the project read-only (execOnce)
 pub var no_net = false; // AWL_NETWORK=off: commands never get the network, not even with approval
 var root_b: [4096]u8 = undefined;
 pub var root: []const u8 = "";
-var home: []const u8 = "";
+var home_b: [4096]u8 = undefined;
+var home: []const u8 = ""; // $HOME as the kernel sees it (see setup), or ""
 var extra_b: [2048]u8 = undefined;
 var extra: []const u8 = ""; // AWL_SANDBOX_WRITE, ':'-separated
 var sessions_b: [400]u8 = undefined;
@@ -36,10 +38,75 @@ const sockets = [_][]const u8{ "/run/docker.sock", "/var/run/docker.sock", "/run
 const caches = [_][]const u8{ "/.cache", "/.npm", "/.cargo/registry", "/go/pkg" };
 /// Project paths that shape what runs outside the sandbox or what the next session is told:
 /// read-only to commands; write/edit need the user's approval every time.
-const guarded = [_][]const u8{ "/.git/config", "/.git/hooks", "/AGENTS.md", "/.agents" };
+pub const guarded = [_][]const u8{ "/.git/config", "/.git/hooks", "/AGENTS.md", "/.agents" };
+/// Guarded paths that did not exist when awl started. Nothing can be mounted over a path that
+/// is not there (a placeholder would leave empty files in the project), so a command can
+/// create one: sweepGuarded moves it aside after every tool call.
+var absent = [_]bool{false} ** guarded.len;
+
+/// WSL only: the places that lead out to Windows. Each is an empty tmpfs in the sandbox and
+/// refused by read: /run/WSL (the interop sockets: a command that points WSL_INTEROP at one
+/// runs cmd.exe, outside the sandbox and with the network), /mnt/wslg (WSLg's X11, Wayland and
+/// PulseAudio sockets, and a second view of the whole distro that the masks over $HOME do not
+/// reach) and every Windows drive (drvfs: C:\Users\<you>\.ssh, browser profiles). The project,
+/// the caches and AWL_SANDBOX_WRITE are bound after them, so one that lives on a drive stays.
+var wsl: [16][]const u8 = undefined;
+var wsl_n: usize = 0;
+var wsl_b: [1024]u8 = undefined;
+
+fn wslAdd(used: *usize, p: []const u8) void {
+    for (wsl[0..wsl_n]) |m| if (std.mem.eql(u8, m, p)) return; // bwrap fails on the same path twice
+    if (wsl_n == wsl.len or used.* + p.len > wsl_b.len) return;
+    @memcpy(wsl_b[used.*..][0..p.len], p);
+    wsl[wsl_n] = wsl_b[used.*..][0..p.len];
+    wsl_n += 1;
+    used.* += p.len;
+}
+
+fn findWsl() void {
+    wsl_n = 0;
+    var used: usize = 0;
+    var ob: [128]u8 = undefined;
+    const rel = sys.readFile("/proc/sys/kernel/osrelease", &ob) catch "";
+    if (!sys.exists("/run/WSL") and !sys.exists("/mnt/wslg") and std.mem.indexOf(u8, rel, "icrosoft") == null) return;
+    for ([_][]const u8{ "/run/WSL", "/mnt/wslg" }) |p| if (sys.exists(p)) wslAdd(&used, p);
+    const S = struct {
+        var mounts: [32768]u8 = undefined; // touched on WSL only
+    };
+    var lines = std.mem.splitScalar(u8, sys.readFile("/proc/mounts", &S.mounts) catch "", '\n');
+    while (lines.next()) |l| {
+        var f = std.mem.splitScalar(u8, l, ' ');
+        const dev = f.next() orelse continue;
+        const mp = f.next() orelse continue;
+        const fstype = f.next() orelse continue;
+        const opts = f.next() orelse continue;
+        // WSL1: type drvfs. WSL2: 9p (or virtiofs) with aname=drvfs; other 9p mounts are WSL's own
+        // (/usr/lib/wsl/drivers) and stay. A mount point with an escaped character is skipped.
+        const drive = std.mem.eql(u8, fstype, "drvfs") or std.mem.eql(u8, dev, "drvfs") or std.mem.indexOf(u8, opts, "aname=drvfs") != null;
+        if (drive and mp.len > 1 and std.mem.indexOfScalar(u8, mp, '\\') == null) wslAdd(&used, mp);
+    }
+}
+
+/// Bound again after the masks: the project, the build caches, AWL_SANDBOX_WRITE.
+fn rebound(p: []const u8) bool {
+    if (under(p, root)) return true;
+    var pb: [1024]u8 = undefined;
+    if (home.len > 0) for (caches) |c| if (under(p, inHome(&pb, c) orelse continue)) return true;
+    var it = std.mem.splitScalar(u8, extra, ':');
+    while (it.next()) |e| if (e.len > 0 and under(p, e)) return true;
+    return false;
+}
+
+fn wslMasked(p: []const u8) bool {
+    for (wsl[0..wsl_n]) |m| if (under(p, m)) return !rebound(p);
+    return false;
+}
 
 pub fn setup(project_root: []const u8) void {
-    home = sys.getenv("HOME") orelse "";
+    // $HOME is compared with resolved paths and handed to bwrap, so it is resolved too: a home
+    // that is a symlink (/home -> /var/home) or ends in "/" would otherwise hide nothing from read.
+    const h = sys.getenv("HOME") orelse "";
+    home = if (h.len > 0 and h[0] == '/') resolve(h, &home_b) else "";
     enforce = !std.mem.eql(u8, sys.getenv("AWL_SANDBOX") orelse "on", "off");
     on = enforce and sys.exists(bwrap);
     missing = enforce and !on;
@@ -55,6 +122,69 @@ pub fn setup(project_root: []const u8) void {
         @memcpy(extra_b[0..m], w[0..m]);
         extra = extra_b[0..m];
     }
+    var pb: [4200]u8 = undefined;
+    // A project with no .git yet: a repository the model creates (git init) is its own work,
+    // so .git/config and .git/hooks are only watched where a repository already exists.
+    const has_git = sys.exists(std.fmt.bufPrint(&pb, "{s}/.git", .{root}) catch "");
+    for (guarded, &absent) |g, *a| {
+        const in_git = std.mem.startsWith(u8, g, "/.git/");
+        a.* = on and (has_git or !in_git) and !sys.exists(std.fmt.bufPrint(&pb, "{s}{s}", .{ root, g }) catch continue);
+    }
+    if (enforce) findWsl();
+}
+
+/// A path for a scratch file of awl's own (the Ctrl-G prompt, /diff output) where the model's
+/// commands cannot plant a link or swap the file: the session folder, an empty tmpfs inside
+/// the sandbox. /tmp, which commands share, only when there is no session folder; callers
+/// create the file O_EXCL|O_NOFOLLOW either way.
+pub fn scratch(buf: []u8, name: []const u8) ?[:0]const u8 {
+    const d = if (sessions.len > 0 and sys.exists(sessions)) sessions else "/tmp";
+    return std.fmt.bufPrintZ(buf, "{s}/.awl-{d}-{s}", .{ d, linux.getpid(), name }) catch null;
+}
+
+/// The user approved a write to `p` (resolved): a guarded path it creates is theirs.
+pub fn allowGuarded(p: []const u8) void {
+    var pb: [4200]u8 = undefined;
+    for (guarded, &absent) |g, *a| if (under(p, std.fmt.bufPrint(&pb, "{s}{s}", .{ root, g }) catch continue)) {
+        a.* = false;
+    };
+}
+
+/// A guarded path that was absent at the start and exists now was made by a command (a
+/// background one, or one left running by a finished command): rename it to
+/// "<path>.awl-refused" (or, when a command put something there first, to that plus random
+/// hex it could not have guessed) so git and later sessions do not use it, and nothing is lost
+/// if the user made it. `moved` gets the names ("/AGENTS.md") and the count is returned;
+/// `stuck` gets the ones that could not be moved.
+pub fn sweepGuarded(moved: *[guarded.len][]const u8, stuck: *[guarded.len][]const u8, n_stuck: *usize) usize {
+    var n: usize = 0;
+    for (guarded, absent) |g, a| {
+        if (!a) continue;
+        var pb: [4200]u8 = undefined;
+        var qb: [4300]u8 = undefined;
+        const p = sys.z(&pb, std.fmt.bufPrint(pb[0 .. pb.len - 1], "{s}{s}", .{ root, g }) catch continue);
+        var st: linux.Statx = undefined; // lstat: a dangling link counts too
+        if (linux.errno(linux.statx(linux.AT.FDCWD, p, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true }, &st)) != .SUCCESS) continue;
+        var done = false;
+        var k: usize = 0;
+        while (k < 4 and !done) : (k += 1) {
+            var rnd: [8]u8 = undefined;
+            _ = linux.getrandom(&rnd, rnd.len, 0);
+            const q = sys.z(&qb, (if (k == 0) std.fmt.bufPrint(qb[0 .. qb.len - 1], "{s}.awl-refused", .{p}) else std.fmt.bufPrint(qb[0 .. qb.len - 1], "{s}.awl-refused-{x}", .{ p, std.mem.readInt(u64, &rnd, .little) })) catch break);
+            // RENAME_NOREPLACE: never over an earlier refused copy
+            const e = linux.errno(linux.renameat2(linux.AT.FDCWD, p, linux.AT.FDCWD, q, .{ .NOREPLACE = true }));
+            // a filesystem without rename flags: plain rename, to a name that is not there
+            done = e == .SUCCESS or (e == .INVAL and !sys.exists(q) and linux.errno(linux.renameat(linux.AT.FDCWD, p, linux.AT.FDCWD, q)) == .SUCCESS);
+        }
+        if (done) {
+            moved[n] = g;
+            n += 1;
+        } else {
+            stuck[n_stuck.*] = g;
+            n_stuck.* += 1;
+        }
+    }
+    return n;
 }
 
 /// One line for the welcome screen and the system prompt.
@@ -110,13 +240,14 @@ fn options(a: *Args, with_net: bool) void {
     var rb: [64]u8 = undefined;
     const run_user = std.fmt.bufPrint(&rb, "/run/user/{d}", .{linux.getuid()}) catch "/run/user";
     if (sys.exists(run_user)) a.addAll(&.{ "--tmpfs", a.zs.z(run_user) });
+    for (wsl[0..wsl_n]) |m| a.addAll(&.{ "--tmpfs", a.zs.z(m) }); // before the binds below
     a.bindIf("--bind", root);
     var pb: [1024]u8 = undefined;
-    if (home.len > 0) for (caches) |c| a.bindIf("--bind", std.fmt.bufPrint(&pb, "{s}{s}", .{ home, c }) catch continue);
+    if (home.len > 0) for (caches) |c| a.bindIf("--bind", inHome(&pb, c) orelse continue);
     var it = std.mem.splitScalar(u8, extra, ':');
     while (it.next()) |e| if (e.len > 0) a.bindIf("--bind", e);
     if (home.len > 0) for (secrets) |c| {
-        const p = std.fmt.bufPrint(&pb, "{s}{s}", .{ home, c }) catch continue;
+        const p = inHome(&pb, c) orelse continue;
         if (sys.exists(p)) a.addAll(&.{ "--tmpfs", a.zs.z(p) });
     };
     // Session files hold every tool output of every project: none of them, except this run's view
@@ -142,6 +273,11 @@ fn options(a: *Args, with_net: bool) void {
         a.addAll(&.{ "--ro-bind", "/dev/null", real.ptr });
     };
     for (guarded) |g| a.bindIf("--ro-bind", std.fmt.bufPrint(&pb, "{s}{s}", .{ root, g }) catch continue);
+    // The WSL masks read-only, now that the binds have made their folders in them: a project on
+    // /mnt/c could otherwise write "../x" into the tmpfs and believe it reached the drive. Not
+    // one that is itself the project (the remount would hit the bind on top of it).
+    for (wsl[0..wsl_n]) |m| if (!rebound(m)) a.addAll(&.{ "--remount-ro", a.zs.z(m) });
+    if (ro_root) a.addAll(&.{ "--remount-ro", root_z() });
 }
 
 /// Sockets under /tmp (X11, browsers, other agents' daemons) let a command act outside the
@@ -234,6 +370,9 @@ pub fn ready() ?[]const u8 {
     }
     if (std.mem.indexOf(u8, b[0..n], "ready\n") == null) {
         stop();
+        var ob: [128]u8 = undefined;
+        const rel = std.mem.trim(u8, sys.readFile("/proc/sys/kernel/osrelease", &ob) catch "", " \n");
+        if (std.mem.endsWith(u8, rel, "-Microsoft")) return "the sandbox did not start: this is WSL1, which has no user namespaces. Convert the distro in Windows (wsl.exe --set-version <distro> 2), or set AWL_SANDBOX=off to run commands unsandboxed";
         const msg = std.mem.trim(u8, b[0..n], " \r\n");
         return std.fmt.bufPrint(&S.err, "the sandbox did not start: {s}", .{if (msg.len > 0) msg[0..@min(msg.len, 300)] else "bwrap exited"}) catch "the sandbox did not start";
     }
@@ -314,7 +453,11 @@ pub fn execIn(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const
             sys.close(pid_fd);
         }
         _ = linux.prctl(@intFromEnum(linux.PR.SET_PDEATHSIG), @intFromEnum(linux.SIG.KILL), 0, 0, 0);
-        _ = linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
+        // no setuid binary may hand the command privileges back: without this, nothing runs
+        if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS) {
+            sys.writeAll(2, "awl: could not set no_new_privs in the sandbox\n") catch {};
+            linux.exit_group(126);
+        }
         if (linux.errno(linux.chdir(cwd)) != .SUCCESS) _ = linux.chdir(@ptrCast(root_z()));
         // exec as our own uid (not 0) drops the capabilities setns gave us; as uid 0 (a dev container,
         // CI) it would keep them all, so the bounding set goes first: nothing exec'd can hold a capability
@@ -329,21 +472,25 @@ pub fn execIn(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const
     linux.exit_group(@intCast(if (status & 0x7f == 0) (status >> 8) & 0xff else 128 + (status & 0x7f)));
 }
 
-/// In a forked child: run argv in a sandbox of its own that keeps the host network (one
-/// command the user approved). Same rules otherwise; it does not see the session's
-/// localhost or processes. Never returns.
-pub fn execOnline(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const u8, cwd: [*:0]const u8) noreturn {
-    const S = struct {
-        var a: Args = .{};
-    };
-    const a = &S.a;
-    options(a, true);
-    a.addAll(&.{ "--disable-userns", "--chdir", cwd, "--" });
-    var i: usize = 0;
-    while (argv[i]) |s| : (i += 1) a.add(s);
-    a.v[a.n] = null;
-    _ = linux.execve(bwrap, &a.v, env);
-    linux.exit_group(127);
+/// In a forked child: run argv in a sandbox of its own, started the way the session's is (so
+/// it needs nothing newer from bubblewrap, and user namespaces are off inside it too).
+/// `with_net`: it keeps the host network (one command the user approved). `read_only`: the
+/// project is mounted read-only (plan mode). Same rules otherwise; it does not see the
+/// session's localhost or processes, and ends with the command. Never returns.
+pub fn execOnce(argv: [*:null]const ?[*:0]const u8, env: [*:null]const ?[*:0]const u8, cwd: [*:0]const u8, with_net: bool, read_only: bool) noreturn {
+    // the session sandbox belongs to the parent: not ours to wait for or stop
+    holder = 0;
+    pidfd = -1;
+    holder_out = -1;
+    net = with_net;
+    ro_root = read_only;
+    if (ready()) |why| {
+        sys.writeAll(2, "awl: ") catch {};
+        sys.writeAll(2, why) catch {};
+        sys.writeAll(2, "\n") catch {};
+        linux.exit_group(126);
+    }
+    execIn(argv, env, cwd, -1, false); // bwrap's --die-with-parent ends the sandbox when we exit
 }
 
 fn root_z() [*:0]const u8 {
@@ -378,11 +525,33 @@ pub fn envp(src: []const [*:0]const u8, buf: []?[*:0]const u8) [*:null]const ?[*
         const s = std.mem.span(e);
         const eq = std.mem.indexOfScalar(u8, s, '=') orelse continue;
         if (!envOk(s[0..eq])) continue;
-        buf[n] = e;
+        buf[n] = if (wsl_n > 0 and eq == 4 and std.mem.startsWith(u8, s, "PATH=")) linuxPath(s[5..]) else e;
         n += 1;
     }
     buf[n] = null;
     return @ptrCast(buf.ptr);
+}
+
+/// WSL appends the Windows PATH (70 folders on a stock machine); in the sandbox they are empty.
+/// "PATH=" without the entries under a mask. An entry that does not fit is dropped.
+fn linuxPath(path: []const u8) [*:0]const u8 {
+    const S = struct {
+        var b: [8192]u8 = undefined;
+    };
+    @memcpy(S.b[0..5], "PATH=");
+    var n: usize = 5;
+    var it = std.mem.splitScalar(u8, path, ':');
+    while (it.next()) |e| {
+        if (wslMasked(e) or n + e.len + 2 > S.b.len) continue;
+        if (n > 5) {
+            S.b[n] = ':';
+            n += 1;
+        }
+        @memcpy(S.b[n..][0..e.len], e);
+        n += e.len;
+    }
+    S.b[n] = 0;
+    return @ptrCast(&S.b);
 }
 
 /// Small arena for NUL-terminated strings.
@@ -464,9 +633,13 @@ pub fn writable(abs: []const u8) bool {
     if (!enforce) return true;
     var rb: [4096]u8 = undefined;
     const p = resolve(abs, &rb);
+    // Secrets and session files (this run's view too, and a background agent's approval file)
+    // stay unwritable when a writable place contains them: a project that is the home folder,
+    // AWL_SANDBOX_WRITE=$HOME, a state folder under /tmp.
+    if (secret(p) or inSessions(p)) return false;
     if (under(p, root) or under(p, "/tmp")) return true;
-    var pb: [1024]u8 = undefined;
-    for (caches) |c| if (std.fmt.bufPrint(&pb, "{s}{s}", .{ home, c }) catch null) |hp| if (home.len > 0 and under(p, hp)) return true;
+    var pb: [4200]u8 = undefined;
+    if (home.len > 0) for (caches) |c| if (under(p, inHome(&pb, c) orelse continue)) return true;
     var it = std.mem.splitScalar(u8, extra, ':');
     while (it.next()) |e| if (e.len > 0 and under(p, e)) return true;
     return false;
@@ -490,15 +663,30 @@ pub fn hidden(abs: []const u8) bool {
     if (!enforce) return false;
     var rb: [4096]u8 = undefined;
     const p = resolve(abs, &rb);
-    if (under(p, "/proc") or under(p, "/run/user")) return true;
-    if (sessions.len > 0) {
-        var sb: [4096]u8 = undefined;
-        var vb: [4096]u8 = undefined;
-        if (under(p, resolve(sessions, &sb)) and (session.view_path.len == 0 or !std.mem.eql(u8, p, resolve(session.view_path, &vb)))) return true;
-    }
-    var pb: [1024]u8 = undefined;
-    if (home.len > 0) for (secrets) |c| if (under(p, std.fmt.bufPrint(&pb, "{s}{s}", .{ home, c }) catch continue)) return true;
+    if (under(p, "/proc") or under(p, "/run/user") or wslMasked(p)) return true;
+    var vb: [4096]u8 = undefined;
+    if (inSessions(p) and (session.view_path.len == 0 or !std.mem.eql(u8, p, resolve(session.view_path, &vb)))) return true;
+    return secret(p);
+}
+
+/// `p` (resolved) is in one of the secret folders under $HOME.
+fn secret(p: []const u8) bool {
+    if (home.len == 0) return false;
+    var pb: [4200]u8 = undefined;
+    for (secrets) |c| if (under(p, inHome(&pb, c) orelse continue)) return true;
     return false;
+}
+
+/// `p` (resolved) is in awl's session folder.
+fn inSessions(p: []const u8) bool {
+    if (sessions.len == 0) return false;
+    var sb: [4096]u8 = undefined;
+    return under(p, resolve(sessions, &sb));
+}
+
+/// $HOME + `sub` ("/.ssh"); a home of "/" gives "/.ssh", not "//.ssh". Null when it does not fit.
+fn inHome(buf: []u8, sub: []const u8) ?[]const u8 {
+    return std.fmt.bufPrint(buf, "{s}{s}", .{ if (home.len == 1) "" else home, sub }) catch null;
 }
 
 fn under(p: []const u8, dir: []const u8) bool {
@@ -574,6 +762,50 @@ test "sandbox: write rule and path normalization" {
     try t.expect(hidden("/home/u/.local/state/awl/sessions"));
     try t.expect(!hidden("/home/u/.local/state/awl/sessions/view-42.txt"));
     try t.expect(!hidden("/home/u/.local/state/awl/history2"));
+    // a writable place that contains secrets or session files does not make them writable
+    try t.expect(!writable("/home/u/.local/state/awl/sessions/20261030-120000-7.answer"));
+    try t.expect(!writable("/home/u/.local/state/awl/sessions/view-42.txt"));
+    root = "/home/u";
+    try t.expect(writable("/home/u/notes.txt"));
+    try t.expect(!writable("/home/u/.ssh/authorized_keys"));
+    try t.expect(!writable("/home/u/.local/state/awl/sessions/x.answer"));
+    root = "/home/u/proj";
+    extra = "/home/u";
+    defer extra = "";
+    try t.expect(writable("/home/u/notes.txt"));
+    try t.expect(!writable("/home/u/.aws/credentials"));
+    home = "/"; // root's home in some containers: "/.ssh", not "//.ssh"
+    try t.expect(hidden("/.ssh/id_ed25519"));
+    try t.expect(!writable("/.ssh/authorized_keys"));
+}
+
+test "sandbox: WSL masks hide Windows from read and from PATH" {
+    enforce = true;
+    defer enforce = false;
+    root = "/mnt/c/src/proj";
+    home = "/home/u";
+    extra = "/mnt/d/out";
+    defer extra = "";
+    wsl = undefined;
+    wsl[0] = "/run/WSL";
+    wsl[1] = "/mnt/wslg";
+    wsl[2] = "/mnt/c";
+    wsl[3] = "/mnt/d";
+    wsl_n = 4;
+    defer wsl_n = 0;
+    try t.expect(hidden("/mnt/c/Users/u/.ssh/id_ed25519"));
+    try t.expect(hidden("/mnt/wslg/distro/home/u/.ssh/id_ed25519"));
+    try t.expect(hidden("/run/WSL/1_interop"));
+    try t.expect(hidden("/mnt/d/secret"));
+    try t.expect(!hidden("/mnt/c/src/proj/a.zig")); // the project is bound over the mask
+    try t.expect(!hidden("/mnt/d/out/x"));
+    try t.expect(!hidden("/mnt/cache/x"));
+    try t.expect(!hidden("/usr/lib/wsl/lib/x"));
+    const src = [_][*:0]const u8{ "PATH=/usr/bin:/mnt/c/Windows/system32:/mnt/c/src/proj/bin:/mnt/c/Program Files/Git/cmd:/bin:/mnt/c/Windows/System32/OpenSSH/", "WSL_INTEROP=/run/WSL/8_interop" };
+    var buf: [8]?[*:0]const u8 = undefined;
+    const e = envp(&src, &buf);
+    try t.expectEqualStrings("PATH=/usr/bin:/mnt/c/src/proj/bin:/bin", std.mem.span(e[0].?));
+    try t.expect(e[1] == null);
 }
 
 test "sandbox: environment allowlist" {

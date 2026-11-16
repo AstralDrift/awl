@@ -27,14 +27,15 @@ awl's sandbox adds, for commands only:
 - **A separate network namespace.** Commands cannot reach Hearth's loopback relay port, so they cannot
   send their own requests to the model endpoint.
 - **A separate PID namespace and a fresh `/proc`.** Commands cannot see awl's process. Without it, a
-  command running as the same user can read `/proc/<awl>/environ`, which holds `AWL_KEY` (awl strips
-  `AWL_*` only from the environment it passes down), and can `ptrace` awl if Yama allows it.
+  command running as the same user can read `/proc/<awl>/environ`, which holds `AWL_KEY` (awl keeps it
+  out of the environment it passes down, which is an allowlist, but not out of its own), and can `ptrace` awl if Yama allows it.
 - **Socket hiding under `/tmp`.** Hearth's relay socket, `/tmp/hearth-awl-<id>/relay.sock`, is hidden.
   The web helper socket one level deeper is not (see docs/embedding.md).
 - **Read-only guarded files** (`.git/config`, `.git/hooks`, `AGENTS.md`, `.agents`) and hidden secrets
   under `$HOME`. Inside Hearth, `$HOME` is a scratch directory, so this matters less there.
-- **Environment.** `HEARTH_AWL_RELAY_SOCKET` and `HEARTH_AWL_RELAY_PATH` reach commands either way,
-  because awl strips only `AWL_*`. They name the relay socket, so commands would not have to find it.
+- **Environment.** Commands get an allowlist either way (docs/embedding.md), so
+  `HEARTH_AWL_RELAY_SOCKET` and `HEARTH_AWL_RELAY_PATH` do not reach them. (An earlier version of
+  this note said awl strips only `AWL_*`; that was wrong.)
 
 ## Options
 
@@ -96,7 +97,11 @@ own session transcript (with `write` alone, today, without running a command), a
 receipts from that file. Hearth already treats the scratch directory as hostile and hashes the
 transcript, but the hash is of whatever the file holds at the end. A fix in awl, independent of the
 options above: make awl's session directory non-writable to `write`/`edit` and mount it read-only in
-the command sandbox. Found by reading `src/sandbox.zig` and `src/tools.zig`; no test yet.
+the command sandbox. Found by reading `src/sandbox.zig` and `src/tools.zig`.
+
+Fixed since: commands see an empty folder in place of the session directory (only this run's view,
+read-only), and `write`/`edit` refuse every path in it, wherever it is. Both are tested in
+`tests/sandbox.sh`.
 
 ## Recommendation
 

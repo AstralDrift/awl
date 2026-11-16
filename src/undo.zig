@@ -65,7 +65,8 @@ pub fn snapshot(path: []const u8) bool {
     var hdr: [11]u8 = undefined;
     std.mem.writeInt(u32, hdr[0..4], turn, .little);
     std.mem.writeInt(u16, hdr[5..7], @intCast(path.len), .little);
-    const fd = sys.open(path, .{ .CLOEXEC = true }, 0) catch |e| {
+    // NONBLOCK: a FIFO at this path must not hang the snapshot waiting for a writer
+    const fd = sys.open(path, .{ .CLOEXEC = true, .NONBLOCK = true }, 0) catch |e| {
         if (e != error.NotFound) return false;
         hdr[4] = 0; // did not exist: undo removes it
         std.mem.writeInt(u32, hdr[7..11], 0, .little);

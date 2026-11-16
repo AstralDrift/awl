@@ -13,6 +13,8 @@ pass=0
 fail=0
 ok() { echo "ok   $1"; pass=$((pass + 1)); }
 bad() { echo "FAIL $1: $2"; fail=$((fail + 1)); }
+skips=0
+skip() { echo "skip $1"; skips=$((skips + 1)); } # a skipped check fails the run under CI=true
 
 # serve SCRIPT [args...] -> sets PORT, LOG
 serve() {
@@ -64,7 +66,7 @@ if command -v openssl >/dev/null; then
   fi
   stop
 else
-  echo "skip https (no openssl)"
+  skip "https (no openssl)"
 fi
 if getent hosts awl-e2e.test >/dev/null 2>&1; then
   serve "$W/hi.json" --split 2
@@ -72,7 +74,7 @@ if getent hosts awl-e2e.test >/dev/null 2>&1; then
   [ "$out" = "héllo ✓ there" ] && ok "host name in AWL_URL resolved through /etc/hosts" || bad "hosts resolution" "$out"
   stop
 else
-  echo "skip host-name URL (no awl-e2e.test in /etc/hosts; docker run --add-host awl-e2e.test:127.0.0.1)"
+  skip "host-name URL (no awl-e2e.test in /etc/hosts; docker run --add-host awl-e2e.test:127.0.0.1)"
 fi
 
 # 2. tool loop: read -> edit + grep -> done
@@ -786,5 +788,6 @@ stop
 # 9. interactive TUI through a pty
 python3 "$HERE/tui.py" "$AWL" >"$W/tui.out" 2>&1 && ok "tui ($(grep -c '^ok' "$W/tui.out") checks)" || bad "tui" "$(grep FAIL "$W/tui.out")"
 
-echo "e2e: $pass passed, $fail failed"
+echo "e2e: $pass passed, $fail failed, $skips skipped"
+[ $skips -eq 0 ] || [ "${CI:-}" != true ] || { echo "FAIL $skips skipped under CI"; fail=$((fail + 1)); }
 [ $fail -eq 0 ]
