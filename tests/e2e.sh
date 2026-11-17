@@ -20,7 +20,10 @@ skip() { echo "skip $1"; skips=$((skips + 1)); } # a skipped check fails the run
 serve() {
   local script=$1
   shift
-  LOG=$W/req-$RANDOM.jsonl
+  # a new name every time: $RANDOM repeated within a run about once in ten runs, and the
+  # second server then appended to the first one's log (one check failed "at random")
+  serve_n=$((${serve_n:-0} + 1))
+  LOG=$W/req-$serve_n.jsonl
   python3 "$HERE/fake_sse.py" "$script" --log "$LOG" "$@" >"$W/port" &
   SPID=$!
   for _ in $(seq 100); do [ -s "$W/port" ] && break; sleep 0.02; done

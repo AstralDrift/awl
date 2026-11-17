@@ -22,7 +22,8 @@ rc=$?
 
 # serve SCRIPT -> PORT, LOG (as in e2e.sh)
 serve() {
-  LOG=$W/req-$RANDOM.jsonl
+  serve_n=$((${serve_n:-0} + 1)) # never $RANDOM: a repeated name appends to an older log
+  LOG=$W/req-$serve_n.jsonl
   python3 "$HERE/fake_sse.py" "$1" --log "$LOG" >"$W/port" &
   SPID=$!
   for _ in $(seq 50); do [ -s "$W/port" ] && break; sleep 0.02; done

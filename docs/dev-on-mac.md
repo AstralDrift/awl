@@ -43,8 +43,6 @@ the exit code is non-zero if any failed. The suites run with `CI=true`, and a su
 
 Each suite has a time limit, 20 minutes, or `RIG_TIMEOUT` seconds. It is kept on the Mac, which
 kills the container: a suite that runs out is reported as "timed out", never left running.
-One e2e check fails at random in roughly one run in four, on an unchanged binary too
-(`rig/run.sh e2e` again before reading anything into it).
 
 The image is tagged with a hash of `rig/Dockerfile`, so editing the Dockerfile rebuilds it. Old
 `awl-rig:*` images are not removed (`docker image prune`, or `docker rmi`).
