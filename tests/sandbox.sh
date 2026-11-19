@@ -294,6 +294,88 @@ got=$(tool_run "$P5" '{"name":"write","arguments":{"path":"p.fifo","content":"no
 got=$(tool_run "$P5" "$(bash_call 'ln -s "'"$H2"'/.bashrc_probe" "sum.json.tmp$(cat "'"$W"'/tpid")" && echo INSIDE-planted')" HOME="$H2" XDG_STATE_HOME="$W/state2" AWL_SUMMARY="$P5/sum.json")
 grep -q INSIDE-planted <<<"$got" && [ "$(cat "$H2/.bashrc_probe")" = keep ] && [ ! -L "$P5/sum.json" ] && python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$P5/sum.json" 2>/dev/null && ok "AWL_SUMMARY: a link planted at its temp name is not written through" || bad "AWL_SUMMARY temp link" "$(head -c 100 "$H2/.bashrc_probe"); $got"
 
+# Network by address, links and host sockets. The metadata address and an IPv6 address are
+# connected to, not only routed; a command cannot hard-link a file from outside into the
+# project, and write does not follow one the user made (it replaces the name, not the file).
+P6=$W/proj6
+mkdir -p "$P6"
+git -C "$P6" init -q
+echo keep >"$H2/.bashrc_probe"
+ln "$H2/.bashrc_probe" "$P6/userlink"
+# The host's service sockets are hidden (docker, the system bus, libvirt, snapd, podman). Only
+# root can put a stand-in where one is missing, so the root runs in CI are the ones that test
+# every path; elsewhere the probe covers the sockets this host has.
+HOST_SOCKS="/run/docker.sock /run/dbus/system_bus_socket /run/libvirt/libvirt-sock /run/snapd.socket /run/podman/podman.sock"
+made_socks=
+if [ "$(id -u)" = 0 ]; then
+  for sk in $HOST_SOCKS; do
+    [ -e "$sk" ] && continue
+    mkdir -p "$(dirname "$sk")"
+    python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(); time.sleep(120)' "$sk" >/dev/null 2>&1 &
+    made_socks="$made_socks $sk"
+  done
+  for _ in $(seq 100); do
+    n=0
+    for sk in $made_socks; do [ -S "$sk" ] && n=$((n + 1)); done
+    [ "$n" = "$(wc -w <<<"$made_socks")" ] && break
+    sleep 0.02
+  done
+fi
+n_socks=0
+for sk in $HOST_SOCKS; do [ -S "$sk" ] && n_socks=$((n_socks + 1)); done
+got=$(tool_run "$P6" "$(bash_call 'curl -s --max-time 3 -o /dev/null http://169.254.169.254/latest/meta-data/ && echo ESCAPED-metaconnect; curl -s --max-time 3 -o /dev/null "http://[2606:4700:4700::1111]/" && echo ESCAPED-ipv6; ln "'"$H2"'/.bashrc_probe" hard 2>/dev/null && echo ESCAPED-hardlink; for sk in '"$HOST_SOCKS"'; do python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])" $sk 2>/dev/null && echo "ESCAPED-hostsock $sk"; done; echo INSIDE-ran'),"'{"name":"write","arguments":{"path":"userlink","content":"replaced"}}' HOME="$H2" XDG_STATE_HOME="$W/state2")
+for sk in $made_socks; do rm -f "$sk"; done
+grep -q INSIDE-ran <<<"$got" && ! grep -q 'ESCAPED-metaconnect\|ESCAPED-ipv6' <<<"$got" && ok "no connection to the metadata address or over IPv6" || bad "metadata / IPv6 connect" "$got"
+grep -q INSIDE-ran <<<"$got" && ! grep -q ESCAPED-hostsock <<<"$got" && ok "host service sockets are hidden ($n_socks present on this host)" || bad "host service sockets" "$got"
+grep -q INSIDE-ran <<<"$got" && ! grep -q ESCAPED-hardlink <<<"$got" && [ "$(cat "$H2/.bashrc_probe")" = keep ] && [ "$(cat "$P6/userlink")" = replaced ] && ok "no hard link out of the project; write replaces a linked name, not the file behind it" || bad "hard links" "$(cat "$H2/.bashrc_probe"); $got"
+
+# A socket is hidden however many files share its folder (the scan used to stop after 4000
+# entries), and too many sockets to hide is a refusal, not a thinner sandbox.
+MANY=$(mktemp -d -p /tmp awl-sbx-many.XXXXXX)
+python3 -c '
+import socket, sys, time, os
+d = sys.argv[1]
+s = socket.socket(socket.AF_UNIX); s.bind(d + "/first.sock"); s.listen()
+for i in range(20000):
+    open("%s/f%05d" % (d, i), "w").close()
+open(d + "/ready", "w").close()
+time.sleep(60)' "$MANY" >/dev/null 2>&1 &
+MPID=$!
+for _ in $(seq 500); do [ -e "$MANY/ready" ] && break; sleep 0.02; done
+got=$(tool_run "$P6" "$(bash_call 'python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])" '"$MANY"'/first.sock 2>/dev/null && echo ESCAPED-crowded; echo INSIDE-ran')" HOME="$H2" XDG_STATE_HOME="$W/state2")
+grep -q INSIDE-ran <<<"$got" && ! grep -q ESCAPED-crowded <<<"$got" && ok "a socket among 20000 files is still hidden" || bad "socket in a crowded folder" "$got"
+kill $MPID 2>/dev/null
+wait $MPID 2>/dev/null
+rm -rf "$MANY"
+MANY=$(mktemp -d -p /tmp awl-sbx-many.XXXXXX)
+python3 -c '
+import socket, sys
+for i in range(400):
+    s = socket.socket(socket.AF_UNIX); s.bind("%s/s%03d" % (sys.argv[1], i)); s.close()' "$MANY"
+got=$(tool_run "$P6" "$(bash_call 'echo INSIDE-ran')" HOME="$H2" XDG_STATE_HOME="$W/state2")
+grep -q 'too many paths to hide' <<<"$got" && ! grep -q INSIDE-ran <<<"$got" && ok "more sockets than can be hidden: the sandbox refuses to start" || bad "socket overflow" "$got"
+rm -rf "$MANY"
+
+# Nothing the model started outlives awl: a foreground command and a background job both end
+# when awl is killed outright.
+tag=7777$$
+printf '[{"tool_calls":[{"name":"bash","arguments":{"command":"sleep %s8","background":true}},{"name":"bash","arguments":{"command":"sleep %s7"}}]},{"content":"ok"}]' "$tag" "$tag" >"$W/kill.json"
+python3 "$HERE/fake_sse.py" "$W/kill.json" >"$W/kport" &
+KSP=$!
+for _ in $(seq 50); do [ -s "$W/kport" ] && break; sleep 0.02; done
+(cd "$P6" && exec env AWL_URL="http://127.0.0.1:$(cat "$W/kport")" HOME="$H2" XDG_STATE_HOME="$W/state2" "$AWL" -p kill >/dev/null 2>&1) &
+KPID=$!
+for _ in $(seq 100); do [ "$(pgrep -fc "^sleep ${tag}[78]\$")" = 2 ] && break; sleep 0.1; done
+before=$(pgrep -fc "^sleep ${tag}[78]\$")
+kill -9 $KPID
+wait $KPID 2>/dev/null
+for _ in $(seq 50); do [ "$(pgrep -fc "^sleep ${tag}[78]\$")" = 0 ] && break; sleep 0.1; done
+after=$(pgrep -fc "^sleep ${tag}[78]\$")
+[ "$before" = 2 ] && [ "$after" = 0 ] && ok "awl killed: its command and its background job die with it" || bad "commands outlive awl" "running before: $before, after: $after"
+pkill -f "^sleep ${tag}[78]\$" 2>/dev/null
+kill $KSP 2>/dev/null
+wait $KSP 2>/dev/null
+
 echo "sandbox: $pass passed, $fail failed, $skips skipped"
 [ $skips -eq 0 ] || [ "${CI:-}" != true ] || { echo "FAIL $skips skipped under CI"; fail=$((fail + 1)); }
 [ $fail -eq 0 ] || { echo "$results" >"${SANDBOX_DUMP:-/dev/null}"; exit 1; }
