@@ -245,16 +245,16 @@ yet: macOS (awl is Linux only; run it in a Linux container or VM).
 ## Long sessions
 
 - Old tool outputs are trimmed when the prompt passes 60% of the window; the checklist is never trimmed.
-- If that is not enough (80%), or the server says the request is too long, the model summarizes the
-  work and awl continues from the task, the summary, the checklist and the newest messages.
-- `AWL_CTX_MODE=fresh` (being measured in the arena, not the default): while awl runs, the session is
+- By default (`AWL_CTX_MODE=fresh`), while awl runs, the session is
   also kept as plain text, `view-<pid>.txt` next to the session files (each message starts with a line
   `{"n":<line in the session file>,"role":…}`; the model's commands can read this one file, read-only;
   removed on exit). Trimmed outputs say where they are in the view (`read it there (offset=…,
-  limit=…)`), every tool result ends with the run's time and the context used, and at 80% awl starts a
-  fresh context with no model request: the task, one note naming the view, the checklist, the files
+  limit=…)`), every tool result ends with the run's time and the context used, and at 80% (or when
+  the server says the request is too long) awl starts a fresh context with no model request: the task, one note naming the view, the checklist, the files
   read and changed, the newest user message, and the newest messages. A resumed session that is
   already over the window does this before its first request.
+- `AWL_CTX_MODE=compact`: at the same points the model instead summarizes the work and awl continues from the task, the summary, the checklist and the newest
+  messages.
 - Transient model errors (connection loss, 408/425/429/5xx) are retried with backoff; Ctrl-C stops a wait.
 - Commands the model runs never see `AWL_*` variables (so not the API key).
 
