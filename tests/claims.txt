@@ -62,3 +62,10 @@ tests/wsl.sh | a project on the Windows drive: no write outside it | WSL: a proj
 tests/wsl.sh | WSL1: the refusal names WSL1 | WSL1 is not supported: commands are refused and the reason names WSL1
 tests/wsl.sh | WSL1: not supported even with AWL_SANDBOX=off | WSL1 is not supported: the read tool does not work there, so AWL_SANDBOX=off is no way around it
 src/sandbox.zig | test "sandbox: WSL masks hide Windows from read and from PATH" | WSL: the project, caches and AWL_SANDBOX_WRITE stay visible under a mask
+tests/sandbox.sh | ESCAPED-metaconnect | commands cannot connect to the cloud metadata address
+tests/sandbox.sh | ESCAPED-ipv6 | commands have no network over IPv6 either
+tests/sandbox.sh | ESCAPED-hostsock | the docker socket, the system bus, libvirt, snapd and podman sockets are hidden
+tests/sandbox.sh | ESCAPED-hardlink | a command cannot hard-link a file from outside into the project
+tests/sandbox.sh | a socket among 20000 files is still hidden | sockets under /tmp are hidden however full the folder is
+tests/sandbox.sh | more sockets than can be hidden | the sandbox refuses to start instead of starting with fewer masks
+tests/sandbox.sh | awl killed: its command and its background job die | background jobs never outlive awl

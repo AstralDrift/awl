@@ -20,6 +20,8 @@ read-only. Unattended runs that relied on either need `AWL_MODE=auto`.
 - Plan mode: commands run with the project mounted read-only.
 - A command with `network: true` and a plan-mode command no longer need bubblewrap 0.8: they work
   on Ubuntu 22.04 (bubblewrap 0.6).
+- A socket in a `/tmp` folder with more than 4000 entries was left reachable (the scan stopped
+  early). Every entry is read now.
 - awl's own temp files: the `AWL_SUMMARY` temp file is no longer written through a planted link;
   the Ctrl-G prompt and `/diff` output moved out of `/tmp`; `write` to a FIFO no longer hangs.
 

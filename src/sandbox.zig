@@ -296,22 +296,29 @@ fn scanSockets(a: *Args, dir: []const u8, depth: u8) void {
     const dfd: i32 = @intCast(dfd_rc);
     defer sys.close(dfd);
     var b: [4096]u8 align(8) = undefined;
-    var seen: usize = 0;
-    while (seen < 4000) {
+    // Every entry: stopping early would leave the sockets after that point reachable.
+    while (true) {
         const got = sys.check(linux.getdents64(dfd, &b, b.len)) catch return;
         if (got == 0) return;
         var off: usize = 0;
-        while (off < got) : (seen += 1) {
+        while (off < got) {
             const e: *align(1) linux.dirent64 = @ptrCast(&b[off]);
             const name = std.mem.sliceTo(@as([*:0]u8, @ptrCast(&b[off + @offsetOf(linux.dirent64, "name")])), 0);
             off += e.reclen;
             if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..") or std.mem.eql(u8, name, ".X11-unix") or std.mem.eql(u8, name, ".ICE-unix")) continue;
             var pb: [1024]u8 = undefined;
             const p = std.fmt.bufPrint(&pb, "{s}/{s}", .{ dir, name }) catch continue;
-            if (e.type == linux.DT.SOCK) {
+            var kind = e.type;
+            if (kind == linux.DT.UNKNOWN) { // a filesystem that does not say: ask (no link followed)
+                var st: linux.Statx = undefined;
+                var nb: [256]u8 = undefined;
+                if (linux.errno(linux.statx(dfd, sys.z(&nb, name), linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true }, &st)) == .SUCCESS)
+                    kind = if (linux.S.ISSOCK(st.mode)) linux.DT.SOCK else if (linux.S.ISDIR(st.mode)) linux.DT.DIR else linux.DT.REG;
+            }
+            if (kind == linux.DT.SOCK) {
                 if (kept(p)) continue;
                 a.addAll(&.{ "--ro-bind", "/dev/null", a.zs.z(p) });
-            } else if (e.type == linux.DT.DIR and depth > 0) scanSockets(a, p, depth - 1);
+            } else if (kind == linux.DT.DIR and depth > 0) scanSockets(a, p, depth - 1);
         }
     }
 }
