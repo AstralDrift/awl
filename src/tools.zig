@@ -1397,9 +1397,18 @@ fn spawn(argv: [*:null]const ?[*:0]const u8, timeout_ms: u64, out: *Buf, kind: K
     // Still running at the timeout: keep it as a background job (output so far now, the rest in the log) instead of
     // killing it and losing the work; a full job table or a command run without a log file is killed as before.
     const adopted = timed_out and adoptable and adoptJob(pid, p[0], log_fd, log_path, argv);
-    if ((timed_out and !adopted) or cancelled) _ = linux.kill(-pid, .KILL);
+    const kill_it = (timed_out and !adopted) or cancelled;
+    if (kill_it) {
+        // The group, and the process itself: a Ctrl-C that was already pending when the child
+        // was forked gets here before the child has made its own session, and a kill of a
+        // group that does not exist yet reaches nothing (awl then waited, frozen, for the
+        // command to end by itself).
+        _ = linux.kill(-pid, .KILL);
+        _ = linux.kill(pid, .KILL);
+    }
     var status: u32 = 0;
     if (!adopted) while (linux.errno(linux.wait4(pid, &status, 0, null)) == .INTR) {};
+    if (kill_it) _ = linux.kill(-pid, .KILL); // whatever joined the group in between
     if (log_fd >= 0) sys.close(log_fd);
     if (tn > 0) {
         if (dropped > 0) {

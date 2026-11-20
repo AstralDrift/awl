@@ -143,7 +143,11 @@ send("\x03")
 got = read_until("interrupted", 2)
 dt = (time.time() - t0) * 1000
 check(f"ctrl-c during stream ({dt:.0f} ms)", got and dt < 100, buf[-200:])
-check("prompt back", read_until("› ", 2), buf[-200:])
+# Idle is the terminal title without a mark, written when the turn is over. Not "› ": the busy
+# line draws that too, and a message typed while the cancelled turn was still ending joined
+# its queue and was never sent (this check then passed early and the next 18 failed).
+IDLE = "\x1b]2;%s · awl\x07" % os.path.basename(W)
+check("prompt back", read_until(IDLE, 4), buf[-200:])
 
 # Ctrl-C while a tool runs
 send("run it\r")
@@ -1404,5 +1408,101 @@ def prefix_diff_title():
 
 
 prefix_diff_title()
+
+
+def interrupts():
+    """Ctrl-C with the sandbox on: it ends the command even when it lands before the command's
+    process exists, and it leaves the session's background jobs running."""
+    if not os.path.exists("/usr/bin/bwrap"):
+        check("interrupts: needs bubblewrap", False, "no /usr/bin/bwrap")
+        return
+    d = tempfile.mkdtemp()
+    proj = os.path.join(d, "proj")
+    os.makedirs(proj)
+    subprocess.run(["git", "-C", proj, "init", "-q"], capture_output=True)
+    tag = "71%d" % os.getpid()
+    running = lambda n: subprocess.run(["pgrep", "-fc", "^sleep %s%s$" % (tag, n)], capture_output=True, text=True).stdout.strip()
+
+    def session(turns):
+        sp = os.path.join(d, "s.json")
+        json.dump(turns, open(sp, "w"))
+        srv = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_sse.py"), sp], stdout=subprocess.PIPE)
+        url = "http://127.0.0.1:" + srv.stdout.readline().decode().strip()
+        p9, f9 = pty.fork()
+        if p9 == 0:
+            os.chdir(proj)
+            os.execve(AWL, [AWL], dict(env, AWL_URL=url, AWL_MODE="auto", XDG_STATE_HOME=os.path.join(d, "state")))
+        fcntl.ioctl(f9, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        out = [b""]
+
+        def until(pat, t=5.0):
+            end = time.time() + t
+            while pat.encode() not in out[0] and time.time() < end:
+                if select.select([f9], [], [], 0.01)[0]:
+                    try:
+                        out[0] += os.read(f9, 65536)
+                    except OSError:
+                        break
+            return pat.encode() in out[0]
+
+        def close():
+            os.kill(p9, signal.SIGKILL)
+            os.waitpid(p9, 0)
+            os.close(f9)
+            srv.kill()
+            srv.stdout.close()
+        return f9, out, until, close
+
+    # 1. a background job survives Ctrl-C (the sandbox's holder once sat in the terminal's
+    # foreground group, so Ctrl-C ended it and everything running in the sandbox)
+    f9, out, until, close = session([
+        {"tool_calls": [{"name": "bash", "arguments": {"command": "sleep %s1" % tag, "background": True}},
+                        {"name": "bash", "arguments": {"command": "sleep %s2" % tag}}]},
+        {"content": "after cancel"}])
+    until("\u203a ")
+    os.write(f9, b"run it\r")
+    started = until("sleep %s2" % tag)
+    for _ in range(60):  # both are running before the key
+        if running(1) == "1" and running(2) == "1":
+            break
+        time.sleep(0.05)
+    started = started and running(1) == "1" and running(2) == "1"
+    out[0] = b""
+    os.write(f9, b"\x03")
+    got = until("interrupted", 4)
+    time.sleep(0.3)
+    check("Ctrl-C ends the command, not the background job", started and got and running(2) == "0" and running(1) == "1", (started, got, running(1), running(2), out[0][-200:]))
+    close()
+    time.sleep(0.3)
+    check("the background job ends with awl", running(1) == "0", running(1))
+
+    # 2. Ctrl-C the moment the tool line appears, about when the command's process is made.
+    # awl once killed the command's process group before the command had made it (the kill
+    # reached nothing) and then waited for the command to end, frozen: about 3 times in 100.
+    # 150 commands in one session; the last script turn repeats.
+    f9, out, until, close = session([{"tool_calls": [{"name": "bash", "arguments": {"command": "sleep %s3" % tag}}]}])
+    until("\u203a ")
+    lost = 0
+    for i in range(150):
+        out[0] = b""
+        os.write(f9, b"go\r")
+        if not until("sleep %s3" % tag, 4):
+            lost += 1
+            break
+        os.write(f9, b"\x03")
+        if not until("interrupted", 2):
+            lost += 1
+            break  # the session is stuck behind the command
+        out[0] = out[0][out[0].index(b"interrupted"):]
+        if not until("\x1b]2;proj \u00b7 awl\x07", 2):  # idle again: the title without a mark
+            lost += 1
+            break
+    time.sleep(0.2)
+    check("Ctrl-C as a command starts is never lost (150 in a row)", lost == 0 and running(3) == "0", "stopped at command %d; still running: %s; %r" % (i, running(3), out[0][-160:]))
+    close()
+    subprocess.run(["pkill", "-f", "^sleep %s3$" % tag])
+
+
+interrupts()
 print(f"tui: {'all passed' if not fails else f'{fails} failed'}")
 sys.exit(1 if fails else 0)

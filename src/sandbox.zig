@@ -353,11 +353,21 @@ pub fn ready() ?[]const u8 {
     const pid_rc = linux.fork();
     if (linux.errno(pid_rc) != .SUCCESS) return "fork failed";
     if (pid_rc == 0) {
+        // Its own session: Ctrl-C in the terminal signals the whole foreground group, and a
+        // SIGINT landing while bubblewrap sets up killed it and left awl waiting on its pipe.
+        _ = linux.setsid();
         const devnull = linux.open("/dev/null", .{ .ACCMODE = .RDWR }, 0);
         _ = linux.dup2(@intCast(devnull), 0);
         _ = linux.dup2(p[1], 1);
         _ = linux.dup2(p[1], 2);
         _ = linux.dup2(p[1], 100);
+        // dup2 onto itself changes nothing: had the pipe landed on 100 (awl started with many
+        // descriptors open), it would still be close-on-exec and bubblewrap would lose it.
+        _ = linux.fcntl(100, linux.F.SETFD, 0);
+        // A Ctrl-C between the fork and setsid above is pending here too: taken off, or it
+        // would end bubblewrap the moment signals are unblocked and the command would be told
+        // the sandbox cannot start. awl has the same Ctrl-C and cancels the turn.
+        sys.drainSignals();
         sys.unblockAll();
         const no_env = [_:null]?[*:0]const u8{};
         _ = linux.execve(bwrap, &a.v, &no_env);
@@ -369,7 +379,25 @@ pub fn ready() ?[]const u8 {
     // bwrap writes {"child-pid": N, ...}, then the holder says "ready"; or bwrap prints an error and exits.
     var b: [1024]u8 = undefined;
     var n: usize = 0;
-    while (n < b.len) {
+    // Never an open-ended wait: when bubblewrap's outer process dies during setup its inner
+    // one lives on holding this pipe, and no end of file comes. Its death ends the wait, and
+    // so does 20 s without "ready".
+    var waited_ms: u32 = 0;
+    var gone = false;
+    while (n < b.len and waited_ms < 20_000) {
+        var pf = [1]linux.pollfd{.{ .fd = p[0], .events = linux.POLL.IN, .revents = 0 }};
+        if ((sys.check(linux.poll(&pf, 1, if (gone) 0 else 50)) catch 0) == 0) {
+            if (gone) break; // dead, and nothing more it wrote is waiting
+            waited_ms += 50;
+            var st: u32 = 0;
+            const rc = linux.wait4(holder, &st, 1, null); // WNOHANG
+            if (linux.errno(rc) == .SUCCESS and rc == @as(usize, @intCast(holder))) {
+                _ = linux.kill(-holder, .KILL); // what it left behind (its own session, see above)
+                holder = 0;
+                gone = true;
+            }
+            continue;
+        }
         const r = sys.read(p[0], b[n..]) catch break;
         if (r == 0) break;
         n += r;
@@ -414,6 +442,7 @@ fn noNestedUserns() bool {
     const pid_rc = linux.fork();
     if (linux.errno(pid_rc) != .SUCCESS) return false;
     if (pid_rc == 0) {
+        _ = linux.setsid(); // out of the terminal's foreground group, as the holder is
         if (linux.errno(linux.setns(pidfd, linux.CLONE.NEWUSER | linux.CLONE.NEWNS)) != .SUCCESS) linux.exit_group(1);
         const fd = sys.open("/proc/sys/user/max_user_namespaces", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0) catch linux.exit_group(1);
         sys.writeAll(fd, "0") catch linux.exit_group(1);
@@ -431,6 +460,7 @@ pub fn stop() void {
     if (holder_out >= 0) sys.close(holder_out);
     holder_out = -1;
     if (holder != 0) {
+        _ = linux.kill(-holder, .KILL); // its session: an inner process that has not left it yet
         _ = linux.kill(holder, .KILL);
         var status: u32 = 0;
         _ = linux.wait4(holder, &status, 0, null);
