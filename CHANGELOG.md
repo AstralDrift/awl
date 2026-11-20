@@ -25,6 +25,15 @@ read-only. Unattended runs that relied on either need `AWL_MODE=auto`.
 - awl's own temp files: the `AWL_SUMMARY` temp file is no longer written through a planted link;
   the Ctrl-G prompt and `/diff` output moved out of `/tmp`; `write` to a FIFO no longer hangs.
 
+**Ctrl-C**
+- Ctrl-C no longer ends the session's background jobs: the sandbox's holder process sat in
+  the terminal's foreground group, so every Ctrl-C took the sandbox, and everything running in
+  it, down with it.
+- Ctrl-C pressed as a command starts is no longer lost. About 3 times in 100 awl killed the
+  command's process group before it existed, then waited for the command to end, frozen.
+- The sandbox's start can no longer hang awl: a bubblewrap that dies during setup ends the wait,
+  and so does 20 s. awl started with 97 or more descriptors open no longer breaks bubblewrap.
+
 **Tests**
 - No check can pass by skipping: missing bubblewrap fails the sandbox suite, and any skip fails
   under `CI=true`. `tests/nosandbox.sh` covers `AWL_SANDBOX=off` and a sandbox that cannot start.
