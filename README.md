@@ -188,6 +188,11 @@ end of its conversation. Wide terminals show the preview beside the list, narrow
   mode, for that call only. With no terminal (`awl -p`) the answer is no. `AWL_SANDBOX_NET=on` gives
   every command the network without asking. `AWL_NETWORK=off` refuses every such call without asking
   and overrides `AWL_SANDBOX_NET=on` (for sandboxes and CI where nobody should be asked).
+- **Credentials in tool output are withheld.** Before a tool result reaches the model, the screen or the
+  session file, awl replaces private key blocks, AWS key ids, GitHub tokens, `sk-` API keys, Slack tokens
+  and JWTs with `[REDACTED]` and tells the model and you how many it withheld; files keep the real values.
+  This holds for every `AWL_URL` (a localhost URL can be a proxy to a cloud model) and for a resumed
+  session written before. `AWL_REDACT=off` sends tool output as it is (work on credential-handling code).
 - write/edit follow the same write rule after resolving symlinks, and ask before every change to `.git`,
   `AGENTS.md` or `.agents/`; read refuses the hidden paths. Without `/usr/bin/bwrap` the model's commands
   are refused (install bubblewrap); `AWL_SANDBOX=off` turns all of it off. Your own `!cmd` is never
@@ -275,6 +280,7 @@ yet: macOS (awl is Linux only; run it in a Linux container or VM).
 | `AWL_SYSTEM` | built in | file with a replacement system prompt |
 | `AWL_AGENTS` | on | `off` loads no AGENTS.md files (clean evals and benchmarks) |
 | `AWL_SANDBOX` | on | `off`: the model's commands run unsandboxed (no bubblewrap: some containers). WSL2 runs the sandbox; WSL1 is not supported. See Safety |
+| `AWL_REDACT` | on | `off`: credentials in tool output go to the model and the session file as they are. See Safety |
 | `AWL_SANDBOX_NET` | off | `on`: every command gets the host network without asking |
 | `AWL_NETWORK` | unset | `off`: a command that asks for the network is refused without asking anyone, and `AWL_SANDBOX_NET=on` is ignored (CI, sandboxes) |
 | `AWL_SANDBOX_WRITE` | unset | `dir:dir`: more places commands may write (the project, `/tmp` and build caches always are) |

@@ -69,3 +69,5 @@ tests/sandbox.sh | ESCAPED-hardlink | a command cannot hard-link a file from out
 tests/sandbox.sh | a socket among 20000 files is still hidden | sockets under /tmp are hidden however full the folder is
 tests/sandbox.sh | more sockets than can be hidden | the sandbox refuses to start instead of starting with fewer masks
 tests/sandbox.sh | awl killed: its command and its background job die | background jobs never outlive awl
+tests/e2e.sh | credentials withheld from the model, the session and the view | credentials in tool output are withheld from the model and the session file
+tests/e2e.sh | a resumed session written before redaction does not send its keys | a resumed session written before is redacted too

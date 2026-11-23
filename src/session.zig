@@ -1,5 +1,6 @@
 //! Sessions: one JSON message per line in ~/.local/state/awl/sessions/<utc>.jsonl.
 const std = @import("std");
+const redact = @import("redact.zig");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
 const bufm = @import("buf.zig");
@@ -342,6 +343,8 @@ pub fn load(p: []const u8, comptime onMsg: fn ([]const u8, Rec) void) !usize {
         if (n == 0) break;
     }
     sys.close(f);
+    // a session written before redaction, or with AWL_REDACT=off: its keys stay on disk, not in the request
+    if (redact.on) mb.truncate(redact.scan(mb.items()).len);
     viewReset();
     var parser = Parser.init();
     defer parser.deinit();

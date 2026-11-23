@@ -44,6 +44,7 @@ const usage =
     \\     AWL_MODELS (Ctrl-P cycles) AWL_STATUS (model,ctx,mode,branch,dir,session,agents or off)
     \\     AWL_SANDBOX (off: no sandbox) AWL_SANDBOX_NET (on: every command gets the network) AWL_SANDBOX_WRITE=dir:dir
     \\     AWL_NETWORK (off: refuse commands that ask for the network, without asking anyone)
+    \\     AWL_REDACT (off: send credentials found in tool output to the model as they are)
     \\     AWL_SANDBOX_SOCKETS=path:path (sockets under /tmp that commands may still reach)
     \\     AWL_SUMMARY=FILE (with -p: write a JSON summary of the run there; docs/embedding.md)
     \\     AWL_THINK_BUDGET=N (SGLang --enable-strict-thinking: cap reasoning per reply)
@@ -273,6 +274,7 @@ fn gatewayKey(buf: []u8) ?[]const u8 {
 
 test {
     _ = @import("buf.zig");
+    _ = @import("redact.zig");
     _ = @import("http.zig");
     _ = @import("llm.zig");
     _ = @import("sys.zig");

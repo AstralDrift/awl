@@ -8,6 +8,7 @@ const http = @import("http.zig");
 const tools = @import("tools.zig");
 const sandbox = @import("sandbox.zig");
 const ui = @import("ui.zig");
+const redact = @import("redact.zig");
 const session = @import("session.zig");
 const skills = @import("skills.zig");
 const undo = @import("undo.zig");
@@ -46,6 +47,7 @@ pub fn init(cwd: []const u8) void {
     // Reasoning level. Default medium, as pi sends: Local AI's Qwen defaults to xhigh,
     // which wrote about twice the tokens per turn for the same work. AWL_REASONING=off
     // sends nothing; a server that rejects the field gets the request again without it.
+    redact.on = !std.mem.eql(u8, sys.getenv("AWL_REDACT") orelse "", "off");
     const mode = sys.getenv("AWL_CTX_MODE") orelse "fresh";
     ctx_mode = if (std.mem.eql(u8, mode, "compact")) .compact else .fresh;
     session.view_on = ctx_mode != .compact; // compact never points the model at the session
@@ -476,6 +478,11 @@ pub fn run() Outcome {
         for (turn.calls[0..turn.n], 0..) |*c, i| {
             out.reset();
             const r = tools.run(c.name.get(), c.args.items(), &out) catch {
+                const int_mark = "[interrupted by user]";
+                const was = std.mem.endsWith(u8, out.items(), int_mark);
+                if (was) out.truncate(out.len - int_mark.len);
+                withhold(&out); // its note goes before the marker, which stays last
+                if (was) out.add(int_mark);
                 // the model gets the "[interrupted by user]" marker; the screen says it once, below
                 const o = out.items();
                 const shown = std.mem.trimEnd(u8, if (std.mem.endsWith(u8, o, "[interrupted by user]")) o[0 .. o.len - 21] else o, "\n");
@@ -485,6 +492,7 @@ pub fn run() Outcome {
                 ui.note("interrupted", .{});
                 return .cancelled;
             };
+            withhold(&out);
             ui.toolOutput(out.items(), r.ok);
             repeats.note(c.name.get(), c.args.items(), &out);
             if (turn.overflow and i + 1 == turn.n) out.add(overflow_note);
@@ -1102,6 +1110,21 @@ fn pushAssistant(step: usize) void {
     m.byte('}');
     push(&m, .{ .role = "assistant", .text = turn.content.items(), .calls = calls[0..turn.n] });
     dropOldReasoning();
+}
+
+/// Credentials in a tool result are replaced before the model, the screen, the session file and its
+/// view see them (redact.zig); the model and the user are told what was withheld. Also the user's
+/// `!cmd` output and `@path` files (tui.zig): they go to the model too.
+pub fn withhold(o: *Buf) void {
+    if (!redact.on) return;
+    const r = redact.scan(o.items());
+    if (r.hits == 0) return;
+    o.truncate(r.len);
+    var nb: [128]u8 = undefined;
+    const names = redact.names(r.kinds, &nb);
+    const s = if (r.hits == 1) "" else "s";
+    o.print("\n[awl withheld {d} credential{s} ({s}) from this output; each shows as " ++ redact.marker ++ ". The real values are unchanged on disk: never write " ++ redact.marker ++ " back into a file.]", .{ r.hits, s, names });
+    ui.note("withheld {d} credential{s} ({s}) from the model; AWL_REDACT=off sends them", .{ r.hits, s, names });
 }
 
 /// Arguments that are not a JSON object (a call cut off by the output cap) go back as {}: chat templates
