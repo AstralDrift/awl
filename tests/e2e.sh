@@ -788,6 +788,93 @@ assert len(listing) == 1 and listing[0].startswith("view-"), listing  # nothing 
 EOF
 stop
 
+# 8f. credentials in tool output (issue 43): withheld from the model, the session file and the view on
+# every endpoint (a localhost AWL_URL can be a proxy to a cloud model: arena/awl-or.sh). The shapes are
+# put together here, never committed whole (secret scanners would flag this file).
+mkdir -p "$W/sec"
+python3 - "$W/sec" <<'EOF'
+import json, sys
+d = sys.argv[1]
+b64 = "MIIEowIBAAKCAQEA" + "q7Bz" * 40
+keys = {
+    "pem": "-----BEGIN RSA " + "PRIVATE KEY-----\n" + "\n".join([b64[i:i + 64] for i in range(0, len(b64), 64)]) + "\n-----END RSA " + "PRIVATE KEY-----",
+    "aws": "AK" + "IA" + "Z3QX7M2LPNW4RTY6",
+    "ghp": "gh" + "p_" + "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z5A",
+    "ghpat": "github" + "_pat_" + "11ABCDEFG0" + "x" * 12 + "_" + "Yz9" * 20,
+    "sk": "sk" + "-proj-" + "Q7d9KfL2mN4pR6sT8vW0xY2zA4bC6eG8hJ0k",
+    "slack": "xo" + "xb-" + "2741063" + "-48261957" + "-Zq9VbN3mK7wR",
+    "jwt": "ey" + "JhbGciOiJIUzI1NiJ9" + ".ey" + "JzdWIiOiIxMjM0NTY3ODkwIn0" + ".dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+}
+safe = [
+    "sha256 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "uuid 123e4567-e89b-12d3-a456-426614174000",
+    "blob aGVsbG8gd29ybGQgdGhpcyBpcyBhIGJhc2U2NCB0ZXN0IGZpeHR1cmU=",
+    "words task-runner-configuration-for-the-whole-build disk-usage-report-of-the-cluster",
+    "pkg sk-learn-model-selection-and-cross-validation",
+    "key AKIA_IS_NOT_A_KEY and -----BEGIN CERTIFICATE----- stays",
+]
+open(d + "/creds.txt", "w").write("\n".join(f"{k}={v}" for k, v in keys.items()) + "\n" + "\n".join(safe) + "\n")
+json.dump(keys, open(d + "/keys.json", "w"))
+json.dump(safe, open(d + "/safe.json", "w"))
+# a session written before awl redacted: resuming it must not send the key either
+r = {"role": "tool", "tool_call_id": "c0", "content": "AWS=" + keys["aws"] + "\n" + keys["pem"] + "\n"}
+with open(d + "/old.jsonl", "w") as f:
+    f.write(json.dumps({"awl": 1}) + "\n")
+    f.write(json.dumps({"role": "user", "content": "show the env"}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": "", "tool_calls": [{"id": "c0", "type": "function", "function": {"name": "bash", "arguments": "{\"command\":\"cat .env\"}"}}]}) + "\n")
+    f.write(json.dumps(r) + "\n")
+EOF
+sec_script() { # $1: the run's state folder (this run's view is the one file there commands can read)
+  cat >"$W/sec.json" <<EOF
+[{"tool_calls":[{"name":"read","arguments":{"path":"creds.txt"}},{"name":"bash","arguments":{"command":"cat creds.txt"}}]},
+ {"tool_calls":[{"name":"bash","arguments":{"command":"cat $1/awl/sessions/view-*.txt"}}]},
+ {"content":"done"}]
+EOF
+}
+check_secrets() { # $1: request log, $2: session folder, $3: "withheld" or "sent"
+  python3 - "$1" "$2" "$W/sec" "$3" <<'EOF'
+import glob, json, sys
+log, sessions, d, want = sys.argv[1:]
+keys, safe = json.load(open(d + "/keys.json")), json.load(open(d + "/safe.json"))
+sent = open(log).read().encode().decode("unicode_escape")  # JSON escapes undone: a PEM's \n is a newline again
+stored = "".join(open(f).read().encode().decode("unicode_escape") for f in glob.glob(sessions + "/*.jsonl"))
+for k, v in keys.items():
+    body = v.split("\n")[1] if k == "pem" else v  # a PEM is found by a line of its body
+    for where, text in (("request", sent), ("session", stored)):
+        assert (body in text) == (want == "sent"), (k, where, want)
+for s in safe:
+    assert s in sent, ("false positive", s)
+reqs = [json.loads(l) for l in open(log)]
+if want == "withheld":
+    first = [m for m in reqs[1]["messages"] if m["role"] == "tool"]
+    assert all("[REDACTED]" in m["content"] and "withheld" in m["content"] for m in first), first
+    view = [m for m in reqs[2]["messages"] if m["role"] == "tool"][-1]["content"]
+    assert "[REDACTED]" in view and keys["aws"] not in view, view[:400]
+EOF
+}
+sec_script "$W/sec-a"
+serve "$W/sec.json"
+out=$(cd "$W/sec" && XDG_STATE_HOME=$W/sec-a "$AWL" -p "show creds" 2>"$W/sec-err")
+check_secrets "$LOG" "$W/sec-a/awl/sessions" withheld && grep -q "withheld 7 credentials" "$W/sec-err" \
+  && ok "credentials withheld from the model, the session and the view; look-alikes pass" || bad "credentials withheld" "$out $(tail -3 "$W/sec-err")"
+stop
+sec_script "$W/sec-b"
+serve "$W/sec.json"
+out=$(cd "$W/sec" && XDG_STATE_HOME=$W/sec-b AWL_REDACT=off "$AWL" -p "show creds" 2>"$W/sec-err")
+check_secrets "$LOG" "$W/sec-b/awl/sessions" sent && ok "AWL_REDACT=off sends tool output as is" || bad "AWL_REDACT=off" "$out $(tail -3 "$W/sec-err")"
+stop
+echo '[{"content":"resumed"}]' >"$W/sec-r.json"
+serve "$W/sec-r.json"
+out=$(cd "$W/sec" && XDG_STATE_HOME=$W/sec-c "$AWL" -r "$W/sec/old.jsonl" -p again 2>"$W/sec-err")
+python3 - "$LOG" "$W/sec" <<'EOF' && ok "a resumed session written before redaction does not send its keys" || bad "resume redaction" "$out $(tail -3 "$W/sec-err")"
+import json, sys
+keys = json.load(open(sys.argv[2] + "/keys.json"))
+sent = open(sys.argv[1]).read()
+assert keys["aws"] not in sent and keys["pem"].split("\n")[1] not in sent, sent[:600]
+assert json.loads(sent.splitlines()[0])["messages"][3]["content"].startswith("AWS=[REDACTED]")
+EOF
+stop
+
 # 9. interactive TUI through a pty
 python3 "$HERE/tui.py" "$AWL" >"$W/tui.out" 2>&1 && ok "tui ($(grep -c '^ok' "$W/tui.out") checks)" || bad "tui" "$(grep FAIL "$W/tui.out")"
 

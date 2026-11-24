@@ -174,7 +174,9 @@ unknown. `AWL_CTX_MODE=compact` leaves it out.
 
 Notes awl adds at the end of a result, each on its own line, for the model's sake:
 `[awl: you have made this exact call N times …]`, `[awl stopped your reply here: at most 16 tool calls
-run per reply …]`, and `[awl: N steps are left in this run. …]`.
+run per reply …]`, `[awl: N steps are left in this run. …]`, and
+`[awl withheld N credentials (KINDS) from this output; …]` when credentials in the output were replaced
+with `[REDACTED]` (the session file holds the redacted result too; `AWL_REDACT=off` turns it off).
 
 A call that did not run has one of these results instead. Each opening is stable:
 

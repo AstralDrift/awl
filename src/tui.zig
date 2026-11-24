@@ -895,6 +895,7 @@ fn shell(cmd: []const u8) void {
     defer o.free();
     ui.tool("!", c);
     const ok = tools.userShell(zb.items()[0..c.len :0], &o) catch false;
+    agent.withhold(&o);
     ui.toolOutput(o.items(), ok);
     if (agent.pending_note.len > 0) agent.pending_note.add("\n");
     agent.pending_note.print("[The user ran `{s}` in the shell:\n{s}\n]", .{ c, std.mem.trimEnd(u8, o.items()[0..@min(o.len, 16 << 10)], "\n") });
@@ -913,7 +914,12 @@ fn attach(text: []const u8, msg: *Buf) void {
             ui.note("@{s}: too large or binary to attach; the model can read it", .{w});
             continue;
         }
-        msg.print("\n\n<file path=\"{s}\">\n{s}{s}</file>", .{ w, body, if (body.len > 0 and body[body.len - 1] != '\n') "\n" else "" });
+        var kept = Buf.init(body.len + 512);
+        defer kept.free();
+        kept.add(body);
+        agent.withhold(&kept);
+        const k = kept.items();
+        msg.print("\n\n<file path=\"{s}\">\n{s}{s}</file>", .{ w, k, if (k.len > 0 and k[k.len - 1] != '\n') "\n" else "" });
         tools.files_read.note(w);
         ui.note("attached {s} ({d} lines)", .{ w, std.mem.count(u8, body, "\n") });
         n += 1;
